@@ -317,4 +317,78 @@ Copy Grafyn's pattern from `frontend/src-tauri/src/services/settings.rs`:
 
 ---
 
+## 2026-04-11: Per-monitor overlays instead of virtual-desktop-spanning (Qt "islands-of-screens" gotcha)
+
+**Context:** CLAUDE.md Rules section originally specified that `overlay.py` should create one `QWidget` covering the full Windows virtual desktop `(virtual_left, virtual_top, virtual_width, virtual_height)`. This was written before the Step 3 research pass.
+
+**Decision:** Create **one `QWidget` overlay per physical monitor** by iterating `QGuiApplication.screens()`. Each overlay covers only its own screen's `geometry()` in DIP coords. Claude's returned coordinates get routed to whichever screen was the capture target via `screen_for_monitor()` — a metadata match against `CaptureResult.monitor`'s physical bounds.
+
+**Alternatives considered:**
+1. **Virtual-desktop-spanning overlay** (original CLAUDE.md wording). Pros: simpler code (~30-50 fewer LOC), works fine on single-monitor. Cons: Qt 6's High DPI docs explicitly warn about "islands-of-screens" geometry on mixed-DPI Windows — coordinates near monitor boundaries land in gaps. Silent failure mode.
+2. **Per-monitor overlays** (chosen). Pros: works on any monitor setup regardless of DPI, matches reference implementations (danpeg/clicky, OBS Studio, Ammad-Younas/Screen_Annotation), no gap bugs. Cons: ~30-50 extra LOC for the controller loop and screen-metadata lookup.
+3. **Single overlay on primary + fall back to per-monitor on multi-monitor detection**. Pros: simpler common case. Cons: branching logic, two code paths to test, no real benefit — per-monitor collapses to "one overlay" on single-monitor anyway.
+
+**Why this won:** Qt 6 official docs ([doc.qt.io/qt-6/highdpi.html](https://doc.qt.io/qt-6/highdpi.html)) verbatim: *"Application code should not assume that a position immediately adjacent to and outside one screen is a valid position on the neighboring screen."* Mixed-DPI is the default state on modern Windows 11 setups (laptop at 200% + external monitor at 100% is a common configuration — e.g., when presenting a demo with Windows+P Extend mode). The gap bug silently produces wrong coordinates — worst possible failure mode for a screen-aware AI whose entire UX is visual pointing. Pre-emptively fixing it costs 30-50 LOC; not fixing it costs a failed demo in front of real users.
+
+**Consequences:**
+- `overlay.py` has an `OverlayController` class managing `list[OverlayWindow]`, created via `QGuiApplication.screens()` iteration at app startup
+- Routing via `screen_for_monitor(monitor, screens)` metadata match, then `physical_to_local_logical(x, y, screen)` coordinate conversion
+- Each `OverlayWindow` operates entirely in its own screen's local DIP coordinate space — no global virtual-desktop coords
+- Per-screen `devicePixelRatio()` (never cached globally — mixed-DPI setups have different ratios per screen)
+- Manual verification on single-monitor only in Phase 1 (user's 2880×1800 @ 200% DPI machine); real multi-monitor spanning verified in Phase 2 when user plugs in an external display
+- CLAUDE.md Rules section updated in the same commit to match (no contradictions between docs)
+- PyQt6 dependency injection in `OverlayController` (overlay_factory + screens params) enables unit testing without a real `QApplication`
+
+**References:**
+- Qt 6 High DPI documentation: https://doc.qt.io/qt-6/highdpi.html
+- Microsoft Win32 Extended Window Styles: https://learn.microsoft.com/en-us/windows/win32/winmsg/extended-window-styles
+- [Ammad-Younas/Screen_Annotation](https://github.com/Ammad-Younas/Screen_Annotation) PyQt6 reference implementation
+- [PythonOverlayLib](https://pypi.org/project/PythonOverlayLib/) PyQt5 reference (exact Win32 flag recipe)
+- `farzaa/clicky` upstream `ElementLocationDetector.swift` (per-monitor macOS pattern via `NSScreen.screens`)
+- Explore agent research pass during Step 3 brainstorm this session
+- docs/superpowers/plans/2026-04-11-overlay.md (full Step 3 design + Boris #5 self-critique)
+
+---
+
+## 2026-04-11: Boris Chenry #5 "Verification Before Done" applied to Step 3 as a pre-commit review gate
+
+**Context:** After Step 3 `overlay.py` functional implementation was complete (12/12 unit tests green, manual 5-point verification confirmed working on user's 2880×1800 @ 200% DPI machine), the user pointed at [Boris Chenry's CLAUDE.md tips](file:///C:/Users/Abhis/OneDrive/Documents/Maritime%20Project/Claude%20Code%20TIPS/Boris%20Chenry%20TIPS/CLAUDE%20MD.jpeg) — specifically #5 "Verification Before Done": *"Never mark complete without proving it works. Diff behavior, explain the elegant solution. Ask 'would a staff engineer ship this?' Skip the obvious fixes. Challenge your own work before presenting it."*
+
+**Decision:** Apply Boris's #5 as a **mandatory self-critique pass** before every commit going forward. Not just for high-risk components — for every non-trivial feature commit. The pass must produce a concrete list of items that would get flagged in code review, tiered into do-now / defer / never categories, with the user approving the tier before the commit lands.
+
+**Alternatives considered:**
+1. **Ship when tests pass** (original flow). Pros: fastest. Cons: tests-pass doesn't mean staff-engineer-ship. Misses silent failure modes (items 3 and 4 from the Step 3 critique would've shipped unfixed).
+2. **Boris #5 pass for high-risk components only.** Pros: targeted. Cons: defining "high-risk" after the fact is subjective; most bugs ship in code I thought was low-risk.
+3. **Boris #5 pass for every non-trivial feature commit** (chosen). Pros: catches real issues consistently; takes ~10-15 min per commit; forces honest self-assessment. Cons: adds process step.
+
+**Why this won:** The Step 3 Boris pass caught **2 real issues** in code that passed 12 unit tests:
+- `apply_clickthrough_styles` silently swallowed Win32 failures (return code ignored). Silent click-through break with zero diagnostic signal.
+- `hide_for_capture()` / `show_after_capture()` had no test coverage despite being the screenshot-integrity invariant (if they ever fail, Claude sees our pointer in its own screenshot, creating an infinite feedback loop).
+
+Both would have shipped unfixed without the pass. Both are exactly the kind of "tests pass but broken in production" bug that makes users ragequit a demo.
+
+**What the pass looks like in practice:**
+1. After all unit tests pass AND manual verification passes, BEFORE staging files for commit
+2. Open the changed files and read them with fresh eyes
+3. List every item a staff engineer would flag in code review (style, types, coverage, error handling, naming, comments)
+4. Tier into: Tier 1 (do now, worth the time), Tier 2 (defer to Phase 2 cleanup), Tier 3 (user noticed but answer stands)
+5. Present tiered list to user via AskUserQuestion
+6. User picks scope (all Tier 1 / critical only / ship as-is)
+7. Apply the chosen cleanup, re-run tests, relaunch manual verification if applicable
+8. Commit with body noting "Boris #5 Tier N cleanup applied pre-commit per staff-engineer-ship review"
+
+**Consequences:**
+- Every non-trivial feature commit gets ~10-15 extra minutes of self-review + cleanup time
+- Commit messages note which Boris tier was applied
+- Over time, fewer silent failure modes ship in Phase 1 → Phase 2 hardening passes are easier
+- User retains veto power (can always "ship as-is" if the issues are minor)
+- The process does NOT apply to pure documentation changes, trivial typo fixes, or revert commits
+
+**References:**
+- Boris Chenry's CLAUDE.md tips image at `C:\Users\Abhis\OneDrive\Documents\Maritime Project\Claude Code TIPS\Boris Chenry TIPS\CLAUDE MD.jpeg`
+- Step 3 `overlay.py` Boris #5 self-critique in `docs/superpowers/plans/2026-04-11-overlay.md`
+- `feedback_ceremony_vs_lean.md` memory file (complementary rule for when to invoke Superpowers ceremony at all)
+
+---
+
 <!-- Append new decisions below this line. NEVER delete old entries. Format: ## YYYY-MM-DD: Short title → Context → Decision → Alternatives → Why → Consequences → References -->
