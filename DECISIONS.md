@@ -609,9 +609,10 @@ User caught this during review on 2026-04-12 evening. Rather than assume the fix
 - PR #16 (configurable hotkey UI) becomes even more valuable as a Phase 2 item now that we have three hotkey history points to show in the writeup: the Alt+Space attempt that failed globally, the Ctrl+Shift+Space attempt that failed in Excel, and the Ctrl+Alt+Space pragmatic ship.
 - Phase 1.5 writeup angle: we literally ran into the Alt+Space battleground the same way Flow Launcher, Launchy, and PowerToys Run did, documented it, and shipped Ctrl+Alt+Space while building toward the "proper" `RegisterHotKey` + manual-Windows-settings-disable solution. Genuine build-in-public material for the B0 case study.
 
-**Known minor conflicts that are acceptable:**
+**Known conflict (surfaced 2026-04-12 evening during the hotkey manual gate):**
 
-- None verified. Ctrl+Alt+Space tests clean against Excel, Sheets, VS Code, Notepad, Windows window menu, and Copilot. Manual gate (`py -3.13 -m hotkey`) includes explicit Excel + Notepad verification as item #4 of the 6-item checklist.
+- **Claude Desktop for Windows binds Ctrl+Alt+Space to its "What can I help you with today?" quick-access prompt.** Discovered when the user ran `py -3.13 -m hotkey` with Claude Desktop installed — pynput PRESSED/RELEASED fired correctly (7 clean cycles), AND Claude Desktop's prompt overlay appeared at the same time. Our `suppress=False` listener is observe-only so both apps receive the keypress. **Phase 1 mitigation:** require users to disable Claude Desktop's global hotkey in its settings (`Claude Desktop Settings > Keyboard Shortcuts > Ctrl+Alt+Space = None` or reassigned). This is the same setup pattern Raycast + Flow Launcher + PowerToys Run require their users to follow for the Alt+Space / Windows menu / Copilot conflicts. Phase 1 has ONE tester (Abhishek) so a one-time Settings tweak is acceptable. Phase 2's configurable-hotkey UI (PR #16) lets users rebind without touching either app. Phase 1.5's Win32 `RegisterHotKey` subclass (deferred) would suppress the combo globally at the OS level, eliminating the conflict entirely.
+- **No other conflicts verified.** Ctrl+Alt+Space tests clean against Excel, Sheets, VS Code, Notepad, Windows window menu, and Copilot. Manual gate (`py -3.13 -m hotkey`) includes explicit Excel + Notepad verification as item #4 of the 6-item checklist.
 
 **References:**
 

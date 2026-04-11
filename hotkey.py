@@ -31,11 +31,24 @@ Why Ctrl+Alt+Space and not Alt+Space, Ctrl+Shift+Space, or Fn+Space:
   be used by AHK, as the key is intercepted and interpreted directly by the
   PC's BIOS."* Non-portable even where it happens to work.
 - **Ctrl+Alt+Space** (chosen): 10-minute pivot from Ctrl+Shift+Space, zero
-  known conflicts (Excel, Sheets, Windows window menu, Copilot, VS Code all
-  clear), reuses the existing pynput suppress=False model. Three-finger combo
-  but all on the left side of the keyboard for one-handed ergonomics. VS Code
-  binds Ctrl+Shift+Space to "Trigger Parameter Hints" — that was a minor
-  conflict with the previous pivot but is NOT a conflict with Ctrl+Alt+Space.
+  known code-level conflicts (Excel, Sheets, Windows window menu, Copilot,
+  VS Code all clear), reuses the existing pynput suppress=False model.
+  Three-finger combo but all on the left side of the keyboard for one-handed
+  ergonomics. VS Code binds Ctrl+Shift+Space to "Trigger Parameter Hints" —
+  that was a minor conflict with the previous pivot but is NOT a conflict
+  with Ctrl+Alt+Space.
+
+  **Known setup requirement (surfaced 2026-04-12 evening manual gate):**
+  Claude Desktop for Windows binds Ctrl+Alt+Space to its "What can I help
+  you with today?" quick-access prompt. Because our listener is observe-
+  only, both apps receive the keypress. Phase 1 users with Claude Desktop
+  installed must disable the Claude Desktop binding in its Settings
+  (Keyboard Shortcuts > Ctrl+Alt+Space > None / reassign) — same pattern
+  Raycast / Flow Launcher / PowerToys Run users follow for the Alt+Space /
+  Windows menu / Copilot conflicts. Phase 2's configurable-hotkey UI
+  eliminates this by letting users pick any combo. Phase 1.5's Win32
+  RegisterHotKey subclass (deferred) suppresses the combo at the OS level,
+  eliminating the conflict entirely.
 
 `suppress=False` is DELIBERATE and load-bearing: pynput's suppress flag is
 global all-or-nothing. Setting it to True would install a `WH_KEYBOARD_LL`

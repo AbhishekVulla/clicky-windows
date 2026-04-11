@@ -77,10 +77,20 @@ HOTKEY: str = os.getenv("HOTKEY", "ctrl+alt+space")
      OS) and invisible to WH_KEYBOARD_LL + pynput. Non-portable even
      where it happens to work. AutoHotkey docs: "the Fn key does not
      (as a general rule) generate any scan code that can be used."
-  4. Ctrl+Alt+Space has no known conflicts (Excel, Sheets, Windows menu,
-     Copilot, VS Code all clear). Three-finger but all on the left side
-     of the keyboard for one-handed ergonomics. suppress=False observe-
-     only model carries over unchanged.
+  4. Ctrl+Alt+Space has no known code-level conflicts (Excel, Sheets,
+     Windows menu, Copilot, VS Code all clear). Three-finger but all on
+     the left side of the keyboard for one-handed ergonomics. suppress=
+     False observe-only model carries over unchanged.
+
+  KNOWN SETUP REQUIREMENT: if you have Claude Desktop for Windows
+  installed, disable its Ctrl+Alt+Space binding in Claude Desktop
+  Settings > Keyboard Shortcuts (same pattern Raycast / Flow Launcher
+  users follow for Alt+Space). Clicky's listener is observe-only so
+  both apps receive the keypress otherwise, and Claude Desktop's
+  quick-access prompt will pop every time you invoke Clicky. See
+  DECISIONS.md 2026-04-12 (evening) entry for the full rationale +
+  the Phase 1.5 Win32 RegisterHotKey solution that eliminates the
+  conflict at the OS level.
 
 NEVER ctrl+space (VS Code IntelliSense conflict -- still rejected).
 

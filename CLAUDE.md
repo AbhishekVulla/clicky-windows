@@ -98,7 +98,7 @@ Clicky Windows/
 ├── overlay.py          ← PyQt6 + Win32 layered window transparent click-through
 ├── stt.py              ← STT abstract + FasterWhisperSTT
 ├── tts.py              ← TTS abstract + Pyttsx3TTS
-├── hotkey.py           ← pynput Ctrl+Alt+Space push-to-talk (suppress=True)
+├── hotkey.py           ← pynput Ctrl+Alt+Space push-to-talk (suppress=False, observe-only; disable Claude Desktop's Ctrl+Alt+Space binding if installed — see DECISIONS.md 2026-04-12 evening)
 ├── memory.py           ← Karpathy markdown (~/.clicky-windows/memory/<app>.md) + SQLite index
 ├── config.py           ← env loading + constants (HOTKEY, WHISPER_MODEL, CANDIDATE_RESOLUTIONS, MODEL_ID, COMPUTER_USE_BETA)
 ├── requirements.txt    ← dependencies
