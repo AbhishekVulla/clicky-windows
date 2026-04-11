@@ -10,7 +10,7 @@ This doc answers **what** and **why**. For **how** see [CLAUDE.md](CLAUDE.md). F
 
 ## Problem Statement
 
-**Non-technical Windows users learning unfamiliar software are stuck reading static help pages while trying to act on them.** The current failure mode: open a new app (Excel, Photoshop, Blender, a game, an accounting package), get lost, Google the problem, read a written tutorial in one window, try to follow along in another window, lose your place, ask ChatGPT, paste screenshots, get generic instructions that don't match what's actually on your screen right now. This loop is the default experience for ~76% of desktop users (Windows' market share) and has no polished solution.
+**Non-technical Windows users learning unfamiliar software are stuck reading static help pages while trying to act on them.** Farza Majeed, creator of the macOS original Clicky that inspired this project, put the user mentality in [his LinkedIn demo post](https://www.linkedin.com/posts/farza-majeed-76685612a_i-built-this-thing-called-clicky-its-an-ugcPost-7447137596067188737-7zJK) more clearly than any abstraction: *"I've been procrastinating learning for a long time because I don't want to watch 1 hour YouTube video about it — I just want to learn by doing."* The current failure mode: open a new app (Excel, Photoshop, Blender, a game, an accounting package), get lost, Google the problem, read a written tutorial in one window, try to follow along in another, lose your place, ask ChatGPT, paste screenshots, get generic instructions that don't match what's actually on your screen right now. This loop is the default experience for ~76% of desktop users (Windows' market share) and has no polished solution.
 
 **Evidence this is a real problem, not a speculation:**
 - Farza Majeed built [Clicky](https://github.com/farzaa/clicky) (macOS) to learn DaVinci Resolve. 3,500 stars, 609 forks, viral on X/LinkedIn in days.
@@ -33,10 +33,10 @@ This doc answers **what** and **why**. For **how** see [CLAUDE.md](CLAUDE.md). F
 
 ## What Clicky Windows IS
 
-1. **A screen-aware AI buddy you hold a hotkey to talk to.** Press and hold Ctrl+Shift+Space, speak a question, release. Clicky captures your screen, sends it to Claude, and responds with voice while a transparent cursor animates on your screen pointing at the thing you were asking about.
+1. **An AI teacher that lives as a buddy next to your cursor** (design inspired by [farzaa/clicky](https://github.com/farzaa/clicky)'s macOS original). Press and hold Ctrl+Alt+Space, speak a question, release. Clicky captures your screen, asks Claude, and responds with voice while a transparent blue pointer animates to the exact UI element you should click next. **You click it yourself — Clicky never takes control of your mouse.** The "learn by doing" UX promise is: point and explain, you act, conversational back-and-forth, build skill through use rather than tutorial-watching.
 2. **Persistent memory** — one Markdown file per Windows app in `~/.clicky-windows/memory/<app>.md`. Every interaction appended. Next time you open that app, Clicky recalls what you asked last time and adapts ("I see you're back in Photoshop — last time you were working with the pen tool, need more help with that?").
 3. **Windows-native.** Multi-monitor. Mixed DPI. Per-monitor v2 DPI awareness. Win32 layered window flags for true click-through (clicks pass through to the app underneath).
-4. **Latency-first, feels like a buddy next to you.** The whole UX promise is sub-second perceived response: press Ctrl+Shift+Space, speak, release, and the buddy is already responding before you've even dropped your hand. This drives every Phase 1 stack choice — AssemblyAI `u3-rt-pro` streaming STT with `ForceEndpoint` on hotkey release (~150ms P50 final transcript), Claude Sonnet 4.6 with response streaming, Cartesia Sonic-3 WebSocket TTS (~200ms first audible word), sentence-level TTS chunking overlapping Claude generation. Target end-to-end perceived latency: ~800-1200ms from hotkey release to first spoken word. Privacy is NOT a Phase 1 acceptance criterion — your screenshot + transcript + memory are sent to Anthropic regardless of STT/TTS backend. Phase 2 adds opt-in local subclasses (`FasterWhisperSTT`, `Pyttsx3TTS`) for users who want an offline mode. See [DECISIONS.md § "Priority inversion: latency over local-first" (2026-04-11 session 3)](DECISIONS.md) for the full rationale and why the original "local-first" framing was phantom scope.
+4. **Latency-first, feels like a buddy next to you.** The whole UX promise is sub-second perceived response: press Ctrl+Alt+Space, speak, release, and the buddy is already responding before you've even dropped your hand. This drives every Phase 1 stack choice — AssemblyAI `u3-rt-pro` streaming STT with `ForceEndpoint` on hotkey release (~150ms P50 final transcript), Claude Sonnet 4.6 with response streaming, Cartesia Sonic-3 WebSocket TTS (~200ms first audible word), sentence-level TTS chunking overlapping Claude generation. Target end-to-end perceived latency: ~800-1200ms from hotkey release to first spoken word. Privacy is NOT a Phase 1 acceptance criterion — your screenshot + transcript + memory are sent to Anthropic regardless of STT/TTS backend. Phase 2 adds opt-in local subclasses (`FasterWhisperSTT`, `Pyttsx3TTS`) for users who want an offline mode. See [DECISIONS.md § "Priority inversion: latency over local-first" (2026-04-11 session 3)](DECISIONS.md) for the full rationale and why the original "local-first" framing was phantom scope.
 5. **Transparent about what it remembers.** You can `cat ~/.clicky-windows/memory/EXCEL.EXE.md` any time and read exactly what Clicky has stored about your Excel interactions. No black-box embeddings, no mystery vector DB. Markdown files a human can audit.
 
 ## What Clicky Windows IS NOT
@@ -49,11 +49,12 @@ This doc answers **what** and **why**. For **how** see [CLAUDE.md](CLAUDE.md). F
 6. **Not a productivity dashboard.** It doesn't track your time, doesn't index your apps, doesn't generate reports.
 7. **Not cloud-based.** No account system, no team features, no SaaS pricing. Runs 100% on your machine with BYOK (bring your own Anthropic API key in `.env`).
 8. **Not a Tauri/Rust/Vue app in Phase 1.** Python + PyQt6, like Wallee. Phase 3 may revisit if Python hits a wall, but it's not pre-committed.
+9. **Not an autonomous agent. Clicky never takes control of your mouse or keyboard.** We use Claude Computer Use API beta for its **pixel-accurate coordinate extraction**, not its computer-control capability. When Claude returns a `tool_use` block with `{"action":"left_click","coordinate":[x,y]}`, we read the coordinate and animate our transparent overlay to point at it — we never call `pyautogui.click()` or simulate a keystroke. The user always physically clicks themselves. This is a product boundary locked on 2026-04-12 after a user clarification pass: the same as how Farza's original Clicky works on macOS, by design. If you want autonomous computer control, use Claude Cowork or Grunty — those are different tools for a different job. Clicky points and explains; you act.
 
 ## Core Loop
 
 ```
-1. User holds Ctrl+Shift+Space (push-to-talk) while speaking a question
+1. User holds Ctrl+Alt+Space (push-to-talk) while speaking a question
 2. On key release:
    a. AssemblyAI streaming WebSocket receives `ForceEndpoint` message; final transcript arrives ~150ms P50 after release
    b. Screen captured via mss (DPI-aware, monitor under cursor)
@@ -87,7 +88,7 @@ This doc answers **what** and **why**. For **how** see [CLAUDE.md](CLAUDE.md). F
 
 **Phase 1 is "done" when all of these are true:**
 
-1. **Working loop on a real Windows machine.** Press Ctrl+Shift+Space in Excel (or any real app), speak a question, release. Within ~7 seconds: pointer animates to the right UI element + voice explains the answer. Works 3 times in a row without crashing.
+1. **Working loop on a real Windows machine.** Press Ctrl+Alt+Space in Excel (or any real app), speak a question, release. Within ~7 seconds: pointer animates to the right UI element + voice explains the answer. Works 3 times in a row without crashing.
 2. **Multi-monitor + DPI verified.** Tested on at least 2 monitors (ideally with different scaling). Pointer lands within ±5 pixels of the intended target on both monitors.
 3. **Memory persists across sessions.** Close the app, reopen it, ask a follow-up question about the same Windows app. Clicky references the previous interaction ("Earlier you asked about the Save button...").
 4. **Memory is human-readable.** `~/.clicky-windows/memory/EXCEL.EXE.md` opens as a plain markdown file with clear sections for each interaction. No encoded binary, no opaque schema.
@@ -160,6 +161,7 @@ If triggered: port to Tauri 1.8 + Rust backend + Vue 3 frontend + Pinia, matchin
 | **Littlebird** | Cross-platform | No | No | Yes | No | Enterprise, $11M raised | Consumer, free, visual pointer |
 | **Precogni** | macOS alpha | No | Limited | Privacy-focused | No | Alpha | Windows, ships sooner |
 | **Vercept** (acquired by Anthropic Feb 2026) | ??? | Unknown | Unknown | Unknown | No | Not yet shipped | **STRATEGIC THREAT** — Anthropic will ship first-party Windows screen-aware AI. Phase 1 must ship before they do. Memory is the long-term moat. |
+| **[trili.ai](https://trili.ai/)** (*"Master Any Software"*) | Windows | No (text instructions only, *"Click the Insert menu"*) | Partial (text-first chat, voice button secondary) | Unknown (screenshot didn't show it) | **No** (closed SaaS) | Unknown | **Genuinely different design philosophy, not a superset.** Evidence: user-provided 2026-04-12 screenshot showing a ~20% sidebar panel, text chat interface, and pre-planned structured tutorials ("STEP 1 OF 7 — Click on the 'Insert' menu"). This is Khan Academy-style pedagogy. Clicky Windows is the opposite: transparent click-through overlay with 0% screen cost, voice-first push-to-talk, conversational "learn by doing" per Farza's pitch, per-app persistent memory as the differentiator. **Our edges:** open source + BYOK, zero screen real estate cost, voice+pointing fidelity, persistent memory. Phase 2 competitive review will do the install + deep feature comparison; Phase 1 ships the differentiated product rather than racing to clone. |
 
 **Key insight from competitive analysis:** nobody has shipped *Windows + pointing + voice + memory* as a single product. tekram has Windows + pointing + voice but no memory and is unfinished. danpeg has macOS + pointing + voice + proactive but no memory. Clicky/Clippi have macOS + pointing + voice but no memory. **The combination is open.**
 
@@ -172,6 +174,7 @@ If triggered: port to Tauri 1.8 + Rust backend + Vue 3 frontend + Pinia, matchin
 5. **Clipboard copy** — [Issue #43](https://github.com/farzaa/clicky/issues/43). Can't paste responses (e.g., when Clicky returns code). Phase 2.
 6. **Configurable hotkey** — [Issue #35](https://github.com/farzaa/clicky/issues/35). 3-finger combo is awkward. Phase 2 (Phase 1 ships with `config.py` override).
 7. **Security** — [Issues #22/#34/#44](https://github.com/farzaa/clicky/issues). No shared proxy, no baked-in API keys, no credential leaks. Phase 1 compliant (`.env` only, Anthropic-direct, no proxy).
+8. **Farza's Clicky demo + Natique Ibrar Alam's "Day 0 of asking if this is available on Windows" comment** on the LinkedIn post — first-party evidence of the "learn by doing" framing landing with real users AND of the unfulfilled Windows demand. Captured verbatim in `I built this thing called Clicky..txt` (dev-session archive, gitignored) on 2026-04-12 for future reference.
 
 ### Upstream Snapshot (2026-04-11)
 
@@ -208,7 +211,7 @@ Full pull of `farzaa/clicky` open issues + all PRs via `gh api` on this date. Th
 
 | Upstream | Demand | Clicky status | Our response |
 |---|---|---|---|
-| [#35](https://github.com/farzaa/clicky/issues/35) | "Talking to Clicky requires 3 fingers" | Open | **Phase 1 Ctrl+Shift+Space decision validated.** [DECISIONS.md § "Ctrl+Shift+Space over Ctrl+Space"](DECISIONS.md). |
+| [#35](https://github.com/farzaa/clicky/issues/35) | "Talking to Clicky requires 3 fingers" | Open | **Phase 1 Ctrl+Alt+Space decision validated.** [DECISIONS.md § "Ctrl+Alt+Space over Ctrl+Space"](DECISIONS.md). |
 | [#36](https://github.com/farzaa/clicky/issues/36) | "It doesn't stop once it starts speaking" | Open | **Phase 2 TTS interruption** — second hotkey press cancels the current Cartesia WebSocket stream (`tts.stop()` API wired in Phase 1, activated in Phase 2). |
 | [#38](https://github.com/farzaa/clicky/issues/38) | "If it can't type on my behalf what's the USP?" | Open | **Stays out of scope.** We guide + explain, not act. [PRD § "What Clicky Windows IS NOT"](PRD.md#what-clicky-windows-is-not) — we are explicitly not Claude Computer Use / Cowork. |
 | [#7](https://github.com/farzaa/clicky/issues/7) | "Non-English languages, context retention, audio" | Open | Multi-language is Phase 3 (Whisper supports it, prompt engineering needed). **Context retention IS our Phase 1 memory differentiator.** |
@@ -222,7 +225,7 @@ Full pull of `farzaa/clicky` open issues + all PRs via `gh api` on this date. Th
 
 | Upstream | Demand | Clicky status | Our response |
 |---|---|---|---|
-| [#1](https://github.com/farzaa/clicky/issues/1) | "What is the hotkey combo?" | Open — docs gap | **Documented in README** (written at end of Phase 1). Default Ctrl+Shift+Space via `pynput.Listener(suppress=False)` (observe-only). Alt+Space was rejected for Phase 1 because pynput's `suppress=True` is globally destructive — see [DECISIONS.md 2026-04-12](DECISIONS.md). Phase 1.5 may add a Win32 `RegisterHotKey` subclass restoring Alt+Space. |
+| [#1](https://github.com/farzaa/clicky/issues/1) | "What is the hotkey combo?" | Open — docs gap | **Documented in README** (written at end of Phase 1). Default Ctrl+Alt+Space via `pynput.Listener(suppress=False)` (observe-only). Alt+Space was rejected for Phase 1 because pynput's `suppress=True` is globally destructive — see [DECISIONS.md 2026-04-12](DECISIONS.md). Phase 1.5 may add a Win32 `RegisterHotKey` subclass restoring Alt+Space. |
 | [PR #16](https://github.com/farzaa/clicky/pull/16) | "Allow user to configure push-to-talk shortcut from panel" | Open, unmerged | **Phase 2** after settings UI exists. |
 
 **Security:**
@@ -258,7 +261,7 @@ Full pull of `farzaa/clicky` open issues + all PRs via `gh api` on this date. Th
 |---|---|---|---|---|
 | 1 | PyQt6 click-through unreliable on Win11 with certain GPU drivers | High | High (no overlay = no demo) | Apply Win32 layered window flags via ctypes after `show()`. Fallback: tkinter + `-transparentcolor` + pywin32. Document in DECISIONS.md which approach won on test machine. |
 | 2 | Per-monitor DPI math wrong on mixed-DPI setups | Very High | High (pointer lands in wrong place) | `SetProcessDpiAwareness(2)` at startup. Document all 3 coordinate spaces (physical, logical, Claude) in code comments. Step 1 acceptance: mouse over known UI element, verify printed coords ±2 px. |
-| 3 | Ctrl+Shift+Space hotkey conflicts (VS Code Parameter Hints, rare third-party mappers, IME) | Low | Low (minor UX nit, no crash) | `pynput.Listener(suppress=False)` observe-only — we do NOT consume key events, so conflicts degrade to "app underneath also sees the key" rather than "app underneath loses the key." Ctrl+Shift+Space has no default Windows OS behavior, so no menu pops. Phase 2 configurable hotkey UI (PR #16) lets users rebind if the VS Code Parameter Hints overlap becomes annoying. See [DECISIONS.md 2026-04-12 "Ctrl+Shift+Space over Alt+Space"](DECISIONS.md). |
+| 3 | Ctrl+Alt+Space hotkey conflicts (VS Code Parameter Hints, rare third-party mappers, IME) | Low | Low (minor UX nit, no crash) | `pynput.Listener(suppress=False)` observe-only — we do NOT consume key events, so conflicts degrade to "app underneath also sees the key" rather than "app underneath loses the key." Ctrl+Alt+Space has no default Windows OS behavior, so no menu pops. Phase 2 configurable hotkey UI (PR #16) lets users rebind if the VS Code Parameter Hints overlap becomes annoying. See [DECISIONS.md 2026-04-12 "Ctrl+Alt+Space over Alt+Space"](DECISIONS.md). |
 | 4 | AssemblyAI / Cartesia network unreachable (no internet, firewall block, provider outage) | Medium | High | Clear `RuntimeError` with diagnostic instructions at streaming client construction. Reactive fallback to `FasterWhisperSTT` + `Pyttsx3TTS` is a 1-2 hour Phase 2 subclass swap via the abstract base pattern. No preemptive Phase 1 fallback (YAGNI). |
 | 5 | Threading deadlocks (PyQt main loop + pynput thread + audio + Whisper + Anthropic workers) | High | High (silent freeze) | Single strict rule: only Qt signals cross thread boundaries. No UI calls from worker threads. Code review every cross-thread call. |
 | 6 | End-to-end latency > 8s feels broken | Medium | Medium (UX perception) | Print per-stage timing during dev. Pre-warm Whisper + audio. Optional: add audible "listening" cue on hotkey press so user gets immediate feedback. |
@@ -287,7 +290,7 @@ Things that have been proposed and rejected with reasons recorded in DECISIONS.m
 - **Electron port.** Rejected because tekram already tried it and it's unfinished. Electron buys nothing Python doesn't give us, loses binary size advantage. (DECISION: "Why not Electron")
 - **Screenshot to Vision only, no Computer Use API.** Rejected because original Clicky proves Computer Use is meaningfully more accurate. (DECISION: "Use Computer Use API beta directly")
 - **SQLite-only memory, no markdown.** Rejected because Karpathy's principle of "human-readable, LLM-maintained" beats opaque schemas for a differentiator we need to explain to users. (DECISION: "Karpathy markdown memory + SQLite index hybrid")
-- **Ctrl+Space hotkey.** Rejected because it conflicts with VS Code IntelliSense which would break developer users' autocomplete. (DECISION: "Ctrl+Shift+Space over Ctrl+Space")
+- **Ctrl+Space hotkey.** Rejected because it conflicts with VS Code IntelliSense which would break developer users' autocomplete. (DECISION: "Ctrl+Alt+Space over Ctrl+Space")
 - **Pure `openai-whisper`.** Rejected in favor of `faster-whisper` (CTranslate2 backend, 4× faster, drop-in replacement). (DECISION: "faster-whisper over openai-whisper")
 - **One giant execution plan upfront.** Rejected in favor of Superpowers per-component brainstorm → plan → TDD for the 5 hard components, skipping ceremony for the 4 trivial files. (DECISION: "Superpowers selective ceremony")
 - **Proactive mode in Phase 1.** Rejected per Karpathy: you don't know what to be proactive ABOUT until you have data. Build memory first, mine the patterns, then target proactive mode at the real patterns in Phase 2. (DECISION: "Proactive mode stays in Phase 2")
