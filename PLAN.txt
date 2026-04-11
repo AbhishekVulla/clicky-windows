@@ -1,0 +1,430 @@
+# Clicky Windows — Phase 1 Plan (Decisive)
+
+## Context
+
+Clicky Windows is the **first polished Windows port** of Farza Majeed's [Clicky](https://github.com/farzaa/clicky) (macOS, 3.5K stars, MIT). The macOS original captures your screen on a push-to-talk hotkey, sends it to Claude, animates a blue cursor to UI elements via Claude's Computer Use API, and speaks the response. The #1 community demand on the upstream repo is a Windows version (Issue #26, 18 comments, 2 forks). The #2 demand is **persistent memory** (Issue #30 — "stateless Claude wrapper, no memory between sessions") — that is **the differentiator** that makes this not just a port. It's [Abhishek's next Building 0 project](file:///C:/Users/Abhis/OneDrive/Documents/2nd%20Brain/wiki/building0.md), with [LearnLoop](file:///C:/Users/Abhis/OneDrive/Documents/2nd%20Brain/wiki/learnloop.md) feature-complete and the bar set at Wallee/Grafyn/TextForm.
+
+The previous Claude Code session (3,838 lines, transcript at `Claude Code Clicky Chat.txt`) already did the deep research, locked the strategy, wrote `CLAUDE.md`, and saved this `STARTER_PROMPT.md`. This session's job is **execution** — write the lean documentation set, then build Phase 1 component-by-component with manual verification.
+
+## Research I've Now Read In Full (this session)
+
+| Source | What I learned that matters |
+|---|---|
+| `Claude Code Clicky Chat.txt` (3838 lines, all relevant chunks read) | Previous session already scoped Phase 1, picked the stack, wrote CLAUDE.md, ran 6+ web searches, scraped GitHub issues + PRs, identified real users (mom on Lovable, dentist, traders, designers, chess players, Blender learners). Key strategic decision: **persistent memory is the moat**, **non-technical users are the audience**, **Python prototype first then Tauri**. |
+| `farzaa/clicky` Swift source (read directly via chat history) | **Critical correction to my earlier plan: original Clicky uses Computer Use API**, not just Vision tags. Beta header `computer-use-2025-11-24`, tool `computer_20251124`, declared `display_width_px`/`display_height_px`. They pick from 3 supported resolutions (1024×768, 1280×800, 1366×768) by **closest aspect ratio match** to avoid distortion. They use `NSBitmapImageRep` directly to bypass Retina 2× scaling. They sort displays cursor-first. They exclude own-app windows from capture. They have 5 push-to-talk shortcut presets. Fallback transcription chain: AssemblyAI streaming → OpenAI gpt-4o-transcribe → Apple Speech (local). Output coordinates clamped before scaling. |
+| Clicky's closed PRs (from chat history scrape) | None merged. Farza isn't actively maintaining. Open opportunity. PRs people tried: ElevenLabs Scribe v2, Parakeet local STT, MLX/LM Studio local inference, OpenRouter proxy, dark/light theme, configurable hotkey, custom system prompt, Copy Conversation button. **All these are Phase 2 features for us.** |
+| Clicky GitHub issues | #26 Windows version (18 comments), #30 persistent memory, #27 BYOK/multi-model, #43 clipboard copy, #35 configurable hotkey, #34/#22/#44 security/key leaks. |
+| Mushtaq Bilal X post (cited in chat) | A PhD researcher already gave Claude Code the Clicky repo and built a Windows version "in a couple hours." That's a Hacker News-style hack. We're building the **polished, persistent-memory** version, not the hack. |
+| `CLAUDE.md` (in project root) | Already comprehensive — file structure, deps, tech stack, rules, competitor list. Stays as-is. |
+| `STARTER_PROMPT.md` | Lists exactly what this session is supposed to do. |
+| `GPT Instructions.txt` | Brutally honest mode, lock scope, no task done without proof, update DECISIONS/TESTING/ROADMAP. |
+| `2nd Brain/wiki/building0.md` | B0 principles: rapid iteration, first-principles, show-don't-tell, document the unexpected finding. Editorial standard: "the unexpected finding is the most important section." |
+| `2nd Brain/wiki/hot.md` | Clicky Windows is the active project. Multiple parallel projects (LearnLoop, MU Exemption, NoonCheck) in the background. |
+| `AI Wiki/wiki/index.md` + `tools/clicky.md` | KB already has the competitor analysis. |
+| `Claude Code TIPS/Claude Code FILES.md` | The 7-file pattern (PRD/ARCHITECTURE/AI_RULES/PLAN/PROGRESS/DISCOVERY/RESEARCH). I'm consciously cutting this down — see file structure decision below. |
+| `Claude Code TIPS/` folder structure | All web/agent-dev skills (Frontend Design, Impeccable, UIUX Pro Max, Code Review, Playwright, OWASP, GSD, PAUL). The 22-file `Building and setting up Agent systems/` subfolder is **Phase 2 fuel** for memory architecture (Hermes, Voyager, OpenClaw, Engram, memory-systems). **Not relevant for Phase 1.** |
+
+## Strategy (revised after user pushback)
+
+**Old plan (wrong):** Phase 1 = Python loop only → Phase 2 = Tauri rewrite + memory.
+
+**New plan (right):** **One Python build, MVP includes persistent memory from day 1.** No rewrite. If validation succeeds → harden Wallee-style (more tests, replay scenarios, real users, polish). If validation fails → iterate or throw away.
+
+**Why one phase, not two:**
+- The user is right: shipping "Clicky core loop on Windows" is not differentiation. Mushtaq Bilal already vibe-coded that hack in 2 hours. The differentiator — persistent memory — has to be in the MVP, not deferred.
+- Wallee proves Python at 3K LOC + 517 tests clears the B0 bar. There's no language-based reason to rewrite to Tauri. The rewrite was an aesthetic choice driven by my over-anchoring on Grafyn, not on what the project actually needs.
+- The MVP needs to answer **"is Clicky+memory better than Clicky?"** not **"can a Python script capture a screenshot?"**
+
+**Revised phase shape:**
+
+| Phase | What it is | Goal | Done when |
+|---|---|---|---|
+| **Phase 1: MVP (1-2 weeks)** | Python: capture + Computer Use API + overlay + STT + TTS + hotkey + **SQLite memory** + recall pipeline | Validate the differentiated hypothesis: "memory makes Clicky meaningfully better" | 5+ real user sessions where memory recall noticeably improved the experience, recorded as a demo video |
+| **Phase 2: Harden (2-4 weeks, if Phase 1 validates)** | Same Python codebase, add: 50-100+ tests (Wallee-style replay scenarios), proactive mode, BYOK, clipboard copy, configurable hotkey UI, PyInstaller bundle, install path, "unexpected finding" writeup | Match the B0 bar by **rigour proportional to problem**, not by rewriting | Bar checklist met, 5+ users, writeup published, install path tested |
+| **Phase 3 (only if needed): Tauri rewrite** | Only triggered if Phase 2 hits a Python-specific wall (install experience too rough, performance too slow, threading deadlocks) | Production polish | TBD |
+
+**This is the user's actual ask:** "I want to see as a validation the MVP. BUT, if we just copy existing clicky then what is even the point, don't even bother building. The goal is to build something better."
+
+## Decisive Calls (no more asking)
+
+### 1. File structure — 5 files, not 10
+
+The previous version of this plan listed 8 markdown files. That was overkill — every extra file is another file to keep updated. Decisive cut:
+
+| File | Status | Purpose | Why this one survives |
+|---|---|---|---|
+| **`CLAUDE.md`** | Already exists | Project context, architecture, rules, stack, competitors. Loaded into every Claude session automatically. | The contract. Keep as-is. |
+| **`PRD.md`** | Create | Problem, target user, IS / IS NOT, core loop, Phase 1 acceptance criteria, Phase 2 scope, explicitly-not-building list, competitor landscape, validated user demands. | Single source of truth for **what** and **why**. |
+| **`ROADMAP.md`** | Create | Phased plan with **status column** (Not Started / In Progress / Done) and acceptance proof per step. Updated as we go. | Replaces PLAN.md + PROGRESS.md + TESTING.md (acceptance lives next to the step it tests). One file to update, not three. |
+| **`DECISIONS.md`** | Create | Append-only log of architectural decisions: "We chose X over Y because Z." E.g., "Use Computer Use API not just Vision because original Clicky proves it's needed for pixel accuracy." | Historical record. Append-only = no merge conflicts with progress updates. |
+| **`README.md`** | Create at end of Phase 1 | User-facing: what it is, install, run, demo. | Written **last**, after the demo works, so it describes reality not aspiration. |
+
+**Files I am consciously NOT creating:**
+- `ARCHITECTURE.md` — folds into `CLAUDE.md` and the per-component docstrings
+- `AI_RULES.md` — already in `CLAUDE.md`'s "Rules" section
+- `DISCOVERY.md` — the Q&A history is in `Claude Code Clicky Chat.txt`, no need to duplicate
+- `RESEARCH.md` — research lives in this plan file + AI Wiki + chat archive
+- `PLAN.md` / `PROGRESS.md` / `TASKS.md` / `TESTING.md` — all collapsed into `ROADMAP.md`'s status + acceptance columns
+- Per-component design docs — overkill for a Phase 1 prototype
+
+That's **3 new files to write upfront** (`PRD.md`, `ROADMAP.md`, `DECISIONS.md`), 1 written at the end (`README.md`), 1 already there (`CLAUDE.md`).
+
+### 2. Architecture — locked
+
+| Layer | Choice | Why |
+|---|---|---|
+| Language | Python 3.13 | Fastest path to a working loop. Tauri rewrite is Phase 2. Already user-decided. |
+| Screen capture | `mss` | Multi-monitor, cross-platform, ~5ms per capture. Cursor position via `ctypes.windll.user32.GetCursorPos`. |
+| DPI | `SetProcessDpiAwareness(2)` (per-monitor v2) at startup | Per-monitor DPI is mandatory on modern Windows. Without this, the pointer is in the wrong place on the secondary monitor. |
+| Resolution selection | **Aspect-ratio-aware**: pick from `[(1024,768), (1280,800), (1366,768)]` based on actual display ratio | **Mirror original Clicky exactly.** They proved this matters — distortion kills X-axis accuracy. Captured directly from `ElementLocationDetector.swift`. |
+| Resize | PIL `Image.resize(LANCZOS)` to **exact pixel dimensions** | Mirror Clicky's "no Retina doubling" approach. Send Claude exactly what we declare. |
+| Hide overlay before capture | Always | If we don't, Claude sees its own pointer in the screenshot and tries to point at it. |
+| Vision call | **Claude Sonnet 4.6 with Computer Use API** (`tools=[{"type":"computer_20251124", ...}]`, `anthropic-beta: computer-use-2025-11-24`) | **Reversing my earlier plan.** Original Clicky uses this for pixel-perfect coordinates because Computer Use activates Claude's specialized pixel-counting training. Vision-only with regex tags is meaningfully less accurate. |
+| Coordinate clamping | Always clamp to (0,0)–(declared_w, declared_h) before scaling | Claude occasionally returns slightly out-of-bounds coords. Clicky does this. |
+| STT | **`faster-whisper` `base` model**, CPU | 4× faster than `openai-whisper` (CTranslate2 backend), drop-in API. Same model quality. **Changing CLAUDE.md's `openai-whisper` recommendation** — append a DECISIONS.md entry. |
+| TTS | `pyttsx3` (SAPI) | Free, offline, instant. ElevenLabs is Phase 2. |
+| Hotkey | **`Alt+Space`**, push-to-talk, suppressed via `pynput.keyboard.Listener(suppress=True)` low-level hook | User-confirmed. Fallback if Alt+Space conflicts: `Ctrl+Shift+Space`. |
+| Overlay | PyQt6 + Win32 layered window styles via `ctypes`: `WS_EX_LAYERED \| WS_EX_TRANSPARENT \| WS_EX_TOPMOST \| WS_EX_NOACTIVATE \| WS_EX_TOOLWINDOW` | Qt's `WA_TransparentForMouseEvents` alone is not enough on Windows for true click-through. Layered window flags applied after window creation. |
+| Pointer animation | `QPropertyAnimation`, linear easing, 400ms | Bezier polish is Phase 2. |
+| Multi-monitor | Capture monitor under cursor; overlay spans full virtual desktop; sort displays cursor-first when telling Claude (mirrors Clicky) | Day-1 multi-monitor support is mandatory because Windows users routinely have 2+ monitors. |
+| Threading | Qt event loop on main thread; pynput listener thread; worker threads for audio/Whisper/Anthropic; cross-thread comms via Qt signals only | Single rule: **no UI calls from worker threads, ever.** PyQt6 is not thread-safe. |
+| Memory | **Karpathy-style: markdown files in `~/.clicky-windows/memory/` (one `.md` per app) + SQLite index for fast lookup** | Combines Wallee's rigour (SQLite for indexing) with Karpathy's "no fancy RAG, just markdown files Claude can read" philosophy. Each app gets a running log: `EXCEL.EXE.md`, `chrome.exe.md`, `photoshop.exe.md`. Claude reads the relevant `.md` directly into context on each interaction (no embedding, no retrieval). SQLite indexes (app_name, last_used, interaction_count) for fast lookup of "have I seen this app before, and how much." User can read the markdown files themselves to see what Clicky remembers. |
+| API key | `.env` via `python-dotenv`. **Anthropic-direct only in Phase 1** (Computer Use API beta requires it). No proxy. | Single-user prototype. Cloudflare Worker proxy is Phase 2 (when shipping to others). |
+| Provider abstraction | **Wrap each external service in a small class** so Phase 2 can swap implementations without touching `app.py`: `class AIClient` (Phase 1 = AnthropicClient with Computer Use, Phase 2 adds OpenRouterClient with vision-tag fallback), `class STT` (Phase 1 = FasterWhisper, Phase 2 adds AssemblyAI), `class TTS` (Phase 1 = Pyttsx3, Phase 2 adds ElevenLabs) | Mirror Wallee's `BuddyTranscriptionProvider` protocol pattern. ~30 min extra now, ~10 hours saved in Phase 2. The classes are tiny — just one method each: `ask()`, `transcribe()`, `speak()`. |
+| Screenshot strategy | **Phase 1 = always send screenshot.** Phase 2 = add diff-and-skip caching (hash last screenshot, skip API if unchanged). Phase 2/3 = add UIA accessibility tree fast path for productivity apps, fall back to screenshot for creative apps. | Premature optimization is the root of all evil. Get the high-quality baseline working first, optimize once it's measurable. |
+| Git | `git init` + private GitHub repo via `gh repo create --private` | User-confirmed. Commit at end of each step. |
+
+### 3. Skills/plugins — install one, skip the rest
+
+| Tool | Decision | Why |
+|---|---|---|
+| **Superpowers** | **Install** | Workflow scaffolding (brainstorm → spec → plan → TDD → review). Adds discipline. Doesn't add domain knowledge. The previous session already recommended it. **One workflow tool, not five.** |
+| Frontend Design / Impeccable | Skip | React/HTML skills. Wrong domain. We're building a transparent system overlay, not a web page. |
+| UIUX Pro Max | Skip | Same as above. |
+| Code Review | Skip | Phase 2 concern. Single-author prototype. |
+| OWASP Security | Skip | No server, no attack surface in Phase 1. |
+| Playwright MCP | Skip | Browser automation. Our app isn't a browser. |
+| GSD / PAUL | Skip | Workflow scaffolding overlap with Superpowers. |
+| Awesome Claude Code | Skip (it's a directory) | Reference, not install. |
+
+**Phase 2 will revisit**: Code Review (when there's enough code to review), OWASP Security (when adding the API key proxy + multi-user UI), and the `Building and setting up Agent systems/` corpus (Hermes, Voyager, OpenClaw, Engram, memory-systems) for the persistent memory architecture.
+
+### 4. Realistic timeline
+
+CLAUDE.md says "1-3 days." That's optimistic. Honest estimate:
+
+| Step | Active work | Why |
+|---|---|---|
+| 0 — Scaffold + git + GitHub repo | 30 min | Mechanical |
+| 1 — `capture.py` (mss + DPI + cursor + multi-monitor + aspect-ratio resize) | 2 hr | Coordinate spaces are the silent killer |
+| 2 — `ai.py` (Computer Use API call + parse + clamp + scale-back) | 2 hr | Mirror Clicky's prompt structure |
+| 3 — `overlay.py` (PyQt6 + Win32 layered window + animation) | **4-6 hr** | **Highest risk component.** Click-through on Win11 with multi-monitor + DPI. |
+| 4 — `stt.py` (faster-whisper + sounddevice + lazy load + pre-warm) | 1-2 hr | Whisper download is slow first time |
+| 5 — `tts.py` (pyttsx3) | 30 min | Trivial |
+| 6 — `hotkey.py` (pynput suppress=True for Alt+Space) | 1-2 hr | Suppression is fiddly |
+| 6.5 — `memory.py` (SQLite + recall + skill inference) | 2-3 hr | Added per pushback — the differentiator |
+| 7 — `app.py` (orchestrator + threading + signal/slot wiring + memory wiring) | **4-6 hr** | Second-highest risk. Threading is where prototypes go to die. |
+| 8 — Demo polish + README + bug fixes | 2-4 hr | Things that worked alone break together |
+| **Total** | **19-28 hours active work** | |
+
+**Calendar time: 3-5 days for working demo, 1-2 weeks for share-on-Twitter polish, 2-3 months for Phase 2 (Tauri rewrite + SQLite memory + ElevenLabs + AssemblyAI streaming + proactive mode + installer).**
+
+**Strategic urgency:** Anthropic acquired Vercept (Feb 2026) — they will ship a first-party Windows screen-aware AI. Window of differentiation is **weeks, not months**. Phase 1 must ship fast; persistent memory in Phase 2 is what protects long-term against the Vercept threat.
+
+## Build Sequence (no step is "done" without acceptance proof)
+
+### Step 0 — Scaffold
+- `requirements.txt` — `anthropic`, `mss`, `PyQt6`, `pynput`, `sounddevice`, `numpy`, `faster-whisper`, `pyttsx3`, `Pillow`, `python-dotenv`
+- `.env.example` (`ANTHROPIC_API_KEY=`), `.gitignore` (`.env`, `__pycache__/`, `*.pyc`, `debug_*.jpg`, `whisper-cache/`)
+- `config.py` — env loading + `HOTKEY="alt+space"`, `WHISPER_MODEL="base"`, `CANDIDATE_RESOLUTIONS=[(1024,768),(1280,800),(1366,768)]`, `MODEL_ID="claude-sonnet-4-6"`, `COMPUTER_USE_BETA="computer-use-2025-11-24"`
+- `pip install -r requirements.txt`
+- `git init`; `gh repo create clicky-windows --private --source=. --remote=origin --push`
+- **Acceptance:** all imports work, repo visible in `gh repo view`
+
+### Step 1 — `capture.py`
+- `set_dpi_awareness()` — call at module import via `ctypes.windll.shcore.SetProcessDpiAwareness(2)`
+- `get_cursor_position()` — `ctypes` `GetCursorPos`
+- `pick_resolution(width, height)` — return `(target_w, target_h)` whose aspect ratio is closest to `width/height` (mirror Clicky)
+- `capture_active_screen()` — uses mss, returns `(PIL.Image, monitor_dict, cursor_xy)` for the monitor under the cursor
+- `resize_for_claude(img, target_w, target_h)` — PIL `LANCZOS` resize to **exact pixel dims**, returns `(resized, scale_x, scale_y)`
+- `unscale_coords(x, y, scale_x, scale_y, monitor)` — Claude coords → physical desktop coords
+- **Verification:** `python -m capture` → saves `debug_capture.jpg`, prints monitor + cursor + chosen resolution + scale factors. User mouses over a known UI element and confirms cursor coords match.
+- **Acceptance proof:** screenshot is correct monitor, dimensions match chosen resolution, cursor coords printed match real position ±2 px
+
+### Step 2 — `ai.py`
+- **`class AIClient` (abstract base):** single method `ask(image, transcript, history, declared_w, declared_h) -> dict`. Returns `{"text": str, "points": [...]}` regardless of which provider implements it.
+- **`class AnthropicClient(AIClient)`:** Phase 1 implementation. Uses Anthropic SDK directly with Computer Use API beta.
+- Phase 2 will add `class OpenRouterClient(AIClient)` with vision-tag regex fallback (no Computer Use beta on OpenRouter).
+- Anthropic implementation: sends image as base64 + transcript + system prompt (copied/adapted from Clicky's `ElementLocationDetector.swift`)
+- `tools=[{"type":"computer_20251124","name":"computer","display_width_px":declared_w,"display_height_px":declared_h}]`
+- Header `anthropic-beta: computer-use-2025-11-24`
+- Parses `tool_use` blocks with `{"action":"left_click","coordinate":[x,y]}`
+- Clamps coords to `[0, declared_w] × [0, declared_h]` before returning
+- Returns `{"text": str, "points": [{"x":int,"y":int,"label":str}]}` (still in declared resolution; caller scales back)
+- Maintains in-memory `history` list
+- **Verification:** load `debug_capture.jpg`, ask "what's on my screen and point at the most clickable thing"
+- **Acceptance proof:** API call succeeds, ≥1 coordinate parsed, coordinates inside bounds, response text non-empty
+
+### Step 3 — `overlay.py` (highest risk)
+- `OverlayWindow(QWidget)` — frameless, transparent background, always-on-top, no taskbar entry, click-through, spans full virtual desktop
+- After `show()`, apply Win32 styles via `ctypes.windll.user32.SetWindowLongW` with `GWL_EXSTYLE` ORing in `WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`
+- `point_at(x_physical, y_physical, label)` — `QPropertyAnimation` from current pos to target, 400ms linear
+- Custom-painted blue arrow + label
+- `hide_for_capture()` / `show_after_capture()`
+- **Verification:** `python -m overlay` opens overlay, animates pointer through 3 hardcoded coords spanning the virtual desktop. User confirms (a) clicks pass through to apps below, (b) pointer visible + smooth, (c) no taskbar entry, (d) doesn't steal focus when shown
+- **Acceptance proof:** all four confirmed manually
+- **Fallback if PyQt6 click-through is unreliable:** raw `pywin32` + `tkinter` with `-transparentcolor`
+
+### Step 4 — `stt.py`
+- **`class STT` (abstract base):** `start_recording()`, `stop_and_transcribe() -> str`
+- **`class FasterWhisperSTT(STT)`:** Phase 1 implementation
+- Phase 2 will add `class AssemblyAISTT(STT)` for streaming
+- `record_until_release(stop_event) -> np.ndarray` — 16kHz mono via `sounddevice`
+- `transcribe(audio) -> str` — `faster_whisper.WhisperModel("base", device="cpu", compute_type="int8")`
+- Lazy singleton at module import (avoid 2-3s reload latency)
+- Pre-warm audio device at app startup (avoid first-record dropout)
+- **Verification:** `python -m stt` records 5s, prints transcript. User says "hello world how are you."
+- **Acceptance proof:** transcript matches spoken words, latency <2s for 5s of audio
+
+### Step 5 — `tts.py`
+- **`class TTS` (abstract base):** `speak(text: str)` (blocking or threaded, caller decides)
+- **`class Pyttsx3TTS(TTS)`:** Phase 1 implementation
+- Phase 2 will add `class ElevenLabsTTS(TTS)`
+- `speak(text: str)` — pyttsx3, runs in background thread when called from main loop, voice rate ~180 wpm
+- **Verification:** `python -m tts` speaks "Hello, I am Clicky Windows."
+- **Acceptance proof:** audible
+
+### Step 6 — `hotkey.py`
+- `register(on_press, on_release)` — `pynput.keyboard.Listener(suppress=True)` watching for Alt+Space
+- Push-to-talk semantics: hold to record, release to fire
+- **Verification:** `python -m hotkey` prints PRESSED / RELEASED. User confirms system menu doesn't open.
+- **Acceptance proof:** events fire, no system-menu interference. **If suppression flaky → fall back to Ctrl+Shift+Space, log decision in DECISIONS.md, surface to user.**
+
+### Step 6.5 — `memory.py` (Karpathy-style markdown memory + SQLite index)
+- Memory directory: `~/.clicky-windows/memory/` (created if missing)
+- One markdown file per Windows app: `EXCEL.EXE.md`, `chrome.exe.md`, `photoshop.exe.md`
+- File format: append-only log with timestamps, user question, Clicky's response, what was pointed at:
+  ```
+  ## 2026-04-11 14:30
+  **Window:** Book1 - Excel
+  **User asked:** how do I save this file
+  **I said:** the Save button is in the top-left corner, I'm pointing at it now
+  **I pointed at:** Save button (450, 80)
+  ```
+- SQLite index at `~/.clicky-windows/index.db` for fast lookup:
+  ```sql
+  CREATE TABLE apps (
+    app_name TEXT PRIMARY KEY,
+    first_seen TEXT,
+    last_seen TEXT,
+    interaction_count INTEGER,
+    md_path TEXT
+  );
+  ```
+- Functions:
+  - `init_memory()` — creates `~/.clicky-windows/memory/` and `index.db` if missing
+  - `get_active_app() -> (app_name, window_title)` — via `ctypes.windll.user32.GetForegroundWindow` + `GetWindowTextW` + `GetWindowThreadProcessId` + `GetModuleFileNameExW`
+  - `record(app_name, window_title, user_question, claude_response, points)` — appends to the app's `.md` file, updates SQLite index
+  - `recall(app_name) -> str` — reads the app's `.md` file (last 2-3KB) and returns it for injection into Claude's system prompt
+  - `infer_skill_level(app_name) -> str` — based on `interaction_count`: "first-time" (0) / "beginner" (1-3) / "familiar" (4-10) / "experienced" (11+)
+  - `get_summary() -> dict` — for debug / future settings UI: list all apps with counts
+- **Why markdown not pure SQLite:** user can open `EXCEL.EXE.md` and read what Clicky remembers about them. Karpathy's principle: "the LLM writes and maintains all of the data, you rarely touch it directly, but it's human-readable when you want it." Also makes Phase 2 lint scripts trivial.
+- **Verification:** `python -m memory` → seed 3 fake interactions for "EXCEL.EXE", call `recall`, print formatted output, open the `.md` file by hand and confirm it looks human-readable
+- **Acceptance proof:** `.md` file exists and is human-readable, `recall` returns last N entries as a string, `infer_skill_level` returns the right bucket, SQLite index is updated
+
+### Step 7 — `app.py` (integration — 2nd highest risk)
+- Startup: `set_dpi_awareness()`, load Whisper (worker thread), pre-warm audio, init overlay, init pyttsx3, register hotkey
+- On hotkey press: hide overlay, start recording, optional listening cue
+- On hotkey release:
+  1. Stop recording, transcribe (worker thread)
+  2. Capture screen, pick resolution, resize
+  3. **Get active window title (`memory.get_active_window`)**
+  4. **Call `memory.recall(app_name)` and inject into system prompt**
+  5. Call `ai.ask_claude(image, transcript, history, recall_context, ...)` (worker thread)
+  6. Scale coords back from declared resolution → physical → into overlay's coordinate space
+  7. Animate pointer to each point sequentially, brief pauses
+  8. Speak response (concurrent with animation)
+  9. **Call `memory.record(...)` to persist this turn**
+  10. Append turn to in-session history list (still kept in memory for the current run)
+- **Strict threading rule:** workers emit Qt signals; only the main thread touches UI
+- **Verification (end-to-end):** open Excel (or any app), hold Alt+Space, say "what's on my screen and how do I save", release. Within ~7s see pointer animate to Save while voice describes it.
+- **Acceptance proof:** 3 successful runs in a row on a real app without crashing. Recorded as a screen capture for the README.
+
+### Step 7.5 — `tools/lint_memory.py` (Karpathy-style health check)
+- Standalone CLI script, not part of the main app
+- Scans `~/.clicky-windows/memory/*.md`, calls Claude with the contents, asks: "summarize what this user has been struggling with, what patterns repeat, what would proactive guidance look like for them"
+- Writes the output to `~/.clicky-windows/insights.md`
+- Run by hand weekly (`python tools/lint_memory.py`)
+- **Why this exists:** copies Karpathy's literal pattern. The goal is to find the **unexpected finding** that becomes the B0 case study — not to ship a feature. The lint script is the lens that reveals it. Two-hour build, massive payoff.
+- **Verification:** seed 10 fake interactions across 2 apps, run lint, confirm output is non-trivial
+- **Acceptance proof:** `insights.md` contains a meaningful summary, not just "you used Excel 5 times"
+
+### Step 8 — Polish
+- Bug fixes from end-to-end runs
+- `README.md` written based on what actually works
+- Demo screen recording
+- **Use the app yourself for at least 5 sessions on a real task** (learn a new app, debug something, etc.) before declaring Phase 1 done
+- **Run `lint_memory.py`** at the end of those 5 sessions and read `insights.md` — that's where the unexpected finding will surface
+
+## Files to Create
+
+**Documentation (5 total, only 3 to write upfront):**
+- `PRD.md` ← write upfront
+- `ROADMAP.md` ← write upfront
+- `DECISIONS.md` ← write upfront, append-only
+- `README.md` ← write at end of Phase 1
+- `CLAUDE.md` ← already exists, no changes
+
+**Code (12 files):**
+- `requirements.txt`, `.env.example`, `.gitignore`, `config.py`
+- `capture.py`, `ai.py`, `overlay.py`, `stt.py`, `tts.py`, `hotkey.py`
+- **`memory.py`** (Karpathy-style markdown files in `~/.clicky-windows/memory/` + SQLite index — the differentiator)
+- `app.py`
+- **`tools/lint_memory.py`** (Karpathy-style weekly health check, standalone CLI, the lens for finding the unexpected finding)
+
+## Explicitly NOT in Phase 1 (revised — memory moved IN, proactive stays OUT for Karpathy reasons)
+
+- ~~Persistent memory / SQLite~~ → **MOVED INTO Phase 1 MVP per user pushback. Without it, Phase 1 is just a Clicky clone, not differentiation. Now markdown-based per Karpathy's pattern.**
+- **Proactive mode / idle detection STAYS in Phase 2.** Karpathy reason: "you don't know yet what to be proactive ABOUT. Use the markdown memory yourself for 1-2 weeks first, find the unexpected pattern in your own logs, THEN build proactive mode targeted at that specific pattern. Building it now is guessing — wait for the data."
+- AssemblyAI streaming STT (faster-whisper local only)
+- ElevenLabs TTS (pyttsx3 only)
+- BYOK / multi-model / OpenRouter / LM Studio / MLX
+- Configurable hotkey UI (lives in `config.py`)
+- Clipboard copy of responses (Issue #43 — Phase 2)
+- Tray icon, settings UI, theme toggle
+- Bezier pointer animations (linear is fine)
+- Cloudflare Worker API key proxy
+- Skill-level inference / adaptation (the actual differentiator — Phase 2)
+- Auto-updater, MSI/MSIX installer, code signing
+- Automated tests (manual verification per component is the strategy)
+- Telemetry / crash reporting
+
+## Risks & Mitigations
+
+| # | Risk | Probability | Mitigation |
+|---|---|---|---|
+| 1 | PyQt6 click-through unreliable on Win11 | High | Apply Win32 layered window flags via ctypes after show(); fallback to tkinter+pywin32 |
+| 2 | Per-monitor DPI breaks pointer position | Very High | `SetProcessDpiAwareness(2)` at startup; document coord-space conversions in DECISIONS.md |
+| 3 | Alt+Space suppression conflicts | Medium | pynput `suppress=True`; fallback to Ctrl+Shift+Space, log + surface |
+| 4 | faster-whisper too slow on CPU | Low | `int8` quantization; fall back to `tiny` model |
+| 5 | Threading deadlocks | High | Strict rule: only Qt signals cross thread boundaries; review every cross-thread call |
+| 6 | End-to-end latency > 8s feels broken | Medium | Pre-warm Whisper + audio at startup; print per-stage timing for tuning |
+| 7 | Overlay appears in screenshots | High | Always `hide_for_capture()` before mss.grab() |
+| 8 | Computer Use API costs spiral during testing | Low | Print token counts after every call; use `claude-haiku-4-5` for prompt iteration |
+| 9 | Anthropic ships first-party Windows screen-aware AI (Vercept) | Strategic | Ship Phase 1 in days; Phase 2 memory is the moat |
+| 10 | "1-3 days" expectation in CLAUDE.md is too optimistic | Acknowledged | This plan: 3-5 days demo, 1-2 weeks polish |
+
+## B0 Bar Reality Check — Triangulated Across All 11 Projects
+
+Read `B0 projects research.txt` (12,135 lines). The previous-chat deep dives are gold. Updated picture below — **Python is not the disqualifier.**
+
+| Project | Author | Stack | LOC | Tests | What clears the bar |
+|---|---|---|---|---|---|
+| **Grafyn** | Bryan | Tauri 1.8 + Rust + Vue 3 + Pinia + Tantivy + petgraph + native MCP server | 19K Rust + 30K Vue + 8K tests = **57K total** | **123 Rust unit tests + 8,182 LOC Playwright E2E + Vitest** | Real TextTiling implementation from scratch in Rust. Multi-stage retrieval pipeline (BM25 + graph expansion + relation-type weighting). Two-binary Cargo trick for MCP. 7-job CI/CD. 9 releases in 9 weeks. Two-phase release flow. 22.3KB CLAUDE.md. |
+| **Wallee** | Anieyrudh + Joon Leng | **Python**, Redis, httpx, pyserial, websockets, ruff, pytest, fakeredis | **3,000 LOC** | **517 tests + 60 replay scenarios** | Multi-process safety architecture. **6-gate dispatch pipeline, TOCTOU precheck, ESTOP bypass that hits hardware directly, crash-recovery diary.** Replay harness for offline scenario testing. The rigour is not in LOC count or framework — it's in the **safety-critical reasoning + provable correctness via scenarios**. |
+| **TextForm** | Bryan (earlier version) | Python, FAISS, OpenAI, CadQuery | 3,100 LOC | Few | Proof of concept. LLM-to-CadQuery via RAG. No self-refinement loop. Industrial interest from Accuron/Addept3D regardless. |
+| **ImaForm** | Bryan (production version of TextForm) | Python, NumPy SDF pipeline, BERT, RANSAC, Depth Anything | **25,000+ LOC** | **608 tests** | Abandons LLM code generation for **deterministic SDF pipeline + custom NumPy geometry engine + BERT NLP + RANSAC CV + Depth Anything for 3D**. The "Phase 2" of TextForm. |
+| **LearnLoop** | Abhishek | Multiple stacks across 37 sprints | Many | Yes | Real institutional pilot, BSF funded, government report citation. Validation > tech. |
+
+**The bar is not Tauri-or-die. It's not 30K LOC. It's not 4-platform CI.**
+
+The bar across all 11 projects is **engineering rigour proportional to the problem**:
+- Wallee runs a 3D printer unattended → safety-critical → 517 tests + replay scenarios + 6-gate dispatch
+- Grafyn manages knowledge for serious users → production reliability → 123 tests + 4-platform CI + auto-update
+- ImaForm replaces CAD professionals → deterministic correctness → 608 tests + custom geometry engine
+- TextForm earlier version → proof of concept → few tests, OK because Bryan immediately went on to ImaForm
+
+**For Clicky Windows specifically, the bar is:**
+1. **It actually works on a real app on a real Windows machine**, demonstrably (video, screenshots, user testimonials)
+2. **The hardest unknowns are documented as solved** (DPI, multi-monitor, click-through, hotkey suppression, latency budget)
+3. **The persistent memory differentiator is real, not a placeholder** (SQLite schema, recall logic, skill inference)
+4. **A meaningful test suite exists** (target: 50-100+ tests covering capture, AI parsing, memory storage, coordinate scaling — not 500+ unless safety demands it)
+5. **Documented in writing**: PRD, architecture, decisions, demo video, ideally a "what I learned building this" essay (the B0 editorial standard)
+6. **5+ real users have used it** and given feedback you can quote
+7. **Either ships as a polished installer (Tauri) OR ships as a polished `pip install + run` with a clean install path (Python, like Wallee)**
+
+## Grafyn deep-dive details (for Phase 2 reference)
+
+I just deep-dived [WKJBryan/Grafyn](https://github.com/WKJBryan/Grafyn) — Bryan's project that the user explicitly named as the bar. Honest summary, then the tension it creates for this plan.
+
+### What Grafyn actually is
+- **Tech stack:** Tauri 1.8 + Rust backend (19,088 LOC, 54 `.rs` files, 13 IPC command modules, 65 IPC commands) + Vue 3 frontend (10,784 LOC, 42 components) + Pinia + D3.js + Vitest + Tantivy 0.22 (full-text) + petgraph (graph) + Playwright E2E (1,078 LOC, 6 spec files) + native Rust MCP server bundled as separate binary + OpenRouter for multi-model
+- **Code volume:** ~29,900 LOC across 135 files. Largest file is `link_discovery.rs` at 1,815 LOC. Feature-folder organization (`commands/`, `services/`, `models/`), not layer-based.
+- **Tests:** **123 Rust unit tests** + 1,078 LOC of Playwright E2E + Vitest frontend tests
+- **CI/CD:** 4 GitHub Actions workflows. `test.yml` runs 6 parallel jobs on every PR (preflight, Rust tests, frontend tests, lint+clippy, security audit, build). `release.yml` is a 4-platform matrix (Windows x64, Windows ARM64, macOS ARM64, Linux x64), builds the MCP binary separately, uploads to Cloudflare R2, generates an updater manifest, verifies the endpoint. `release-smoke.yml` builds on every PR. `latest-deps.yml` does weekly forward-compat dependency testing.
+- **Release discipline:** Semantic versioning, **9 releases (v0.0.3 → v0.1.8) in 63 days**, two-phase release flow (prepare PR with version bumps + Cargo.lock regen → merge → tag), conventional commits with PR refs, no tag reuse ever
+- **Documentation:** **22.3 KB CLAUDE.md** (~4,500 words) covering architecture diagram, full IPC command reference table, frontend API client structure, wikilink + 9 typed link relations, note status workflow, distillation pipeline, three link-discovery algorithms, multi-LLM canvas with semantic context injection + streaming, conversation import (4 platform parsers), temporal + graph-aware retrieval, settings runtime sync, MCP architecture, CI walkthrough, **known CI pitfalls** (Tauri v1 + Ubuntu 22.04 quirks, Cargo.lock commit requirements), release rules. Plus `WORKING_GUIDE.md`, `TESTING_PROGRESS.md`, `HOW_TO_RUN.md`, separate READMEs per package.
+- **Production signals:** Auto-updates via Cloudflare R2, offline feedback queue with retry, graceful MCP fallback (read-only when desktop holds the lock), GitHub Issues integration
+
+### Honest gaps in Grafyn (where Clicky Windows could exceed)
+- No `ROADMAP.md`
+- No `DECISIONS.md`
+- 26 pre-existing Clippy warnings tolerated via `continue-on-error: true` (not `clippy -D warnings` strict)
+- No public "unexpected finding" writeup (the editorial standard the user's wiki documents)
+- Coverage badges/targets not stated
+
+### The B0 bar in one sentence
+**Production-grade desktop app + rigorous engineering discipline + real problem + novel structural insight.** Not "good code" — production discipline plus an insight about what you learned building it.
+
+### The tension this creates with my current plan
+
+My current Phase 1 plan is a **Python script with ~10 files, no tests, manual verification, in-memory state, no CI.** That is **deliberately below the Grafyn bar.** It's a throwaway proof-of-concept whose only job is to validate that the loop works on Windows before committing to a Tauri rewrite.
+
+The previous chat already locked in this two-phase strategy: **Python to prove the loop → Tauri to match the bar.** Grafyn doesn't invalidate that strategy — it confirms it. But it does sharpen the question of **how much time to spend on Phase 1**, because:
+
+1. Phase 1 will not be evaluated against the B0 bar. It's scaffolding.
+2. Every hour spent polishing Phase 1 is an hour not spent on Phase 2 (which IS what gets evaluated).
+3. Vercept (Anthropic acquired Feb 2026) is racing to ship first-party Windows screen-aware AI. Phase 2 needs to ship before they do.
+4. Grafyn took 63 days of focused work to reach v0.1.8 — and the user has 4+ parallel projects (LearnLoop ongoing, MU Exemption, NoonCheck, Solar Bag).
+
+**Implication:** Phase 1 should be **as short as humanly possible** — maybe 2-3 days, hard cap. Goal: prove the OS-integration unknowns (DPI, click-through, hotkey suppression, Whisper latency) work on Windows. Then **immediately** start Phase 2 in Tauri/Rust/Vue3 to match Grafyn's bar exactly.
+
+### What Phase 2 needs to copy from Grafyn (concrete checklist)
+
+This is the bar Phase 2 will be evaluated against. Locking it in here so we don't forget:
+
+1. **Tauri 1.8 + Rust + Vue 3 + Pinia** (no Python sidecar, no Electron)
+2. **Feature-folder backend module structure** — `src-tauri/src/commands/` (capture, ai, overlay, hotkey, memory, settings) + `services/` (whisper, computer_use, screen_capture, window_manager, sqlite_store) + `models/`
+3. **123+ Rust unit tests** in `src-tauri/src/` covering services + integration tests for IPC commands
+4. **800+ LOC of Playwright E2E tests** covering capture → AI → overlay → memory recall flows
+5. **Vitest frontend tests** with explicit coverage target ≥80%
+6. **`cargo clippy -D warnings` strict** — exceed Grafyn here
+7. **4 GitHub Actions workflows**: `test.yml` (parallel jobs), `release-smoke.yml` (PR builds), `release.yml` (Windows x64 + ARM64 matrix at minimum, Mac/Linux nice-to-have), `latest-deps.yml` (weekly forward-compat)
+8. **Semantic versioning + two-phase release flow**: prepare PR with version bump + Cargo.lock regen → merge → tag, never reuse tags
+9. **Conventional commits** with PR references
+10. **`CLAUDE.md` ≥4,000 words** with architecture diagram, IPC command reference, threading + DPI + coordinate-space documentation, CI pitfalls, release rules
+11. **`ROADMAP.md` + `DECISIONS.md`** at root — exceed Grafyn here, both are gaps in their repo
+12. **Auto-updates** via Cloudflare R2 + Workers (the user already has Cloudflare CLI installed per `~/.claude/CLAUDE.md`)
+13. **Settings system** with persistent JSON config + runtime sync (no restart on settings change)
+14. **Single-binary deployment** — Windows MSI/MSIX, code-signed if budget allows
+15. **Published "Unexpected Finding" writeup** — exceed Grafyn here, the user's own wiki documents this is the most important section of a B0 case study
+16. **5+ real users + documented feedback** before declaring Phase 2 done
+
+### Strategic question for the user
+
+Given the Grafyn bar and the Vercept threat clock, three options for sequencing:
+
+| Option | What it means | Pros | Cons |
+|---|---|---|---|
+| **A. Python Phase 1 → Tauri Phase 2** (current plan) | 3-5 days Python prototype, then 2-3 months Tauri | Lowest risk: proves the unknowns before committing to the harder stack | Two builds = 1-2 weeks of "wasted" Python work |
+| **B. Skip Python, go straight to Tauri** | 2-3 months Tauri from day 1 | Single codebase, matches B0 bar from day 1 | Higher risk: Tauri click-through + Rust hotkey hooks + Whisper bindings could each eat days; if any fails, no fallback |
+| **C. 2-day hard-capped Python "spike" → Tauri** | Python only proves the 3 hardest unknowns (click-through, hotkey suppression, Whisper latency on CPU). Not a full demo. Then immediately rewrite in Tauri. | De-risks the unknowns AND minimizes wasted Python work | Requires actual discipline to stop at 2 days |
+
+**My recommendation: Option C.** Two-day Python spike to validate just the OS-integration unknowns (not the full loop, not pretty, not even integrated — three standalone scripts: `spike_overlay.py`, `spike_hotkey.py`, `spike_whisper.py`). Confirms whether the Tauri version will hit the same walls. Then immediately switch to Tauri and build the real thing against the Grafyn bar.
+
+**Option A is the previous-chat-locked plan, and is also defensible.** Option B is too risky given the unknowns.
+
+I need the user's call on this before exiting plan mode.
+
+## Sequence After Plan Approval
+
+1. **Resolve Superpowers question** (waiting on user follow-up)
+2. Write `PRD.md`, `ROADMAP.md`, `DECISIONS.md` in that order
+3. Step 0: scaffold + git + private GitHub repo
+4. Steps 1–7 in order, with explicit user verification + ROADMAP/DECISIONS update after each
+5. Step 8: polish + README + demo recording
+6. Hand back for end-to-end demo + Phase 2 planning kickoff
+
+## Open Question
+
+**Superpowers**: install (`npx -y @anthropic-ai/superpower@latest init`) before Step 0, or skip? You said "wait for follow-up message." Still waiting on that. My recommendation: **install it** — it's the one workflow tool worth running, costs 1 minute, the previous session already vetted it. But it's your call.

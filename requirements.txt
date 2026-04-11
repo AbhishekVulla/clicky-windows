@@ -1,0 +1,18 @@
+# Clicky Windows — Phase 1 dependencies
+# See DECISIONS.md for why each was chosen (especially faster-whisper over openai-whisper).
+
+# Core
+anthropic>=0.40.0          # Claude SDK with Computer Use API beta
+mss>=9.0.1                 # Multi-monitor screen capture, DPI-aware
+PyQt6>=6.7.0               # Transparent overlay + QPropertyAnimation
+pynput>=1.7.7              # Global hotkey with low-level hook suppression
+sounddevice>=0.5.0         # Audio capture via WASAPI/portaudio
+numpy>=1.26.0              # Audio buffer manipulation
+faster-whisper>=1.0.3      # Local STT, CTranslate2 backend (4x faster than openai-whisper on CPU)
+pyttsx3>=2.98              # Local TTS (Windows SAPI)
+Pillow>=10.4.0             # Image resize with LANCZOS, base64 encoding
+python-dotenv>=1.0.1       # Load ANTHROPIC_API_KEY from .env
+
+# Dev / test
+pytest>=8.3.0              # Unit tests (target ~50-80 in Phase 1)
+pytest-mock>=3.14.0        # Mock Anthropic client, audio device, screen capture in tests
