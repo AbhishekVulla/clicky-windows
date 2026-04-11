@@ -2,16 +2,16 @@
 # See DECISIONS.md for why each was chosen (especially faster-whisper over openai-whisper).
 
 # Core
-anthropic>=0.40.0          # Claude SDK with Computer Use API beta
+anthropic>=0.40.0          # Claude SDK with Computer Use API beta + response streaming
 mss>=9.0.1                 # Multi-monitor screen capture, DPI-aware
 PyQt6>=6.7.0               # Transparent overlay + QPropertyAnimation
 pynput>=1.7.7              # Global hotkey with low-level hook suppression
-sounddevice>=0.5.0         # Audio capture via WASAPI/portaudio
+sounddevice>=0.5.0         # Audio capture (PCM16 16kHz for STT) + output playback (Cartesia PCM stream)
 numpy>=1.26.0              # Audio buffer manipulation
-faster-whisper>=1.0.3      # Local STT, CTranslate2 backend (4x faster than openai-whisper on CPU)
-pyttsx3>=2.98              # Local TTS (Windows SAPI)
+assemblyai>=0.33.0         # Streaming STT (u3-rt-pro WebSocket + ForceEndpoint for PTT, ~150ms P50 finalization — matches Clicky)
+cartesia>=1.0.0            # Streaming TTS (Sonic-3 WebSocket, ~150-250ms TTFB, expressive "buddy" voice, async Python SDK)
 Pillow>=10.4.0             # Image resize with LANCZOS, base64 encoding
-python-dotenv>=1.0.1       # Load ANTHROPIC_API_KEY from .env
+python-dotenv>=1.0.1       # Load ANTHROPIC_API_KEY + ASSEMBLYAI_API_KEY + CARTESIA_API_KEY from .env
 
 # Dev / test
 pytest>=8.3.0              # Unit tests (target ~50-80 in Phase 1)

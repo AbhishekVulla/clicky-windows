@@ -14,13 +14,29 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-# ── API ──────────────────────────────────────────────────────────────────────
+# ── API keys ─────────────────────────────────────────────────────────────────
 
 ANTHROPIC_API_KEY: str | None = os.getenv("ANTHROPIC_API_KEY")
-"""Required for Phase 1. Computer Use API beta is Anthropic-direct only."""
+"""Required. Computer Use API beta is Anthropic-direct only. Sonnet 4.6 default."""
+
+ASSEMBLYAI_API_KEY: str | None = os.getenv("ASSEMBLYAI_API_KEY")
+"""Required for Phase 1. Streaming STT via AssemblyAI u3-rt-pro WebSocket +
+ForceEndpoint for ~150ms P50 PTT finalization. $50 free credit from
+https://www.assemblyai.com/dashboard/signup, no credit card required."""
+
+CARTESIA_API_KEY: str | None = os.getenv("CARTESIA_API_KEY")
+"""Required for Phase 1. Streaming TTS via Cartesia Sonic-3 WebSocket with
+~150-250ms TTFB + expressive "buddy" voice. 20k free credits/month from
+https://play.cartesia.ai/sign-in, no credit card required."""
+
+
+# ── Claude model ─────────────────────────────────────────────────────────────
 
 MODEL_ID: str = os.getenv("MODEL_ID", "claude-sonnet-4-6")
-"""Claude model used for vision + Computer Use tool calls."""
+"""Claude model used for vision + Computer Use tool calls. Default Sonnet 4.6
+because Haiku 4.5 doesn't support the computer-use-2025-11-24 beta header
+(only the older computer-use-2025-01-24). Phase 2 may add benchmark-driven
+switching. See DECISIONS.md 'Priority inversion: latency > local-first'."""
 
 COMPUTER_USE_BETA: str = "computer-use-2025-11-24"
 """anthropic-beta header value that activates Computer Use API + pixel-counting training."""
@@ -43,31 +59,72 @@ Clicky's ElementLocationDetector.swift."""
 
 # ── Hotkey ───────────────────────────────────────────────────────────────────
 
-HOTKEY: str = os.getenv("HOTKEY", "alt+space")
-"""Default push-to-talk hotkey. NEVER ctrl+space (conflicts with VS Code
-IntelliSense). Fallback if alt+space suppression is flaky: ctrl+shift+space."""
+HOTKEY: str = os.getenv("HOTKEY", "ctrl+shift+space")
+"""Default push-to-talk hotkey. Ctrl+Shift+Space because pynput's suppress
+flag is all-or-nothing global — we cannot suppress just Alt+Space without
+blocking all typing. Ctrl+Shift+Space has no default Windows OS behavior,
+so we use suppress=False (observe but don't consume).
+
+NEVER ctrl+space (VS Code IntelliSense conflict). Minor conflict: VS Code
+triggers Parameter Hints on ctrl+shift+space — acceptable tradeoff.
+
+See DECISIONS.md 2026-04-12 entry "Ctrl+Shift+Space over Alt+Space — pynput
+suppress=True is globally destructive, not per-combo" for the pivot story.
+Phase 1.5 may add a Win32 RegisterHotKey subclass of PushToTalkHotkey that
+restores Alt+Space ergonomics (abstract interface makes it a drop-in swap)."""
 
 
-# ── STT ──────────────────────────────────────────────────────────────────────
+# ── STT (AssemblyAI u3-rt-pro streaming) ─────────────────────────────────────
 
-WHISPER_MODEL: str = os.getenv("WHISPER_MODEL", "base")
-"""faster-whisper model size. Options: tiny, base, small, medium, large.
-base = ~150 MB, ~real-time on modern CPU. Fall back to tiny if too slow."""
+ASSEMBLYAI_SPEECH_MODEL: str = "u3-rt-pro"
+"""AssemblyAI Universal-3 realtime-pro. Matches Clicky's Swift source
+(leanring-buddy/AssemblyAIStreamingTranscriptionProvider.swift:447-451).
+~150ms P50 finalization after ForceEndpoint message on hotkey release."""
 
-WHISPER_DEVICE: str = "cpu"
-"""Whisper device. CPU for privacy-first local STT. GPU support is Phase 2."""
-
-WHISPER_COMPUTE_TYPE: str = "int8"
-"""Quantization for faster-whisper. int8 is 4x faster than float32 with negligible quality loss."""
+ASSEMBLYAI_STREAMING_URL: str = "wss://streaming.assemblyai.com/v3/ws"
+"""AssemblyAI streaming WebSocket endpoint. Query params are set via SDK."""
 
 AUDIO_SAMPLE_RATE: int = 16_000
-"""Whisper expects 16 kHz mono audio."""
+"""PCM16 mono at 16kHz. Matches AssemblyAI u3-rt-pro's required sample rate +
+Clicky's audio pipeline + the canonical input shape for every major
+streaming STT provider."""
+
+AUDIO_CHUNK_FRAMES: int = 1024
+"""sounddevice RawInputStream blocksize. Matches Clicky's
+AVAudioEngine.installTap(onBus:0, bufferSize:1024) exactly so the streaming
+WebSocket payload shape is identical for Phase 2 provider swaps."""
 
 
-# ── TTS ──────────────────────────────────────────────────────────────────────
+# ── TTS (Cartesia Sonic-3 WebSocket streaming) ──────────────────────────────
 
-TTS_RATE_WPM: int = 180
-"""pyttsx3 voice rate in words per minute. Default is 200 which is too fast."""
+CARTESIA_MODEL_ID: str = "sonic-3"
+"""Cartesia's state-space-model-based TTS. ~90ms model-internal TTFB,
+150-250ms real-world through the WebSocket stream + sounddevice playback.
+Most expressive 'buddy' voice quality in the cloud TTS field as of April 2026.
+See DECISIONS.md 'Priority inversion' for the research."""
+
+CARTESIA_VOICE_ID: str = os.getenv(
+    "CARTESIA_VOICE_ID",
+    "e07c00bc-4134-4eae-9ea4-1a55fb45746b",  # "Brooke - Big Sister" — confident adult female, conversational
+)
+"""Cartesia voice ID for Sonic-3. Default is "Brooke - Big Sister" — a confident
+adult female voice described as "for conversational use cases" in Cartesia's
+voice catalog. The "big sister" framing matches our "buddy next to you" UX.
+
+Swap via .env CARTESIA_VOICE_ID=... if Brooke doesn't land for the demo.
+Other strong feminine candidates from the Cartesia catalog:
+  - Cathy - Coworker (e8e5fffb-252c-436d-b842-8879b84445b6) — "nice young adult female for casual conversations"
+  - Skylar - Friendly Guide (db6b0ed5-d5d3-463d-ae85-518a07d3c2b4) — "approachable American female"
+  - Lauren - Lively Narrator (a33f7a4c-100f-41cf-a1fd-5822e8fc253f) — "expressive female, narration, storytelling" (most dramatic/emotive)
+  - Katie - Friendly Fixer (f786b574-daa5-4673-aa0c-cbe3e8534c02) — "enunciating young adult female, conversational support"
+The previous default (a0e99841...) was a hallucinated UUID I made up without
+verifying against Cartesia's catalog — sorry. User reported it as "kinda robotic"
+which is probably because Cartesia fell back to a default voice."""
+
+CARTESIA_OUTPUT_SAMPLE_RATE: int = 44_100
+"""Cartesia output stream sample rate. 44.1 kHz PCM float32 via sounddevice
+OutputStream. Cartesia supports 22.05k / 44.1k / 48k — 44.1k is the most
+natural for buddy voice without oversampling cost."""
 
 
 # ── Memory ───────────────────────────────────────────────────────────────────
@@ -96,6 +153,9 @@ not jittery. Phase 2 may switch to bezier easing."""
 
 # ── Latency targets ──────────────────────────────────────────────────────────
 
-E2E_LATENCY_BUDGET_S: float = 7.0
-"""Target end-to-end latency from hotkey release to voice response start.
-Dominant costs: Whisper (~2s) + Anthropic API (~3-5s)."""
+E2E_LATENCY_BUDGET_S: float = 1.5
+"""Target perceived latency from hotkey release to first audible word.
+Expected breakdown: ~150ms STT (AssemblyAI ForceEndpoint) + ~500-800ms
+Claude Sonnet 4.6 TTFT + ~200ms Cartesia Sonic-3 TTFB - ~300ms sentence-
+streaming overlap = ~800-1200ms. See DECISIONS.md 'Priority inversion:
+latency > local-first' for the full budget derivation."""
