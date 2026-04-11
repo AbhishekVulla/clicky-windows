@@ -79,7 +79,7 @@ This doc answers **what** and **why**. For **how** see [CLAUDE.md](CLAUDE.md). F
 9. SQLite index updated (interaction count, last_seen, first_seen)
 ```
 
-**End-to-end latency budget: ≤7 seconds.** Dominant costs: Whisper transcription (~2s), Anthropic API (~3-5s), everything else <500ms combined. Pre-warming Whisper + audio device at app startup is essential to hit this budget.
+**End-to-end perceived latency budget: ~800-1200ms from hotkey release to first audible word.** Breakdown: ~150ms AssemblyAI `ForceEndpoint` finalization + ~500-800ms Claude Sonnet 4.6 TTFT + ~200ms Cartesia Sonic-3 TTFB, minus ~300ms sentence-streaming overlap (Claude still generates while TTS plays sentence 1). See [DECISIONS.md § "Priority inversion: latency > local-first"](DECISIONS.md) for the full budget derivation and why the original ≤7s / pyttsx3 / faster-whisper framing was phantom scope.
 
 ## Phase 1 Scope + Acceptance Criteria
 
@@ -222,7 +222,7 @@ Full pull of `farzaa/clicky` open issues + all PRs via `gh api` on this date. Th
 
 | Upstream | Demand | Clicky status | Our response |
 |---|---|---|---|
-| [#1](https://github.com/farzaa/clicky/issues/1) | "What is the hotkey combo?" | Open — docs gap | **Documented in README** (written at end of Phase 1). Default Ctrl+Shift+Space, fallback Ctrl+Shift+Space. |
+| [#1](https://github.com/farzaa/clicky/issues/1) | "What is the hotkey combo?" | Open — docs gap | **Documented in README** (written at end of Phase 1). Default Ctrl+Shift+Space via `pynput.Listener(suppress=False)` (observe-only). Alt+Space was rejected for Phase 1 because pynput's `suppress=True` is globally destructive — see [DECISIONS.md 2026-04-12](DECISIONS.md). Phase 1.5 may add a Win32 `RegisterHotKey` subclass restoring Alt+Space. |
 | [PR #16](https://github.com/farzaa/clicky/pull/16) | "Allow user to configure push-to-talk shortcut from panel" | Open, unmerged | **Phase 2** after settings UI exists. |
 
 **Security:**
@@ -258,7 +258,7 @@ Full pull of `farzaa/clicky` open issues + all PRs via `gh api` on this date. Th
 |---|---|---|---|---|
 | 1 | PyQt6 click-through unreliable on Win11 with certain GPU drivers | High | High (no overlay = no demo) | Apply Win32 layered window flags via ctypes after `show()`. Fallback: tkinter + `-transparentcolor` + pywin32. Document in DECISIONS.md which approach won on test machine. |
 | 2 | Per-monitor DPI math wrong on mixed-DPI setups | Very High | High (pointer lands in wrong place) | `SetProcessDpiAwareness(2)` at startup. Document all 3 coordinate spaces (physical, logical, Claude) in code comments. Step 1 acceptance: mouse over known UI element, verify printed coords ±2 px. |
-| 3 | Ctrl+Shift+Space suppression conflicts (antivirus, Logitech G HUB, IME) | Medium | Medium (degrades to "doesn't fire") | `pynput.Listener(suppress=True)` low-level hook. Fallback: Ctrl+Shift+Space, logged in DECISIONS.md. |
+| 3 | Ctrl+Shift+Space hotkey conflicts (VS Code Parameter Hints, rare third-party mappers, IME) | Low | Low (minor UX nit, no crash) | `pynput.Listener(suppress=False)` observe-only — we do NOT consume key events, so conflicts degrade to "app underneath also sees the key" rather than "app underneath loses the key." Ctrl+Shift+Space has no default Windows OS behavior, so no menu pops. Phase 2 configurable hotkey UI (PR #16) lets users rebind if the VS Code Parameter Hints overlap becomes annoying. See [DECISIONS.md 2026-04-12 "Ctrl+Shift+Space over Alt+Space"](DECISIONS.md). |
 | 4 | AssemblyAI / Cartesia network unreachable (no internet, firewall block, provider outage) | Medium | High | Clear `RuntimeError` with diagnostic instructions at streaming client construction. Reactive fallback to `FasterWhisperSTT` + `Pyttsx3TTS` is a 1-2 hour Phase 2 subclass swap via the abstract base pattern. No preemptive Phase 1 fallback (YAGNI). |
 | 5 | Threading deadlocks (PyQt main loop + pynput thread + audio + Whisper + Anthropic workers) | High | High (silent freeze) | Single strict rule: only Qt signals cross thread boundaries. No UI calls from worker threads. Code review every cross-thread call. |
 | 6 | End-to-end latency > 8s feels broken | Medium | Medium (UX perception) | Print per-stage timing during dev. Pre-warm Whisper + audio. Optional: add audible "listening" cue on hotkey press so user gets immediate feedback. |
