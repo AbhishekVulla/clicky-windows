@@ -516,4 +516,119 @@ During Step 6 manual verification on 2026-04-12, the user ran `py -3.13 -m hotke
 
 ---
 
+## 2026-04-12: Removed `infer_skill_level` from memory.py — no pedagogical framework matches Clicky's learn-by-doing UX
+
+**Context:** The original memory.py plan (`docs/superpowers/plans/2026-04-12-memory.md` + pre-compact `memory py.txt`) included an `infer_skill_level(app_name) -> Literal["beginner", "intermediate", "expert"]` public method on `MemoryStore`. Buckets: `< 5` interactions = beginner, `5..20` = intermediate, `> 20` = expert. Unknown app → beginner fallback. Rationale at the time: "inject a 'user appears to be intermediate at this app' line into Claude's prompt alongside the recalled markdown so Claude adapts vocabulary + assumed knowledge."
+
+During the build on 2026-04-12, right after Boris #5 self-critique + the test suite hit 99/99 green, the user pushed back hard, verbatim: *"Why does beginner intermediate expert even matter for clicky? This is not Khan academy now is it? The whole value is learn by doing is it not? There is no reward system so why would we want to do that?"*
+
+The critique was correct and surfaced a design leak I hadn't caught during the plan review.
+
+**Decision:** `infer_skill_level` is **removed entirely** from memory.py. No "mark for Phase 2," no feature flag, no deprecation comment. The method, its 7 tests, its `typing.Literal` import, its manual-gate print output, and every mention in the plan doc are deleted or marked historical. `MemoryStore` now has exactly four public methods: `__init__`, `recall()`, `record()`, `list_known_apps()`.
+
+**Why it was wrong:**
+
+1. **Clicky's product model is "press hotkey, ask, see pointer, done."** There is no course, no curriculum, no progression ladder, no XP, no unlock gate. Slapping a skill label on the user imports pedagogical framing from apps (Khan Academy, Duolingo, Codecademy) that have nothing structurally in common with what we're building.
+2. **The bucket thresholds were invented without evidence.** I picked `<5` / `5..20` / `>20` because they sounded reasonable. There is no data that says 5 interactions is where "beginner" ends. Phase 1's job is to validate the memory hypothesis, NOT to validate arbitrary skill thresholds invented during a planning session.
+3. **Interaction count is not a skill signal.** A user who asked "how do I open this file" 30 times is not an "expert" — they have a recurring problem. Count alone tells you engagement depth, not comprehension.
+4. **The LLM can already infer this from the raw markdown.** If Claude reads the recalled tail of `excel.exe.md` and sees five interactions all about the same feature, it can infer the user is stuck. If it sees interactions spanning complex workflows, it can infer depth. We don't need a pre-digested label — that's exactly the kind of "reach for fancy RAG" anti-pattern the Karpathy LLM-KB tweet warns against. Trust the LLM, put the raw data in, don't pre-process.
+5. **It wasn't in the Phase 1 acceptance criteria.** PRD.md § Phase 1 Scope does not mention skill-level adaptation. The hypothesis is *"persistent memory makes Clicky Windows meaningfully better than stateless Clicky"* — full stop. Skill-level injection was extra scope that snuck in during planning because it sounded clever.
+
+**Alternatives considered:**
+
+1. **Keep it, mark as experimental** — rejected. Phase 1 shouldn't ship experimental features that aren't part of the validation hypothesis. Every extra surface is another thing that can fail + distracts from the real test.
+2. **Defer to Phase 2 behind a feature flag** — rejected. YAGNI. If we don't need it in Phase 1, we might not need it ever. Add it back IF AND WHEN 5+ real sessions show Claude adapts poorly without an explicit skill signal. At that point we'd also have real data to calibrate the thresholds, instead of guessing.
+3. **Replace with a smarter heuristic (question complexity, time-between-sessions, repetition detection)** — rejected. Same problem: we're pre-digesting data the LLM can read directly. If we build any of these, it should be motivated by observed Phase 1 failure modes, not speculative design.
+4. **Delete it entirely** (chosen) — ships the minimum surface that tests the real hypothesis. If the hypothesis is wrong, we find out faster because there's one less variable. If the hypothesis is right, we don't have to justify the extra methods in the demo.
+
+**Why this won:** The user's one-line critique was dispositive: *"This is not Khan Academy."* That's a product-framing pushback that can't be answered with engineering arguments. I had not grounded the method in any actual UX hypothesis — I added it because the pre-compact design doc said to, not because it was the right thing to ship. Karpathy "wait for the data" applies literally. Adding code that isn't tied to a testable hypothesis is premature optimization.
+
+**Consequences:**
+
+- `memory.py`: `infer_skill_level` method deleted (~35 LOC). `typing.Literal` import deleted. Module docstring updated to remove skill-level mention in the responsibility-boundary section. `__main__` manual-gate block no longer prints skill level; checklist is 4 items instead of 5.
+- `tests/test_memory.py`: 7 tests deleted (6-parametrize `test_infer_skill_level_buckets` + 1 `test_infer_skill_level_unknown_app_returns_beginner`). Test count drops from 22 to 15. Full suite: 99 → 92 green.
+- `docs/superpowers/plans/2026-04-12-memory.md`: "DEVIATION FROM PLAN" section added at top explaining the deletion. Original plan content (including skill-level sections) preserved below as historical record so future Claude reading post-/compact doesn't get confused about the source of truth.
+- `app.py` (Step 7, not yet built): the Step 7 plan + eventual implementation will NOT inject a skill-level line into the Claude prompt. Prompt construction will be: image + text content block with `[Previous interactions in <app>:]\n<recall() output>\n\n[Current question:]\n<transcript>`. Simpler, more Karpathy-pure.
+- `tools/lint_memory.py` (Step 7.5, not yet built): may still compute skill-level-like patterns in the weekly insights report if the data reveals them, but it does NOT inject anything back into the runtime memory store. Lint output is for the user's eyes (via `insights.md`), not for Claude's prompt.
+- No impact on `capture.py` / `ai.py` / `overlay.py` / `stt.py` / `tts.py` / `hotkey.py`.
+
+**References:**
+
+- User quote, 2026-04-12: *"Why does beginner intermediate expert even matter for clicky? This is not Khan academy now is it? The whole value is learn by doing is it not? There is no reward system so why would we want to do that?"*
+- `docs/superpowers/plans/2026-04-12-memory.md` § "DEVIATION FROM PLAN" (added 2026-04-12)
+- `feedback_brutally_honest_mode.md` memory: *"Do NOT agree by default. Challenge the user's assumptions. If the user's plan is weak, say so."* — I should have challenged my own plan on this point, not needed the user to do it.
+- Karpathy LLM-KB tweet (cited in DECISIONS.md 2026-04-11 "Karpathy-style markdown memory + SQLite index hybrid"): *"the LLM has been pretty good about auto-maintaining index files and brief summaries... it reads all the important related data fairly easily at this small scale."* — pre-digesting skill level violates this principle.
+- PRD.md § Phase 1 Acceptance Criteria (zero mentions of skill-level adaptation)
+
+---
+
+## 2026-04-12 (evening): Ctrl+Alt+Space replaces Ctrl+Shift+Space — Excel/Sheets Select-All conflict + Windows launcher industry research
+
+**Context:** Earlier today (2026-04-12 morning), we pivoted from Alt+Space (globally destructive with `pynput.Listener(suppress=True)`) to **Ctrl+Shift+Space** with `suppress=False` (observe-only), documented in the `## 2026-04-12: Ctrl+Shift+Space over Alt+Space — pynput suppress=True is globally destructive` entry above. That pivot solved the global-keyboard-blackout bug but introduced a new one: **Microsoft Excel and Google Sheets both bind Ctrl+Shift+Space to "Select entire worksheet"**, equivalent to Ctrl+A's second-press behavior. Because our listener is observe-only, the spreadsheet underneath ALSO receives the keypress every time the user holds Ctrl+Shift+Space to invoke Clicky — which means every Clicky question in Excel wipes the user's cell selection. Excel is the #1 demo example in `PRD.md` ("learning Excel") so this is a showstopper for Phase 1 validation.
+
+User caught this during review on 2026-04-12 evening. Rather than assume the fix, we did research-backed evaluation of alternatives via three WebSearch passes (see "Research" section below).
+
+**Decision:** Phase 1 hotkey is **Ctrl+Alt+Space** via `pynput.keyboard.Listener(suppress=False)`. 3-flag state machine (`_ctrl_down`, `_alt_down`, `_space_down`), RECORDING requires all 3 held, any release of any of the 3 fires `on_release`. `_is_alt()` helper normalizes `Key.alt`, `Key.alt_l`, `Key.alt_r`, `Key.alt_gr` (international AltGr keyboards included). Same `suppress=False` observe-only model as the morning pivot — the load-bearing property is that the combo has no default Windows OS behavior so the underlying apps can safely see the keypress without any user-visible side effect.
+
+**Alternatives considered (research-backed, not speculated):**
+
+1. **Fn+Space** — rejected. AutoHotkey community, pynput docs, and Microsoft `SetWindowsHookExA` docs all confirm: *"the Fn key does not (as a general rule) generate any scan code that can be used by AHK, as the key is intercepted and interpreted directly by the PC's BIOS."* The Fn key is handled by the keyboard Embedded Controller BELOW the OS layer; `WH_KEYBOARD_LL` does not see it. On many laptops, Fn+Space produces a hardware action (brightness / backlight / airplane mode) instead of a Space event. Even when it happens to work on a specific laptop model, it's OEM-specific and non-portable. Desktop keyboards don't have Fn at all. Hard no.
+
+2. **Pause/Break single key** — rejected. One-finger, zero conflicts, but missing from many modern laptop keyboards (compact / MacBook-style layouts). Non-portable for the Phase 2 audience even if Abhishek's specific Phase 1 laptop has it.
+
+3. **Win+Alt+Space** — Microsoft PowerToys Command Palette 0.93 uses this specifically to dodge the Alt+Space battleground. Microsoft-endorsed, zero conflicts, but three-finger and requires holding the Win key which is awkward for extended PTT usage. Ergonomically worse than Ctrl+Alt+Space (all-left-hand) for no real gain.
+
+4. **Alt+Space with Win32 `RegisterHotKey` + manual Windows-settings-disable** — the industry-standard 2-finger combo (Raycast, Flow Launcher, PowerToys Run, Launchy all use it). Pros: best ergonomics, aligns with user muscle memory from other launchers. Cons: requires 8-12h of fragile ctypes code (`RegisterHotKey` + `GetAsyncKeyState` polling for release detection + AutoHotkey-style masking-Ctrl tricks), AND requires users to manually disable the Windows window menu + Copilot bindings via `Settings > Hotkeys`. Pulls Phase 1.5 work forward into Phase 1. **Deferred to Phase 1.5 as a drop-in `RegisterHotKeyPushToTalk(PushToTalkHotkey)` subclass.** The abstract interface makes the Phase 1 → Phase 1.5 swap a trivial factory change without touching `app.py`.
+
+5. **Tilde (\`) single key** — rejected. Discord community recommendation for push-to-talk, one-finger universal, but conflicts with terminal shell command-substitution syntax which is Abhishek's primary developer workflow.
+
+6. **Ctrl+Shift+Space** (status quo from morning) — rejected. Excel/Sheets conflict confirmed empirically.
+
+7. **Ctrl+Alt+Space** (chosen) — 10-minute pivot from Ctrl+Shift+Space (just swap `_shift_down` → `_alt_down` + `_is_shift` → `_is_alt`), zero known conflicts (verified against Excel, Sheets, Windows window menu, Copilot, VS Code), three-finger but all on the left side for one-handed holding, reuses the existing `suppress=False` observe-only model unchanged. VS Code binds Ctrl+Shift+Space to "Trigger Parameter Hints" — that was a minor conflict with the previous pivot but is NOT a conflict with Ctrl+Alt+Space, which has no VS Code binding.
+
+**Research performed before this decision (WebSearch, 2026-04-12 evening):**
+
+- *"pynput detect Fn key Windows Python Listener"* — confirmed pynput cannot see Fn; returns `None` or is unrecognized. pynput is built on `SetWindowsHookEx` + `WH_KEYBOARD_LL` which doesn't see Fn natively.
+- *"Windows 'Fn key' SetWindowsHookEx WH_KEYBOARD_LL detectable scan code"* — confirmed the low-level hook doesn't have reliable scan code info for Fn; firmware-handled.
+- *"'Fn+Space' Windows hotkey register AutoHotkey detect"* — authoritative AutoHotkey community answers confirming Fn is BIOS-intercepted and most key combos involving Fn produce either a hardware action or no event at all.
+- *"Windows popular desktop apps global hotkey defaults PowerToys Flow Launcher Raycast alternatives 2026"* — mapped Raycast / Flow Launcher / PowerToys Run / PowerToys Command Palette / Launchy defaults. All use Alt+Space except PowerToys Command Palette (Microsoft's newest, which uses Win+Alt+Space specifically to dodge the Alt+Space battleground).
+- *"Windows app launcher 'default hotkey' 'Alt+Space' vs 'Ctrl+Space' conflict"* — confirmed Alt+Space fights with Windows window menu + Copilot reassignment (late 2024); most apps require users to manually disable these via Settings > Hotkeys before Alt+Space works reliably.
+- *"Discord 'push to talk' default hotkey Windows global"* — Discord ships no default; users pick their own; common recommendations are tilde or mouse side buttons.
+
+**Why this won:** The research-backed option matrix landed on exactly two defensible Phase 1 picks — Ctrl+Alt+Space or Win+Alt+Space. Ctrl+Alt+Space is slightly more ergonomic (all-left-hand) with no loss of authority support (neither combo is an established industry standard; Win+Alt+Space is Microsoft-endorsed for launchers but we're not a launcher). User picked Ctrl+Alt+Space via AskUserQuestion on 2026-04-12 evening, with explicit "Phase 1.5 still delivers Alt+Space via Win32 RegisterHotKey subclass" lineage preserved from the earlier entry.
+
+**Consequences:**
+
+- `hotkey.py` rewritten: `_shift_down` → `_alt_down`, `_is_shift()` → `_is_alt()` (with `Key.alt_gr` support for international keyboards), module docstring fully rewritten to explain the Ctrl+Alt+Space rationale + Fn+Space research-backed rejection + reference this entry.
+- `tests/test_hotkey.py` rewritten: 11 tests (was 10) — added `test_alt_gr_is_treated_as_alt` as a bonus for international keyboard layouts. All state-machine tests renamed from `test_ctrl_shift_*` to `test_ctrl_alt_*`. `test_start_creates_listener_with_suppress_false` assertion message updated to cite this entry.
+- `config.py` `HOTKEY` default: `"ctrl+shift+space"` → `"ctrl+alt+space"`. Docstring fully rewritten with the three-level pivot history (Alt+Space → Ctrl+Shift+Space → Ctrl+Alt+Space) and the research-backed Fn+Space rejection.
+- `.env.example` HOTKEY comment updated.
+- `CLAUDE.md`, `PRD.md`, `ROADMAP.md` — all "Ctrl+Shift+Space" references replaced with "Ctrl+Alt+Space" via replace_all.
+- `project_phase1_current_state.md` memory file — hotkey subsection updated to reflect Ctrl+Alt+Space as the shipped Phase 1 hotkey. The earlier Ctrl+Shift+Space decision entry in that file is explicitly marked superseded by this one for Phase 1.
+- The earlier `## 2026-04-12: Ctrl+Shift+Space over Alt+Space` entry is **SUPERSEDED for Phase 1** by this entry, but the reasoning about `suppress=True` being globally destructive remains valid — just that Ctrl+Shift+Space was the wrong fallback choice. The proper Phase 1.5 solution remains Win32 `RegisterHotKey` + manual disable of Windows window menu + Copilot bindings, restoring Alt+Space.
+- PR #16 (configurable hotkey UI) becomes even more valuable as a Phase 2 item now that we have three hotkey history points to show in the writeup: the Alt+Space attempt that failed globally, the Ctrl+Shift+Space attempt that failed in Excel, and the Ctrl+Alt+Space pragmatic ship.
+- Phase 1.5 writeup angle: we literally ran into the Alt+Space battleground the same way Flow Launcher, Launchy, and PowerToys Run did, documented it, and shipped Ctrl+Alt+Space while building toward the "proper" `RegisterHotKey` + manual-Windows-settings-disable solution. Genuine build-in-public material for the B0 case study.
+
+**Known minor conflicts that are acceptable:**
+
+- None verified. Ctrl+Alt+Space tests clean against Excel, Sheets, VS Code, Notepad, Windows window menu, and Copilot. Manual gate (`py -3.13 -m hotkey`) includes explicit Excel + Notepad verification as item #4 of the 6-item checklist.
+
+**References:**
+
+- User quote, 2026-04-12 evening: *"When i press ctrl shift space in excel it selects all?"* (empirical catch)
+- User quote, 2026-04-12 evening: *"do web search and actually see if it is possible instead of assuming"* (forced research-backed evaluation of Fn+Space instead of speculation)
+- User quote, 2026-04-12 evening: *"do web search and find what are the common and easy to use hotkeys that other custom desktop apps use?"* (forced industry scan)
+- [AutoHotkey — Using fn key as a modifier](https://www.autohotkey.com/boards/viewtopic.php?t=26471)
+- [AutoHotkey — How to activate "FN" key via AHK?](https://www.autohotkey.com/boards/viewtopic.php?t=82163)
+- [pynput docs — keyboard handling](https://pynput.readthedocs.io/en/latest/keyboard.html)
+- [Microsoft Learn — SetWindowsHookExA](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowshookexa)
+- [PowerToys Issue #13860 — PowerToys Run hijacks Alt+Space](https://github.com/microsoft/PowerToys/issues/13860)
+- [Microsoft gives Alt+Space to Copilot — Hacker News](https://news.ycombinator.com/item?id=42407426)
+- [Flow Launcher Issue #2622 — Failed to register Alt+Space](https://github.com/Flow-Launcher/Flow.Launcher/issues/2622)
+- [Raycast for Windows](https://www.raycast.com/windows)
+- [PowerToys Command Palette 0.93](https://windowsforum.com/threads/powertoys-command-palette-0-93-fast-sleek-windows-launcher-vs-flow-raycast.378624/)
+- Previous decision 2026-04-12 "Ctrl+Shift+Space over Alt+Space" (superseded for Phase 1 by this entry; reasoning about suppress=True still valid)
+
+---
+
 <!-- Append new decisions below this line. NEVER delete old entries. Format: ## YYYY-MM-DD: Short title → Context → Decision → Alternatives → Why → Consequences → References -->

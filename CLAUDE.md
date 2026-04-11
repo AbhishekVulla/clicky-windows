@@ -8,7 +8,7 @@ Clicky is macOS-only (Swift, ScreenCaptureKit, AppKit). Windows has 76% of deskt
 
 ## How It Works (Core Loop)
 ```
-1. User presses global hotkey (Ctrl+Shift+Space, push-to-talk) — NEVER Ctrl+Space (VS Code IntelliSense conflict)
+1. User presses global hotkey (Ctrl+Alt+Space, push-to-talk) — NEVER Ctrl+Space (VS Code IntelliSense conflict)
 2. App captures screenshot of monitor under cursor (DPI-aware, multi-monitor)
 3. Screenshot resized to aspect-ratio-matched resolution from [(1024,768),(1280,800),(1366,768)]
 4. Screenshot + voice transcript + recalled memory for this app sent to Claude Sonnet 4.6
@@ -29,7 +29,7 @@ Clicky is macOS-only (Swift, ScreenCaptureKit, AppKit). Windows has 76% of deskt
 
 - `mss` for screen capture (multi-monitor, DPI-aware via `SetProcessDpiAwareness(2)`)
 - PyQt6 transparent overlay with Win32 layered window flags via `ctypes` for true click-through
-- `pynput.Listener(suppress=True)` for Ctrl+Shift+Space push-to-talk
+- `pynput.Listener(suppress=True)` for Ctrl+Alt+Space push-to-talk
 - **STT — AssemblyAI Universal-3 realtime-pro streaming** via WebSocket with `ForceEndpoint` on hotkey release for ~150ms P50 PTT finalization. Python SDK: `assemblyai` (official). Audio capture: `sounddevice.RawInputStream` PCM16 16kHz mono 1024-frame chunks (matches Clicky's `AVAudioEngine.installTap` buffer exactly so Phase 2 provider swap is drop-in). API key: `ASSEMBLYAI_API_KEY` in `.env`. [Phase 2 fallbacks: `FasterWhisperSTT` local CPU offline, `GroqWhisperSTT` batch cloud simpler code, `DeepgramNova3STT` streaming — all kept as subclass candidates for future offline/pricing preferences.]
 - **TTS — Cartesia Sonic-3 WebSocket streaming** for ~150-250ms TTFB with the most expressive "buddy" voice quality in the cloud TTS field as of April 2026. Python SDK: `cartesia` (official, async WebSocket). Output format: PCM float32 44.1kHz streamed chunks played via `sounddevice` output stream. API key: `CARTESIA_API_KEY` in `.env`. No `Pyttsx3TTS` fallback in Phase 1 (YAGNI — reactive fix is a 1-hour subclass). [Phase 2 candidates: `Pyttsx3TTS` SAPI offline, `EdgeTTS` free Microsoft Neural, `ElevenLabsFlashTTS`, `DeepgramAura2TTS`.]
 - **Claude response streaming + sentence-level TTS chunking** (Step 7 `app.py` requirement) — subscribe to `content_block_delta` events with `delta.type == "text_delta"`, accumulate into a buffer, flush complete sentences to `tts.speak_sentence()` while Claude still generates remaining tokens. Tool_use block stays buffered until `content_block_stop` for it, then fires the overlay pointer animation. Saves ~300-500ms of perceived latency on multi-sentence responses. This is a genuine latency win Clicky does NOT do (they wait for the full response then play).
@@ -98,7 +98,7 @@ Clicky Windows/
 ├── overlay.py          ← PyQt6 + Win32 layered window transparent click-through
 ├── stt.py              ← STT abstract + FasterWhisperSTT
 ├── tts.py              ← TTS abstract + Pyttsx3TTS
-├── hotkey.py           ← pynput Ctrl+Shift+Space push-to-talk (suppress=True)
+├── hotkey.py           ← pynput Ctrl+Alt+Space push-to-talk (suppress=True)
 ├── memory.py           ← Karpathy markdown (~/.clicky-windows/memory/<app>.md) + SQLite index
 ├── config.py           ← env loading + constants (HOTKEY, WHISPER_MODEL, CANDIDATE_RESOLUTIONS, MODEL_ID, COMPUTER_USE_BETA)
 ├── requirements.txt    ← dependencies
@@ -120,7 +120,7 @@ Clicky Windows/
 - **API keys:** Never commit to git. Use `.env` file, add to `.gitignore`. Anthropic-direct only in Phase 1 (Computer Use beta requires it).
 - **Screenshots sent to Claude:** Pick resolution from `[(1024,768),(1280,800),(1366,768)]` by closest aspect-ratio match to the monitor (mirror Clicky). Resize with PIL `LANCZOS` to exact pixel dims. **Hide overlay before capture** (otherwise Claude sees its own pointer).
 - **Overlay:** Must be click-through (not steal focus), always-on-top, transparent background, no taskbar entry. **Per-monitor architecture**: one `QWidget` overlay per physical monitor from `QGuiApplication.screens()`, routed via `screen_for_monitor()` metadata match against `CaptureResult.monitor`. (Originally CLAUDE.md said "spans full virtual desktop" — overridden 2026-04-11 because Qt 6's "islands-of-screens" geometry on mixed-DPI Windows 11 makes single-widget spanning unreliable. See DECISIONS.md entry of the same date.) PyQt6's `WA_TransparentForMouseEvents` alone is NOT enough on Windows — you MUST also apply Win32 layered window flags via `ctypes`: `WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW` AFTER `show()` (OR in, never overwrite), followed by `SetWindowPos` with `SWP_FRAMECHANGED` so the change takes effect immediately. `apply_clickthrough_styles` raises `RuntimeError` with `ctypes.WinError()` context if `SetWindowLongW` returns 0 — no silent click-through failures.
-- **Hotkey:** Ctrl+Shift+Space push-to-talk via `pynput.keyboard.Listener(suppress=True)` low-level hook. Fallback: Ctrl+Shift+Space. **NEVER Ctrl+Space** — conflicts with VS Code IntelliSense which would break developer users' autocomplete.
+- **Hotkey:** Ctrl+Alt+Space push-to-talk via `pynput.keyboard.Listener(suppress=True)` low-level hook. Fallback: Ctrl+Alt+Space. **NEVER Ctrl+Space** — conflicts with VS Code IntelliSense which would break developer users' autocomplete.
 - **DPI:** Call `ctypes.windll.shcore.SetProcessDpiAwareness(2)` (per-monitor v2) at startup. Per-monitor DPI is mandatory on modern Windows — without it, the pointer lands in the wrong place on the secondary monitor.
 - **Coordinate spaces:** Three of them, document every conversion: (1) physical pixels on the monitor, (2) logical pixels in Qt, (3) declared resolution Claude returns coords in. Clamp Claude's coords before scaling.
 - **Memory (Phase 1, not Phase 2):** Karpathy-style — markdown files in `~/.clicky-windows/memory/<app>.md` + SQLite index at `~/.clicky-windows/index.db`. Each interaction appended to the app's markdown file with timestamp, window title, user question, Claude response, pointer targets. `recall()` reads the file directly into Claude's system prompt (no embeddings, no RAG). User can `cat EXCEL.EXE.md` to see what Clicky remembers about them.

@@ -1,38 +1,56 @@
-"""Clicky Windows global push-to-talk hotkey (Ctrl+Shift+Space).
+"""Clicky Windows global push-to-talk hotkey (Ctrl+Alt+Space).
 
 Installs a low-level Windows keyboard hook via pynput in OBSERVE-ONLY mode
 (`suppress=False`) and fires on_press / on_release callbacks when the
-Ctrl+Shift+Space combo becomes active / breaks.
+Ctrl+Alt+Space combo becomes active / breaks.
 
-Why Ctrl+Shift+Space and not Alt+Space (the ergonomic 2-finger combo we'd
-prefer): the previous Alt+Space implementation used `pynput.Listener(suppress=True)`
-to block the Windows title-bar menu from opening. That broke the user's
-entire keyboard globally because pynput's suppress flag is all-or-nothing —
-it cannot suppress ONE specific combo. Web research (NVDA Issue #3472, Qt
-Forum, Microsoft docs) confirmed that making Alt+Space work cleanly on
-Windows is an 8-12 hour project involving Win32 RegisterHotKey + GetAsyncKeyState
-polling + AutoHotkey-style masking-Ctrl tricks with fragile edge cases.
-Ctrl+Shift+Space has NO default Windows OS behavior, so we just observe it
-without suppressing anything — global typing works normally.
+Why Ctrl+Alt+Space and not Alt+Space, Ctrl+Shift+Space, or Fn+Space:
 
-See DECISIONS.md 2026-04-12 entry "Ctrl+Shift+Space over Alt+Space — pynput
-suppress=True is globally destructive" for the full rationale + research
-findings. Phase 1.5 / Phase 2 may upgrade to Win32 RegisterHotKey-based
-Alt+Space via a new subclass of PushToTalkHotkey — the abstract interface
-makes this a drop-in swap without touching app.py.
+- **Alt+Space alone** is reserved by Windows for the window menu (Move / Size /
+  Minimize / Maximize / Close). Microsoft also reassigned it to Copilot in
+  Windows 11 (late 2024). Every launcher that ships with Alt+Space (Raycast,
+  Flow Launcher, PowerToys Run, Launchy) requires users to manually disable
+  these via `Settings > Hotkeys`. Making it work cleanly requires Win32
+  `RegisterHotKey` + `GetAsyncKeyState` polling for release detection (8-12h
+  of fragile ctypes code). That upgrade is deferred to Phase 1.5 as a drop-in
+  subclass of `PushToTalkHotkey`.
+- **Ctrl+Shift+Space** was our earlier pivot target (morning of 2026-04-12),
+  but empirical testing revealed it conflicts with Microsoft Excel + Google
+  Sheets "Select entire worksheet" binding. Because this listener uses
+  `suppress=False` (observe-only), the spreadsheet underneath receives the
+  keypress AND wipes the user's selection every time they invoke Clicky. That
+  breaks the Excel-learning demo narrative entirely. See DECISIONS.md
+  2026-04-12 (evening) "Ctrl+Alt+Space replaces Ctrl+Shift+Space" for the
+  full rationale.
+- **Fn+Space** was researched and rejected: the Fn key is handled by the
+  laptop's Embedded Controller BELOW the OS layer. Windows never receives an
+  Fn keypress event. pynput's `WH_KEYBOARD_LL` hook does not see it. On many
+  laptops, Fn+Space produces a hardware action (brightness / backlight /
+  airplane mode) instead of a Space event. AutoHotkey community confirms:
+  *"the Fn key does not (as a general rule) generate any scan code that can
+  be used by AHK, as the key is intercepted and interpreted directly by the
+  PC's BIOS."* Non-portable even where it happens to work.
+- **Ctrl+Alt+Space** (chosen): 10-minute pivot from Ctrl+Shift+Space, zero
+  known conflicts (Excel, Sheets, Windows window menu, Copilot, VS Code all
+  clear), reuses the existing pynput suppress=False model. Three-finger combo
+  but all on the left side of the keyboard for one-handed ergonomics. VS Code
+  binds Ctrl+Shift+Space to "Trigger Parameter Hints" — that was a minor
+  conflict with the previous pivot but is NOT a conflict with Ctrl+Alt+Space.
 
-Minor conflict: VS Code uses Ctrl+Shift+Space for "Trigger Parameter Hints"
-(not IntelliSense — IntelliSense is Ctrl+Space which would be FAR worse, per
-DECISIONS.md "Alt+Space hotkey, NEVER Ctrl+Space"). Small UX regression,
-acceptable for Phase 1.
+`suppress=False` is DELIBERATE and load-bearing: pynput's suppress flag is
+global all-or-nothing. Setting it to True would install a `WH_KEYBOARD_LL`
+hook that blocks EVERY key event system-wide, not just our combo. That's the
+exact bug that caused the earlier Alt+Space pivot away from suppress=True.
+Ctrl+Alt+Space has no default Windows OS behavior that needs suppressing, so
+observe-only works cleanly.
 
 Clicky (macOS) uses ctrl+option modifier-only via a CGEvent LISTEN-ONLY tap
-(observes but does NOT consume keys). Our `suppress=False` approach is the
+(observes but does NOT consume keys). Our suppress=False approach is the
 Windows equivalent — same "observe but don't consume" philosophy.
 
 Callbacks run on the pynput listener thread, NOT the Qt main thread. Phase 1
 caller (this module's __main__) just prints. Step 7 app.py will wire them to
-pyqtSignal.emit which is thread-safe by design -- Qt marshals across threads.
+pyqtSignal.emit which is thread-safe by design — Qt marshals across threads.
 
 File order (so `py -3.13 -m hotkey` works):
     1. Module docstring
@@ -55,9 +73,9 @@ from pynput import keyboard
 class HotkeyState(Enum):
     """Two-state push-to-talk state machine.
 
-    IDLE:      waiting for the user to hold all 3 keys of Ctrl+Shift+Space.
+    IDLE:      waiting for the user to hold all 3 keys of Ctrl+Alt+Space.
                No recording active.
-    RECORDING: Ctrl AND Shift AND Space are ALL currently held. Audio capture
+    RECORDING: Ctrl AND Alt AND Space are ALL currently held. Audio capture
                is live. On any of the 3 being released, transition back to
                IDLE and fire on_release.
     """
@@ -69,9 +87,9 @@ class HotkeyState(Enum):
 # --- PushToTalkHotkey --------------------------------------------------------
 
 class PushToTalkHotkey:
-    """Global Ctrl+Shift+Space push-to-talk hotkey, non-suppressing.
+    """Global Ctrl+Alt+Space push-to-talk hotkey, non-suppressing.
 
-    Tracks Ctrl, Shift, Space key-down state independently so any of the 6
+    Tracks Ctrl, Alt, Space key-down state independently so any of the 6
     possible press orders transitions IDLE -> RECORDING when all 3 are held.
     Any release of any of the 3 while in RECORDING immediately fires
     on_release() and returns to IDLE, clearing all 3 flags. This matches
@@ -88,8 +106,8 @@ class PushToTalkHotkey:
     thread concurrently with handler execution.
 
     suppress=False is DELIBERATE and load-bearing: pynput's suppress flag is
-    global (all-or-nothing), and we only want to observe Ctrl+Shift+Space,
-    not block every other key on the system. Ctrl+Shift+Space has no default
+    global (all-or-nothing), and we only want to observe Ctrl+Alt+Space, not
+    block every other key on the system. Ctrl+Alt+Space has no default
     Windows behavior, so observe-only works.
     """
 
@@ -102,7 +120,7 @@ class PushToTalkHotkey:
         """Wire the hotkey to caller callbacks.
 
         Args:
-            on_press:       fired once when Ctrl+Shift+Space combo becomes
+            on_press:       fired once when Ctrl+Alt+Space combo becomes
                             active (all 3 keys held). Runs on pynput listener
                             thread.
             on_release:     fired once when the combo is broken by releasing
@@ -117,7 +135,7 @@ class PushToTalkHotkey:
 
         self._lock = threading.Lock()
         self._ctrl_down: bool = False
-        self._shift_down: bool = False
+        self._alt_down: bool = False
         self._space_down: bool = False
         self._state: HotkeyState = HotkeyState.IDLE
 
@@ -138,11 +156,12 @@ class PushToTalkHotkey:
         The listener runs on its own thread; this returns immediately.
 
         suppress=False is DELIBERATE -- we observe key events but do NOT
-        consume them. Ctrl+Shift+Space has no default Windows OS behavior
-        (unlike Alt+Space which opens the title-bar menu), so we don't need
-        to block it. This preserves global typing. Changing to suppress=True
-        would block ALL keys globally due to pynput's all-or-nothing suppress
-        semantics.
+        consume them. Ctrl+Alt+Space has no default Windows OS behavior
+        (unlike Alt+Space which opens the title-bar menu / Copilot), so we
+        don't need to block it. This preserves global typing. Changing to
+        suppress=True would block ALL keys globally due to pynput's
+        all-or-nothing suppress semantics -- the exact bug that forced the
+        earlier Alt+Space pivot.
         """
         with self._lock:
             if self._listener is not None:
@@ -184,9 +203,24 @@ class PushToTalkHotkey:
         """
         return key in (keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r)
 
-    def _is_shift(self, key) -> bool:
-        """Treat Shift, Shift_L, and Shift_R all as the shift modifier."""
-        return key in (keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r)
+    def _is_alt(self, key) -> bool:
+        """Treat Alt, Alt_L, Alt_R, and Alt_Gr all as the alt modifier.
+
+        pynput fires Key.alt_l on left-Alt press. Right-Alt on international
+        keyboards is often Alt_Gr (AltGr) which is a separate pynput key
+        from Alt_R. We lump all four together so the combo works
+        regardless of which Alt is pressed. Note: if the user is on an
+        international keyboard layout that uses AltGr for composing
+        characters, holding Ctrl+AltGr+Space will still trigger Clicky,
+        which is acceptable -- AltGr without a composing key is typically
+        unused.
+        """
+        return key in (
+            keyboard.Key.alt,
+            keyboard.Key.alt_l,
+            keyboard.Key.alt_r,
+            keyboard.Key.alt_gr,
+        )
 
     def _is_space(self, key) -> bool:
         """Space is a single constant in pynput (no left/right variants)."""
@@ -203,8 +237,8 @@ class PushToTalkHotkey:
         with self._lock:
             if self._is_ctrl(key):
                 self._ctrl_down = True
-            elif self._is_shift(key):
-                self._shift_down = True
+            elif self._is_alt(key):
+                self._alt_down = True
             elif self._is_space(key):
                 self._space_down = True
             # Non-hotkey keys: ignored, no state change, no flag touched.
@@ -212,7 +246,7 @@ class PushToTalkHotkey:
             # Check if the combo is now complete.
             if (self._state == HotkeyState.IDLE
                     and self._ctrl_down
-                    and self._shift_down
+                    and self._alt_down
                     and self._space_down):
                 self._state = HotkeyState.RECORDING
                 fire_press = True
@@ -226,14 +260,14 @@ class PushToTalkHotkey:
     def _handle_release(self, key) -> Optional[bool]:
         """Low-level key-up handler called by pynput on its listener thread.
 
-        If RECORDING AND the released key is ctrl/shift/space: fire on_release
+        If RECORDING AND the released key is ctrl/alt/space: fire on_release
         once, clear all 3 flags, return to IDLE. Otherwise just clear the
         flag for this specific released key (if it's one of the 3).
         """
         fire_release = False
         with self._lock:
             is_hotkey_key = (self._is_ctrl(key)
-                             or self._is_shift(key)
+                             or self._is_alt(key)
                              or self._is_space(key))
 
             if self._state == HotkeyState.RECORDING and is_hotkey_key:
@@ -241,14 +275,14 @@ class PushToTalkHotkey:
                 fire_release = True
                 self._state = HotkeyState.IDLE
                 self._ctrl_down = False
-                self._shift_down = False
+                self._alt_down = False
                 self._space_down = False
             else:
                 # IDLE path: clear the flag for this specific key, if applicable.
                 if self._is_ctrl(key):
                     self._ctrl_down = False
-                elif self._is_shift(key):
-                    self._shift_down = False
+                elif self._is_alt(key):
+                    self._alt_down = False
                 elif self._is_space(key):
                     self._space_down = False
 
@@ -261,21 +295,26 @@ class PushToTalkHotkey:
 
 if __name__ == "__main__":
     # Run: py -3.13 -m hotkey
-    # Hold Ctrl+Shift+Space to trigger PRESSED, release any of the 3 for RELEASED.
+    # Hold Ctrl+Alt+Space to trigger PRESSED, release any of the 3 for RELEASED.
     # CRITICAL: verify typing in other apps still works (suppress=False).
+    # CRITICAL: verify Excel does NOT "Select entire worksheet" on the combo
+    # (that was the Ctrl+Shift+Space conflict this pivot fixes).
     import time
 
     print("=" * 70)
-    print("Clicky Windows -- hotkey.py manual verification")
+    print("Clicky Windows -- hotkey.py manual verification (Ctrl+Alt+Space)")
     print("=" * 70)
     print("\nInstructions:")
-    print("  1. Hold Ctrl+Shift+Space -- you should see >>> PRESSED within 50ms")
+    print("  1. Hold Ctrl+Alt+Space -- you should see >>> PRESSED within 50ms")
     print("  2. Release any of the 3 keys -- you should see >>> RELEASED within 50ms")
     print("  3. Open another window (Notepad) and type 'hello world' normally --")
     print("     typing MUST work (suppress=False: observe but never consume keys)")
-    print("  4. In VS Code, Ctrl+Shift+Space will also trigger Parameter Hints --")
-    print("     minor known conflict, acceptable for Phase 1")
-    print("  5. Ctrl+C in this terminal to quit")
+    print("  4. Open Excel or Google Sheets, hold Ctrl+Alt+Space, verify NO")
+    print("     'Select entire worksheet' side effect. This is the whole reason")
+    print("     we pivoted from Ctrl+Shift+Space -- that combo selects all cells.")
+    print("  5. Verify the Windows window menu does NOT pop (Alt+Space alone")
+    print("     would open it, but Ctrl+Alt+Space should not).")
+    print("  6. Ctrl+C in this terminal to quit")
     print()
 
     hk = PushToTalkHotkey(
@@ -283,7 +322,7 @@ if __name__ == "__main__":
         on_release=lambda: print("  >>> RELEASED (recording stopped)"),
     )
     hk.start()
-    print("Listener started. Waiting for Ctrl+Shift+Space...\n")
+    print("Listener started. Waiting for Ctrl+Alt+Space...\n")
 
     try:
         while True:

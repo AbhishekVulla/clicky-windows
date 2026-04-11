@@ -59,19 +59,35 @@ Clicky's ElementLocationDetector.swift."""
 
 # ── Hotkey ───────────────────────────────────────────────────────────────────
 
-HOTKEY: str = os.getenv("HOTKEY", "ctrl+shift+space")
-"""Default push-to-talk hotkey. Ctrl+Shift+Space because pynput's suppress
-flag is all-or-nothing global — we cannot suppress just Alt+Space without
-blocking all typing. Ctrl+Shift+Space has no default Windows OS behavior,
-so we use suppress=False (observe but don't consume).
+HOTKEY: str = os.getenv("HOTKEY", "ctrl+alt+space")
+"""Default push-to-talk hotkey. Ctrl+Alt+Space because:
 
-NEVER ctrl+space (VS Code IntelliSense conflict). Minor conflict: VS Code
-triggers Parameter Hints on ctrl+shift+space — acceptable tradeoff.
+  1. Alt+Space alone conflicts with the Windows window menu + Copilot
+     (Microsoft reassigned it in Windows 11, late 2024). Making it work
+     cleanly needs Win32 RegisterHotKey + GetAsyncKeyState polling for
+     release detection -- 8-12h of fragile ctypes code, deferred to
+     Phase 1.5 as a drop-in subclass.
+  2. Ctrl+Shift+Space was our earlier pivot target but conflicts with
+     Microsoft Excel + Google Sheets "Select entire worksheet" binding.
+     Because our pynput listener uses suppress=False (observe-only),
+     the spreadsheet underneath ALSO receives the keypress and wipes
+     the user's selection every time they invoke Clicky -- a showstopper
+     for the Excel-learning demo narrative.
+  3. Fn+Space is firmware-level (handled by the keyboard EC below the
+     OS) and invisible to WH_KEYBOARD_LL + pynput. Non-portable even
+     where it happens to work. AutoHotkey docs: "the Fn key does not
+     (as a general rule) generate any scan code that can be used."
+  4. Ctrl+Alt+Space has no known conflicts (Excel, Sheets, Windows menu,
+     Copilot, VS Code all clear). Three-finger but all on the left side
+     of the keyboard for one-handed ergonomics. suppress=False observe-
+     only model carries over unchanged.
 
-See DECISIONS.md 2026-04-12 entry "Ctrl+Shift+Space over Alt+Space — pynput
-suppress=True is globally destructive, not per-combo" for the pivot story.
-Phase 1.5 may add a Win32 RegisterHotKey subclass of PushToTalkHotkey that
-restores Alt+Space ergonomics (abstract interface makes it a drop-in swap)."""
+NEVER ctrl+space (VS Code IntelliSense conflict -- still rejected).
+
+See DECISIONS.md 2026-04-12 (evening) entry "Ctrl+Alt+Space replaces
+Ctrl+Shift+Space" for the full pivot story + research-backed Fn+Space
+rejection. Phase 1.5 Win32 RegisterHotKey subclass will restore Alt+Space
+ergonomics via the abstract PushToTalkHotkey interface."""
 
 
 # ── STT (AssemblyAI u3-rt-pro streaming) ─────────────────────────────────────

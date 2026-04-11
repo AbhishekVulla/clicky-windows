@@ -5,16 +5,24 @@ Mirrors the DI-mock pattern from tests/test_overlay.py: PushToTalkHotkey
 accepts a `listener_class` parameter so tests inject a MagicMock factory
 instead of pynput.keyboard.Listener.
 
-The hotkey is Ctrl+Shift+Space (all 3 must be held for RECORDING; any
+The hotkey is Ctrl+Alt+Space (all 3 must be held for RECORDING; any
 release of any of the 3 ends it). suppress=False means the listener
 observes but never consumes keys — global typing still works.
+
+Pivoted from Ctrl+Shift+Space to Ctrl+Alt+Space on 2026-04-12 evening
+after empirically confirming Ctrl+Shift+Space conflicts with Excel +
+Google Sheets "Select entire worksheet" binding. See DECISIONS.md
+2026-04-12 (evening) "Ctrl+Alt+Space replaces Ctrl+Shift+Space" for
+the full rationale including research-backed rejection of Fn+Space.
 
 What's NOT tested here (manual verification gate only):
 - Actual Windows low-level hook installation
 - suppress=False actually NOT blocking global typing (the whole point of
-  the pivot from Alt+Space suppress=True)
+  the earlier Alt+Space -> Ctrl+Shift+Space pivot from suppress=True)
+- Excel "Select entire worksheet" NOT firing on Ctrl+Alt+Space (the whole
+  point of THIS pivot from Ctrl+Shift+Space)
 - Callback latency (<50ms)
-- VS Code parameter-hints conflict (minor known issue)
+- Windows window menu NOT opening on the combo (only Alt+Space alone opens it)
 All of the above are verified by `py -3.13 -m hotkey`.
 """
 from unittest.mock import MagicMock
@@ -34,7 +42,7 @@ class TestStateMachine:
     _handle_release directly to drive the transitions the listener thread
     would normally trigger. This isolates the state logic from pynput itself.
 
-    The combo is Ctrl+Shift+Space: all 3 must be held together to transition
+    The combo is Ctrl+Alt+Space: all 3 must be held together to transition
     to RECORDING. Any release of any of the 3 while RECORDING ends it.
     """
 
@@ -50,8 +58,8 @@ class TestStateMachine:
         )
         return hk, on_press, on_release
 
-    def test_ctrl_shift_space_in_order_fires_on_press(self):
-        """Typical order: Ctrl, then Shift, then Space. on_press fires once
+    def test_ctrl_alt_space_in_order_fires_on_press(self):
+        """Typical order: Ctrl, then Alt, then Space. on_press fires once
         on the space-down transition (the last key of the combo), state
         becomes RECORDING."""
         from hotkey import HotkeyState
@@ -61,7 +69,7 @@ class TestStateMachine:
         assert on_press.call_count == 0
         assert hk.state == HotkeyState.IDLE
 
-        hk._handle_press(Key.shift)
+        hk._handle_press(Key.alt)
         assert on_press.call_count == 0
         assert hk.state == HotkeyState.IDLE
 
@@ -70,8 +78,8 @@ class TestStateMachine:
         assert on_release.call_count == 0
         assert hk.state == HotkeyState.RECORDING
 
-    def test_space_then_ctrl_then_shift_also_fires_on_press(self):
-        """Reverse order: Space first, then Ctrl, then Shift. Still valid --
+    def test_space_then_ctrl_then_alt_also_fires_on_press(self):
+        """Reverse order: Space first, then Ctrl, then Alt. Still valid --
         all 3 down means RECORDING, regardless of press order. Tests the
         order-independence of the state machine."""
         from hotkey import HotkeyState
@@ -85,7 +93,20 @@ class TestStateMachine:
         assert on_press.call_count == 0
         assert hk.state == HotkeyState.IDLE
 
-        hk._handle_press(Key.shift)
+        hk._handle_press(Key.alt)
+        assert on_press.call_count == 1
+        assert hk.state == HotkeyState.RECORDING
+
+    def test_alt_gr_is_treated_as_alt(self):
+        """AltGr (Alt_Gr) on international keyboards must be recognized as
+        the alt modifier. Without this, international users pressing
+        Ctrl+AltGr+Space would see no Clicky response."""
+        from hotkey import HotkeyState
+        hk, on_press, _ = self._make_hk()
+
+        hk._handle_press(Key.ctrl)
+        hk._handle_press(Key.alt_gr)
+        hk._handle_press(Key.space)
         assert on_press.call_count == 1
         assert hk.state == HotkeyState.RECORDING
 
@@ -97,7 +118,7 @@ class TestStateMachine:
 
         # Drive into RECORDING
         hk._handle_press(Key.ctrl)
-        hk._handle_press(Key.shift)
+        hk._handle_press(Key.alt)
         hk._handle_press(Key.space)
         assert hk.state == HotkeyState.RECORDING
 
@@ -106,7 +127,7 @@ class TestStateMachine:
         assert hk.state == HotkeyState.IDLE
         # All 3 flags cleared per spec
         assert hk._ctrl_down is False
-        assert hk._shift_down is False
+        assert hk._alt_down is False
         assert hk._space_down is False
 
     def test_release_ctrl_while_recording_also_fires_on_release(self):
@@ -116,7 +137,7 @@ class TestStateMachine:
         hk, on_press, on_release = self._make_hk()
 
         hk._handle_press(Key.ctrl)
-        hk._handle_press(Key.shift)
+        hk._handle_press(Key.alt)
         hk._handle_press(Key.space)
         assert hk.state == HotkeyState.RECORDING
 
@@ -126,7 +147,7 @@ class TestStateMachine:
 
     def test_ctrl_alone_does_nothing(self):
         """Pressing Ctrl alone from IDLE: no callbacks, state stays IDLE,
-        but _ctrl_down flag goes True so a subsequent Shift+Space can
+        but _ctrl_down flag goes True so a subsequent Alt+Space can
         complete the combo."""
         from hotkey import HotkeyState
         hk, on_press, on_release = self._make_hk()
@@ -136,28 +157,28 @@ class TestStateMachine:
         assert on_release.call_count == 0
         assert hk.state == HotkeyState.IDLE
         assert hk._ctrl_down is True
-        assert hk._shift_down is False
+        assert hk._alt_down is False
         assert hk._space_down is False
 
-    def test_ctrl_shift_without_space_does_not_fire(self):
-        """Pressing Ctrl+Shift but NOT Space should NOT fire on_press --
+    def test_ctrl_alt_without_space_does_not_fire(self):
+        """Pressing Ctrl+Alt but NOT Space should NOT fire on_press --
         the combo is incomplete without Space. Guards against the bug
         where the state machine accidentally transitions on 2 of 3 keys."""
         from hotkey import HotkeyState
         hk, on_press, on_release = self._make_hk()
 
         hk._handle_press(Key.ctrl)
-        hk._handle_press(Key.shift)
+        hk._handle_press(Key.alt)
         assert on_press.call_count == 0
         assert hk.state == HotkeyState.IDLE
         assert hk._ctrl_down is True
-        assert hk._shift_down is True
+        assert hk._alt_down is True
         assert hk._space_down is False
 
     def test_non_hotkey_key_ignored(self):
         """Pressing an unrelated key (Enter) from IDLE: nothing happens at all.
         No callbacks, no state change, no flag set. The state machine only
-        cares about Ctrl, Shift, and Space."""
+        cares about Ctrl, Alt, and Space."""
         from hotkey import HotkeyState
         hk, on_press, on_release = self._make_hk()
 
@@ -166,7 +187,7 @@ class TestStateMachine:
         assert on_release.call_count == 0
         assert hk.state == HotkeyState.IDLE
         assert hk._ctrl_down is False
-        assert hk._shift_down is False
+        assert hk._alt_down is False
         assert hk._space_down is False
 
 
@@ -177,7 +198,9 @@ class TestStartLifecycle:
         """start() must instantiate the injected listener_class exactly once
         with suppress=False (load-bearing: pynput's suppress is all-or-nothing
         global, so suppress=True would disable ALL typing globally -- the
-        exact bug that forced the Alt+Space -> Ctrl+Shift+Space pivot).
+        exact bug that forced the original Alt+Space -> Ctrl+Shift+Space
+        pivot, and by extension the current Ctrl+Shift+Space -> Ctrl+Alt+Space
+        pivot inherits the same suppress=False model).
 
         on_press and on_release handlers must be wired to self._handle_press
         / self._handle_release."""
@@ -195,9 +218,9 @@ class TestStartLifecycle:
         assert fake_listener_class.call_count == 1
         kwargs = fake_listener_class.call_args.kwargs
         assert kwargs["suppress"] is False, (
-            "suppress MUST be False for Ctrl+Shift+Space -- pynput suppress=True "
+            "suppress MUST be False for Ctrl+Alt+Space -- pynput suppress=True "
             "is globally destructive and blocks all typing. See DECISIONS.md "
-            "2026-04-12 entry 'Ctrl+Shift+Space over Alt+Space'."
+            "2026-04-12 (evening) entry 'Ctrl+Alt+Space replaces Ctrl+Shift+Space'."
         )
         assert kwargs["on_press"] == hk._handle_press
         assert kwargs["on_release"] == hk._handle_release
