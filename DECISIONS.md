@@ -273,4 +273,48 @@ This also aligns with `lint_memory.py`'s role: the whole point of Step 7.5 is to
 
 ---
 
+## 2026-04-11 (session 2): Defer settings UI / keychain-backed BYOK to Phase 2 — Phase 1 stays on `.env` only
+
+**Context:** Phase 1 scaffold uses `.env` + `python-dotenv` for the Anthropic API key. User asked whether to instead add a first-launch GUI dialog that writes to `%APPDATA%\clicky-windows\config.json` (a "friendlier BYOK flow"). I also proposed a middle path: 10 LOC of config.json fallback logic now, dialog deferred to Phase 2.
+
+**Decision:** **No middle path.** Phase 1 stays on `.env` only. No config.json fallback, no GUI dialog, no keychain integration. Phase 2 will copy Grafyn's pattern wholesale: `keyring` lib for OS Credential Manager storage + `platformdirs` for non-sensitive settings + QInputDialog for first-launch key entry + legacy `.env` → keychain migration.
+
+**Alternatives considered:**
+1. **Full GUI dialog in Phase 1** (~100 LOC + tests, 2-3 hours). Pros: friendlier for non-technical users from day 1. Cons: dilutes Phase 1's single hypothesis (memory > no memory) with a second one (onboarding UX works); Phase 1's only real tester is Abhishek who is a developer and can edit `.env`; adds new dependencies (`keyring`, `platformdirs`).
+2. **10 LOC config.json fallback now, dialog in Phase 2** (middle path I proposed). Pros: structured for Phase 2 expansion. Cons: premature scaffolding — Grafyn's actual Phase 2 pattern uses OS keychain, not plaintext config.json, so the 10-LOC fallback would get thrown away in Phase 2 anyway. Write code you'll delete = waste.
+3. **`.env` only in Phase 1** (chosen). Pros: zero extra work, zero wasted code, Phase 1 hypothesis stays clean. Cons: Phase 1 has no non-technical user onboarding path — but PRD acceptance criterion #5 explicitly says "Abhishek uses Clicky Windows himself for at least 5 meaningful sessions" (no non-technical users in Phase 1 scope).
+
+**Why this won:** User said it plainly: *"I am okay with deferring to phase 2 and only proving the loop works in phase 1."* Every feature added to Phase 1 delays the memory hypothesis test. Vercept is racing. Keep Phase 1 minimal. Copy Grafyn's BYOK pattern properly in Phase 2, don't half-build it now.
+
+**Phase 2 BYOK spec (reference, locked for when we get there):**
+
+Copy Grafyn's pattern from `frontend/src-tauri/src/services/settings.rs`:
+1. **API key → OS keychain** via the `keyring` Python lib. Windows Credential Manager encrypts under user's login session. Not plaintext on disk.
+   ```python
+   import keyring
+   keyring.set_password("clicky-windows", "anthropic_api_key", key)
+   ```
+2. **Non-sensitive settings → `%APPDATA%\clicky-windows\settings.json`** via `platformdirs.user_config_dir()`. Stores hotkey, theme, model ID — NOT the key.
+3. **First-launch flow in `app.py`:** `if not load_api_key(): show QInputDialog → keyring.set_password()`. ~15 LOC total.
+4. **Legacy migration:** upgraded installs move `.env` plaintext → keychain on first launch, then clear `.env`. Mirrors Grafyn's `migrated_legacy_plaintext_key`.
+5. **Masked display** in settings UI: `sk-a...x4n2` format, never show full key.
+6. **Load order:** keyring → settings.json non-key prefs → `.env` (legacy fallback) → `ANTHROPIC_API_KEY` env var (dev override).
+
+**Phase 2 work estimate:** ~100 LOC + ~30 test LOC, 2-3 hours. Already in [PRD.md § Phase 2 Scope](PRD.md) as "Configurable hotkey UI ... Tray icon with minimal settings panel."
+
+**Consequences:**
+- `config.py` stays as-is for Phase 1 — no code changes needed
+- `requirements.txt` does NOT add `keyring` or `platformdirs` in Phase 1
+- `.gitignore` hardened to also exclude `Anthropic API.txt` and common key-file patterns (`*.key`, `*api*key*`, `*.pem`, etc.) as defense in depth
+- `Anthropic API.txt` is the user's temporary holding file for the key — they plan to rotate the key after testing; the hardened `.gitignore` ensures this file never reaches git even if it remains in the working directory
+- Phase 2's BYOK work has a concrete, locked spec already written — when we get there, no design decisions remain, just implementation
+
+**References:**
+- Grafyn `frontend/src-tauri/src/services/settings.rs` (read via `gh api repos/WKJBryan/Grafyn/contents/...`) — specifically `KEYRING_SERVICE` constant, `load_openrouter_api_key()` / `store_openrouter_api_key()` helpers, `migrated_legacy_plaintext_key` migration flag, `get_api_key_masked()` for display
+- Grafyn `frontend/src-tauri/src/services/openrouter.rs` for how the loaded key is actually used by the service
+- Python `keyring` lib: https://pypi.org/project/keyring/
+- Python `platformdirs` lib: https://pypi.org/project/platformdirs/
+
+---
+
 <!-- Append new decisions below this line. NEVER delete old entries. Format: ## YYYY-MM-DD: Short title → Context → Decision → Alternatives → Why → Consequences → References -->

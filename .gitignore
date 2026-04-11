@@ -1,6 +1,13 @@
-# Secrets
+# Secrets — never commit
 .env
 *.env.local
+Anthropic API.txt
+*api*key*
+*API*KEY*
+*.key
+*_secret
+*_secret.*
+*.pem
 
 # Python
 __pycache__/
