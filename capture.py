@@ -32,7 +32,7 @@ import ctypes
 from dataclasses import dataclass
 
 import mss
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from config import CANDIDATE_RESOLUTIONS
 
@@ -333,15 +333,69 @@ if __name__ == "__main__":
     )
     print(f"  that maps to physical pixel {demo_physical} on your monitor.")
 
+    # Draw a red crosshair on the debug image at the cursor's position.
+    # Screenshot APIs don't capture the OS cursor layer, so without this
+    # the image can't be used to visually verify cursor position accuracy.
+    # Mapping: cursor_physical is in virtual-desktop physical pixels.
+    # Convert to monitor-local physical, then divide by scale factors
+    # to get the position in the resized 1280x800-ish image.
+    cursor_local_x = result.cursor_physical[0] - result.monitor["left"]
+    cursor_local_y = result.cursor_physical[1] - result.monitor["top"]
+    marker_x = int(cursor_local_x / result.scale_x)
+    marker_y = int(cursor_local_y / result.scale_y)
+
+    # Clamp marker to image bounds (cursor may be momentarily off-screen
+    # during fast mouse movement).
+    marker_x = max(0, min(marker_x, result.target_width - 1))
+    marker_y = max(0, min(marker_y, result.target_height - 1))
+
+    debug_image = result.image.copy()
+    draw = ImageDraw.Draw(debug_image)
+    # Crosshair: two perpendicular lines, 20 px each way, 3 px wide, red.
+    line_len = 20
+    line_color = (255, 0, 0)
+    line_width = 3
+    draw.line(
+        [(marker_x - line_len, marker_y), (marker_x + line_len, marker_y)],
+        fill=line_color, width=line_width,
+    )
+    draw.line(
+        [(marker_x, marker_y - line_len), (marker_x, marker_y + line_len)],
+        fill=line_color, width=line_width,
+    )
+    # Ring around the center so it's visually distinct from content lines.
+    ring_radius = 8
+    draw.ellipse(
+        [(marker_x - ring_radius, marker_y - ring_radius),
+         (marker_x + ring_radius, marker_y + ring_radius)],
+        outline=line_color, width=line_width,
+    )
+
+    print("\nCursor marker on debug image:")
+    print(
+        f"  cursor_physical ({result.cursor_physical[0]}, "
+        f"{result.cursor_physical[1]}) - monitor ({result.monitor['left']}, "
+        f"{result.monitor['top']}) = local ({cursor_local_x}, {cursor_local_y})"
+    )
+    print(
+        f"  local ({cursor_local_x}, {cursor_local_y}) / scale "
+        f"({result.scale_x:.4f}, {result.scale_y:.4f}) = "
+        f"image ({marker_x}, {marker_y})"
+    )
+
     debug_path = "debug_capture.jpg"
-    result.image.save(debug_path, "JPEG", quality=85)
+    debug_image.save(debug_path, "JPEG", quality=85)
     print(f"\nSaved: {debug_path}")
-    print("  Open this file to confirm it shows your current desktop.")
+    print("  Open this file - the red crosshair shows where Python thinks")
+    print("  the cursor was. It should match the actual cursor location")
+    print("  visually (same button, same window, same pixel neighborhood).")
 
     print("\n" + "=" * 70)
     print("Manual verification checklist:")
     print("  1. debug_capture.jpg shows your current desktop (not blank/garbled)")
-    print("  2. Cursor coords printed match where your mouse actually is")
-    print("  3. Resolution picked matches your aspect ratio")
-    print("  4. Scale factors are reasonable for your monitor")
+    print("  2. Red crosshair in the image matches where the mouse actually was")
+    print("  3. Cursor coords printed are plausible (e.g. Start button = small")
+    print("     x, large y; top-right X button = large x, small y)")
+    print("  4. Resolution picked matches your aspect ratio")
+    print("  5. Scale factors are reasonable for your monitor")
     print("=" * 70)
