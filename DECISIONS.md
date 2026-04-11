@@ -391,4 +391,129 @@ Both would have shipped unfixed without the pass. Both are exactly the kind of "
 
 ---
 
+## 2026-04-11 (session 3): Priority inversion — latency over local-first
+
+**Context:** PRD.md § "What Clicky Windows IS" item 4 originally said *"Local-first by default. faster-whisper for STT runs on your CPU... pyttsx3 TTS runs on your CPU."* This framing was inherited from previous-session PRD drafting and was never an explicit user decision — it implied a privacy-first Phase 1 philosophy. Phase 1 Acceptance Criteria (PRD.md § Phase 1 Scope) contains ZERO privacy requirements: #1 "working loop," #2 "multi-monitor + DPI," #3-4 "memory persists + human-readable," #5 "5+ real sessions," #6 "lint_memory insights," #7 "~50-80 tests," #8 "demo video," #9-10 "docs + repo." Privacy was phantom scope that I carried forward without questioning.
+
+User called this out 2026-04-11 session 3 after I drafted Steps 4-6 plan assuming `pyttsx3` + `faster-whisper` were fine: *"BRO THE ENTIRE THING WHICH MADE THE CLICKY DEMO VIDEO SEXY WAS THE ALMOST INSTANT RESPONSE, AS IF QUITE LITERALLY TALKING TO A BUDDY NEXT TO YOU WHO HAS KNOWLEDGE ABOUT THE SOFTWARE U ARE TRYING TO LEARN. THE PRIORITY IS LATENCY FIRST. SHOULD FEEL IMMEDIATE."*
+
+**Decision:** Phase 1 priority is **LATENCY-FIRST**, not privacy-first. The UX promise is "feels like a buddy next to you who knows the software" — which requires sub-second perceived response from hotkey release to first spoken word.
+
+**Phase 1 stack (locked after 3 parallel research agents + WebSearch fill-in):**
+
+- **STT: AssemblyAI `u3-rt-pro` streaming + `ForceEndpoint`** — ~150ms P50 finalization after hotkey release. WebSocket to `wss://streaming.assemblyai.com/v3/ws` with query params matching Clicky's Swift source: `speech_model=u3-rt-pro`, `sample_rate=16000`, `encoding=pcm_s16le`, `format_turns=true`. Python SDK `assemblyai`. Audio format: PCM16 16kHz mono 1024-frame chunks from `sounddevice.RawInputStream` (matches Clicky's `AVAudioEngine.installTap(bufferSize:1024)` exactly).
+- **TTS: Cartesia Sonic-3 WebSocket streaming** — ~150-250ms TTFB, state-space model architecture (Mamba derivative) that's architecturally faster than transformer TTS. Most expressive "buddy" voice quality in the cloud TTS field per independent benchmarks (April 2026). Python SDK `cartesia` with async WebSocket support built in. Output format: PCM float32 44.1kHz streamed chunks played via `sounddevice` output stream.
+- **Claude model: Sonnet 4.6 (unchanged)** with `stream=True`. Swapping to Haiku 4.5 would require downgrading `computer-use-2025-11-24` beta header to `computer-use-2025-01-24` AND tool type `computer_20251124` to `computer_20250124`, losing November 2025 pixel-counting training improvements with unknown accuracy cost. Add `CLICKY_MODEL` config knob for Phase 2 benchmarking; default stays Sonnet.
+- **Response streaming + sentence-level TTS chunking (Step 7 `app.py` requirement):** subscribe to `content_block_delta` events with `delta.type == "text_delta"`, accumulate, flush complete sentences to `tts.speak_sentence()` on `.`/`!`/`?` boundaries. Tool_use block stays buffered until `content_block_stop` then fires overlay pointer. Saves ~300-500ms of perceived latency — a genuine latency win Clicky does NOT implement.
+
+**Expected end-to-end perceived latency:** ~800-1200ms from hotkey release to first audible word (~150ms STT + ~500-800ms Claude TTFT + ~200ms TTS TTFB, minus ~300ms sentence-streaming overlap). **5-6× faster than the original `faster-whisper + pyttsx3` plan** (~5-7s).
+
+**Alternatives considered:**
+
+1. **Keep local-first framing, ship `faster-whisper + pyttsx3`** (original PRD). Pros: zero network dependency, zero API key costs, privacy. Cons: invalidates the UX hypothesis — the Phase 1 demo video would feel laggy (~5-7s), users would write it off as "same as Clippi.us but slower." Privacy was never in the acceptance criteria; this was phantom scope I inherited from a previous session's PRD draft.
+2. **Deepgram single-vendor (STT + TTS):** Deepgram Nova-3 streaming + Deepgram Aura-2 WebSocket. Pros: only 1 new API key beyond Anthropic, $200 free credit no credit card, mature Python SDK, single vendor relationship. Cons: Aura-2 voice is "professional enterprise" (built for IVR systems) not "expressive buddy" — hurts demo video vibe. STT is ~300ms vs AssemblyAI's ~150ms (both under perceptual threshold but AssemblyAI is faster). Loses on latency-to-human-sounding ratio, wins on dev convenience.
+3. **Groq batch STT + Deepgram Aura-2 TTS:** Groq `whisper-large-v3-turbo` batch (simple HTTP POST, no WebSocket) + Deepgram streaming TTS. Pros: simpler STT code than WebSocket streaming, generous free tiers on both. Cons: Groq batch latency 300-800ms vs AssemblyAI 150ms; Aura-2 enterprise voice hurts buddy-feel demo.
+4. **Hybrid — local default, cloud opt-in.** Pros: covers both users. Cons: doubles Phase 1 scope, forces factory pattern before we know which default is right, premature flexibility.
+5. **Latency-first cloud streaming mandatory in Phase 1** (chosen). Pros: single stack, ships the UX hypothesis, benchmarked against real third-party data (AssemblyAI official docs for ForceEndpoint + 150ms P50 claim, Cartesia official Sonic-3 docs for ~90ms model TTFB, independent Pipecat/LiveKit/Vapi community benchmarks). Cons: requires 2 new API keys in `.env` (acceptable — Abhishek is the only Phase 1 tester; Phase 2 BYOK will let users bring their own keys for all 3 providers).
+
+**Why this won:** User's "sexy demo" directive + Phase 2 BYOK framing + abstract base pattern making provider swap a 1-2 hour subclass means we can pick the best-for-demo stack now without locking out alternatives later. Cartesia Sonic-3's voice quality is the single biggest axis for "does the demo video make people go holy shit." AssemblyAI's `ForceEndpoint` + 150ms P50 is the absolute fastest PTT finalization available. Both are proven integrations (AssemblyAI is literally what Clicky uses; Cartesia is the default recommendation for Pipecat and LiveKit Agents for latency-critical voice agents).
+
+**Don't blindly copy Clicky:** Clicky uses AssemblyAI `u3-rt-pro` streaming (same as us, ✅) + ElevenLabs `flash_v2_5` via Cloudflare Worker proxy (buffered-then-play despite the comment claim, 500-1200ms real-world — we improve on this with Cartesia Sonic-3 at ~200ms) + probably Claude Sonnet batch (we improve with response streaming + sentence chunking). Two of Clicky's three pipeline stages are beaten by us on latency. That's a genuine "build something better" argument for Phase 1.
+
+**Consequences:**
+
+- Phase 1 requires `ASSEMBLYAI_API_KEY` and `CARTESIA_API_KEY` in `.env` in addition to `ANTHROPIC_API_KEY`. Both have generous free tiers (AssemblyAI $50 credit = ~330 hours streaming; Cartesia 20k credits/month = ~20-30 min TTS). Neither requires a credit card for the free tier.
+- `stt.py` is a streaming WebSocket client, NOT a blocking `sounddevice` recorder. Architecture: open WebSocket → start sounddevice stream → forward audio chunks in real time → on hotkey release send `ForceEndpoint` → await final transcript (~150ms).
+- `tts.py` is a streaming WebSocket client with sentence-chunk support. Public API: `speak(text)` for full-response mode, `speak_sentence(sentence)` for Step 7 sentence-chunking integration, `stop()` for Phase 2 TTS interruption (wire the API now, use later per Issue #36).
+- `app.py` orchestration (Step 7): streaming Claude response → sentence splitter → TTS chunks, overlapping audio playback with Claude token generation. Tool_use block buffered separately; overlay fires on `content_block_stop`. Threading: Qt signals only across thread boundaries per CLAUDE.md rule.
+- Latency budget in PRD updates: old `≤7s total E2E` → new `≤500ms STT finalization + ≤1500ms Claude TTFT + ≤300ms TTS TTFB + sentence-streaming overlap = target ~800-1200ms perceived first-audible-word`.
+- `PRD.md` "Local-first by default" bullet replaced with "Latency-first, feels like a buddy next to you."
+- `CLAUDE.md` updated to match.
+- `requirements.txt` adds `assemblyai` + `cartesia`, removes `faster-whisper` + `pyttsx3` (neither used in Phase 1).
+- `.env.example` adds `ASSEMBLYAI_API_KEY=` and `CARTESIA_API_KEY=` placeholders.
+- `feedback_ceremony_vs_lean.md` memory updated with "research is not ceremony" clarification — the reason this decision got missed until session 3 was that I skipped research for Steps 4-6 claiming "lean mode."
+- New `feedback_plan_mode_discipline.md` memory file saved — user explicitly corrected me that "I cannot in plan mode" is a deflection, the honest framing is "ask to exit plan mode."
+
+**Relationship to prior decisions:**
+
+- Supersedes `"faster-whisper over openai-whisper"` decision for Phase 1 (still valid rationale if/when a `FasterWhisperSTT` subclass is added in Phase 2 for offline mode).
+- Supersedes `"pyttsx3 for TTS"` as the Phase 1 default (kept as Phase 2 subclass candidate for offline mode).
+- Does NOT affect the `"Alt+Space hotkey, NEVER Ctrl+Space"` decision (unchanged).
+- Does NOT affect the `"Computer Use API beta directly"` decision (unchanged — we're still using Sonnet 4.6 with the November 2025 beta).
+- Reinforces the `"Provider abstraction from day 1 (AIClient, STT, TTS classes)"` decision — the whole reason we have abstract bases is so this kind of stack pivot is a 1-2 hour subclass swap.
+
+**References:**
+
+- User verbatim, 2026-04-11 session 3 (all-caps latency priority + "don't blindly copy Clicky" + "sexy demo" directive)
+- PRD.md § Phase 1 Acceptance Criteria (zero privacy mentions)
+- DECISIONS.md § "faster-whisper over openai-whisper" (latency-motivated, not privacy-motivated — supports the priority inversion)
+- DECISIONS.md § "Provider abstraction from day 1" (makes the swap cheap)
+- Research Agent B (streaming TTS benchmarks, 2026-04-11): *"Cartesia Sonic-3: ~90ms model-internal TTFB, 150-250ms real-world; best latency-to-natural-voice ratio in the cloud TTS field as of April 2026; state-space model architecture is architecturally faster than transformer TTS; 20k free credits no credit card."*
+- Research Agent C (Claude model latency, 2026-04-11): *"Haiku 4.5 does NOT support `computer-use-2025-11-24` beta header — only older `computer-use-2025-01-24`. Switching requires downgrading beta header + tool type with unknown accuracy cost on November 2025 pixel-counting training. Recommend keeping Sonnet 4.6 as default."*
+- WebSearch fill-in for STT research (2026-04-11): AssemblyAI docs confirm `ForceEndpoint` message for PTT-style manual end-of-utterance signal; `u3-rt-pro` ~150ms P50 after force-endpoint.
+- `farzaa/clicky/leanring-buddy/AssemblyAIStreamingTranscriptionProvider.swift` lines 447-451 (verbatim query params we're copying for Phase 1)
+- `farzaa/clicky/leanring-buddy/ElevenLabsTTSClient.swift` lines 40-50, 63-68 (Clicky's buffered-then-play pattern we're beating with Cartesia streaming)
+- `feedback_ceremony_vs_lean.md` memory (updated 2026-04-11 session 3 with "research is not ceremony")
+- `feedback_plan_mode_discipline.md` memory (new, 2026-04-11 session 3)
+
+---
+
+## 2026-04-12: Ctrl+Shift+Space over Alt+Space — pynput suppress=True is globally destructive, not per-combo
+
+**Context:** The 2026-04-11 decision "Alt+Space hotkey, NEVER Ctrl+Space" locked Alt+Space as the Phase 1 default with `pynput.keyboard.Listener(suppress=True)` to prevent the Windows title-bar menu from opening on every press. That decision had Ctrl+Shift+Space listed as a fallback *"if Alt+Space suppression proves too flaky (antivirus intercepting, etc.)."*
+
+During Step 6 manual verification on 2026-04-12, the user ran `py -3.13 -m hotkey`, tried to type in Notepad in another window while the listener was running, and found: **their entire keyboard was disabled globally**. Not just Alt+Space — ALL keys. Direct user quote: *"NO MY KEYBOARD IS DISABBLED, NOTHING WORKS, I CANT TYPE."*
+
+**Root cause (verified via pynput source + web research):** pynput's `suppress=True` on a `Listener` installs a Windows `WH_KEYBOARD_LL` low-level hook that suppresses EVERY key event regardless of which combo we care about. pynput's API has no per-combo opt-out. The handler cannot return "suppress this one but let that one through" — it's all-or-nothing. The "fallback if flaky" framing in the original decision understated the problem: it's not *flaky*, it's *fundamentally global*.
+
+**Research performed 2026-04-12 before pivoting:**
+
+- [NVDA Issue #3472](https://github.com/nvaccess/nvda/issues/3472) documents the same Alt+Space pain: *"if you bind a keyboard gesture which uses the alt and/or Windows modifiers, the menu bar or Start Menu will often appear when the key is released."* Even `RegisterHotKey` doesn't cleanly solve it.
+- [Microsoft `WM_HOTKEY` docs](https://learn.microsoft.com/en-us/windows/win32/inputdev/wm-hotkey) + [Qt Forum](https://forum.qt.io/topic/92983/how-to-detect-hot-key-release-event-when-using-qxtglobalshortcut): *"there is no way to use WM_HOTKEY and get an event on button released."* Push-to-talk release detection via `RegisterHotKey` requires `GetAsyncKeyState` polling with a timer (25ms+ avg latency overhead + CPU waste).
+- [AutoHotkey `#MenuMaskKey`](https://autohotkey.com/docs/commands/_MenuMaskKey.htm) workaround: send a synthetic Ctrl before Alt release to "mask" it — fragile, can interfere with other apps.
+- [boppreh/keyboard Issue #22](https://github.com/boppreh/keyboard/issues/22) *"Support for key suppression"* is **still open** — the `keyboard` library's per-hotkey suppression claim is ambiguous and may have the same global-suppress bug as pynput.
+
+**Conclusion from research:** A clean Alt+Space push-to-talk on Windows is an 8-12 hour project involving `RegisterHotKey` + observe-only low-level hook for release detection + masking-Ctrl trick for menu suppression. Every layer has fragile edge cases. NOT a 60-90 minute fix as originally estimated.
+
+**Decision:** Phase 1 hotkey is **Ctrl+Shift+Space** via `pynput.keyboard.Listener(suppress=False)`. We observe but never consume keys. Ctrl+Shift+Space has no default Windows OS behavior, so we don't need to block it. Global typing continues to work normally.
+
+**Alternatives considered (enumerated for Phase 2 reference):**
+
+1. **Keep Alt+Space with pynput suppress=True** (original plan). Pros: 2-finger ergonomics. Cons: VERIFIED FAIL — globally disables all keyboard input during PTT sessions. Unshippable.
+2. **Win32 `RegisterHotKey` + GetAsyncKeyState polling + masking-Ctrl for menu suppression.** Pros: proper Windows-native 2-finger Alt+Space. Cons: 8-12 hours of ctypes code with fragile workarounds, plus polling overhead for release detection. Deferred to Phase 1.5/2 as an opt-in subclass.
+3. **`boppreh/keyboard` library with `add_hotkey('alt+space', suppress=True)`.** Pros: claims per-hotkey suppression. Cons: GitHub Issue #22 is open, suggesting the claim is aspirational. Untrustworthy without empirical testing.
+4. **Ctrl+Shift+Space with pynput suppress=False** (chosen). Pros: reuses existing pynput code, zero suppression issues, Ctrl+Shift+Space has no default Windows behavior. Cons: 3-finger combo (Clicky Issue #35 complains about these), minor VS Code Parameter Hints conflict. Acceptable for Phase 1.
+5. **Single-key hold (Pause/Break, F13-F24).** Pros: 1-finger. Cons: unusual muscle memory, F-key conflicts with some apps, keyboard physical-availability varies.
+6. **Shift+Space.** Pros: 2-finger. Cons: page-down in browsers/readers, Shift+Space produces a literal " " character that apps also consume — fundamentally bad.
+
+**Why #4 won:** The user's exact words: *"for Phase 1, I don't think we should be debating this much on a simple hotkey"* + *"ship and move on."* Phase 1 ergonomics are not the primary value — persistent memory is. The `PushToTalkHotkey` abstract base class makes a Phase 1.5 upgrade to Win32 `RegisterHotKey`-based Alt+Space a drop-in subclass swap without touching `app.py`. Clicky's Issue #35 "3-finger combo awkward" is real but targets PR #16 (configurable hotkey UI) which is Phase 2 scope. Phase 1 has ONE tester (Abhishek) who can tolerate Ctrl+Shift+Space for 1-2 weeks while building the differentiator.
+
+**Consequences:**
+
+- `hotkey.py` rewritten: state machine tracks `_ctrl_down` + `_shift_down` + `_space_down`. RECORDING state requires all 3 held. Any release of any of the 3 while RECORDING ends the session. `Listener(suppress=False)` — no global suppression.
+- `tests/test_hotkey.py` rewritten: 10 tests (was 8) covering all 6 press orders + 2 release paths + 2 lifecycle tests. New edge cases: `test_ctrl_shift_without_space_does_not_fire` + `test_release_ctrl_while_recording_also_fires_on_release`. Critical assertion added: `kwargs["suppress"] is False` with comment citing this decision entry.
+- `config.py` HOTKEY default: `"alt+space"` → `"ctrl+shift+space"`.
+- `.env.example` HOTKEY comment updated.
+- `CLAUDE.md`, `PRD.md`, `ROADMAP.md` updated to reference Ctrl+Shift+Space throughout the Core Loop and acceptance criteria.
+- The 2026-04-11 "Alt+Space hotkey, NEVER Ctrl+Space" decision is **SUPERSEDED for Phase 1** by this entry, but the "NEVER ctrl+space" rule (plain Ctrl+Space) still stands — that remains rejected for VS Code IntelliSense conflict.
+- Phase 1.5 upgrade path: add a `RegisterHotKeyPushToTalk(PushToTalkHotkey)` subclass using Win32 `RegisterHotKey` + observe-only low-level hook. Same abstract interface, swap via env var or config knob.
+- PR #16 (configurable hotkey UI) becomes more valuable as a Phase 2 item since users with different preferences can now pick from both implementations.
+
+**Minor known conflict:** VS Code binds Ctrl+Shift+Space to "Trigger Parameter Hints" (not IntelliSense — that's plain Ctrl+Space). Holding Ctrl+Shift+Space in VS Code will briefly show parameter hints while Clicky also records. Acceptable Phase 1 UX nit. Phase 2 configurable UI lets user rebind.
+
+**References:**
+
+- User quote, 2026-04-12: *"NO MY KEYBOARD IS DISABBLED, NOTHING WORKS, I CANT TYPE"*
+- User quote, 2026-04-12: *"are you 100% sure alt + space u can make it work this time? Do research/web search to get the latest information, not a hypothesis"*
+- User quote, 2026-04-12: *"for Phase 1, I don't think we should be debating this much on a simple hotkey"*
+- [NVDA Issue #3472](https://github.com/nvaccess/nvda/issues/3472) — Alt/Windows modifier menu activation on release
+- [Microsoft Learn: WM_HOTKEY](https://learn.microsoft.com/en-us/windows/win32/inputdev/wm-hotkey) — no release event
+- [AutoHotkey #MenuMaskKey](https://autohotkey.com/docs/commands/_MenuMaskKey.htm) — masking-Ctrl workaround
+- [Qt Forum: QxtGlobalShortcut release detection](https://forum.qt.io/topic/92983/how-to-detect-hot-key-release-event-when-using-qxtglobalshortcut) — GetAsyncKeyState polling requirement
+- [boppreh/keyboard Issue #22](https://github.com/boppreh/keyboard/issues/22) — per-hotkey suppression still open
+- [pynput docs](https://pynput.readthedocs.io/en/latest/keyboard.html) — confirms suppress is a Listener-level flag, not per-handler
+- Previous decision 2026-04-11 "Alt+Space hotkey, NEVER Ctrl+Space" (superseded for Phase 1)
+
+---
+
 <!-- Append new decisions below this line. NEVER delete old entries. Format: ## YYYY-MM-DD: Short title → Context → Decision → Alternatives → Why → Consequences → References -->

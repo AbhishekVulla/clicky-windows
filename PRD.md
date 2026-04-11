@@ -33,10 +33,10 @@ This doc answers **what** and **why**. For **how** see [CLAUDE.md](CLAUDE.md). F
 
 ## What Clicky Windows IS
 
-1. **A screen-aware AI buddy you hold a hotkey to talk to.** Press and hold Alt+Space, speak a question, release. Clicky captures your screen, sends it to Claude, and responds with voice while a transparent cursor animates on your screen pointing at the thing you were asking about.
+1. **A screen-aware AI buddy you hold a hotkey to talk to.** Press and hold Ctrl+Shift+Space, speak a question, release. Clicky captures your screen, sends it to Claude, and responds with voice while a transparent cursor animates on your screen pointing at the thing you were asking about.
 2. **Persistent memory** — one Markdown file per Windows app in `~/.clicky-windows/memory/<app>.md`. Every interaction appended. Next time you open that app, Clicky recalls what you asked last time and adapts ("I see you're back in Photoshop — last time you were working with the pen tool, need more help with that?").
 3. **Windows-native.** Multi-monitor. Mixed DPI. Per-monitor v2 DPI awareness. Win32 layered window flags for true click-through (clicks pass through to the app underneath).
-4. **Local-first by default.** `faster-whisper` for STT runs on your CPU — no audio leaves your machine. `pyttsx3` TTS runs on your CPU. Only the screenshot + voice transcript + recalled memory are sent to Anthropic for vision/reasoning.
+4. **Latency-first, feels like a buddy next to you.** The whole UX promise is sub-second perceived response: press Ctrl+Shift+Space, speak, release, and the buddy is already responding before you've even dropped your hand. This drives every Phase 1 stack choice — AssemblyAI `u3-rt-pro` streaming STT with `ForceEndpoint` on hotkey release (~150ms P50 final transcript), Claude Sonnet 4.6 with response streaming, Cartesia Sonic-3 WebSocket TTS (~200ms first audible word), sentence-level TTS chunking overlapping Claude generation. Target end-to-end perceived latency: ~800-1200ms from hotkey release to first spoken word. Privacy is NOT a Phase 1 acceptance criterion — your screenshot + transcript + memory are sent to Anthropic regardless of STT/TTS backend. Phase 2 adds opt-in local subclasses (`FasterWhisperSTT`, `Pyttsx3TTS`) for users who want an offline mode. See [DECISIONS.md § "Priority inversion: latency over local-first" (2026-04-11 session 3)](DECISIONS.md) for the full rationale and why the original "local-first" framing was phantom scope.
 5. **Transparent about what it remembers.** You can `cat ~/.clicky-windows/memory/EXCEL.EXE.md` any time and read exactly what Clicky has stored about your Excel interactions. No black-box embeddings, no mystery vector DB. Markdown files a human can audit.
 
 ## What Clicky Windows IS NOT
@@ -53,9 +53,9 @@ This doc answers **what** and **why**. For **how** see [CLAUDE.md](CLAUDE.md). F
 ## Core Loop
 
 ```
-1. User holds Alt+Space (push-to-talk) while speaking a question
+1. User holds Ctrl+Shift+Space (push-to-talk) while speaking a question
 2. On key release:
-   a. Audio recording stops, faster-whisper transcribes locally on CPU
+   a. AssemblyAI streaming WebSocket receives `ForceEndpoint` message; final transcript arrives ~150ms P50 after release
    b. Screen captured via mss (DPI-aware, monitor under cursor)
    c. Resolution picked from [(1024,768),(1280,800),(1366,768)] by aspect-ratio match
    d. Image resized to exact pixel dims with PIL LANCZOS
@@ -74,7 +74,7 @@ This doc answers **what** and **why**. For **how** see [CLAUDE.md](CLAUDE.md). F
    - (declared_resolution) → (physical monitor pixels) via scale factors
    - (physical monitor pixels) → (virtual desktop logical pixels) for the overlay
 6. Overlay animates blue arrow from current position to target via QPropertyAnimation (400ms linear)
-7. pyttsx3 speaks the response text on a background thread, concurrent with animation
+7. Cartesia Sonic-3 WebSocket streams TTS audio chunks as Claude generates text (sentence-level chunking — flush to TTS on `.`/`!`/`?` boundaries), sounddevice output stream plays them in real time, overlapping pointer animation. First audible word within ~200ms of Claude's first sentence completing.
 8. Interaction appended to ~/.clicky-windows/memory/<app>.md
 9. SQLite index updated (interaction count, last_seen, first_seen)
 ```
@@ -87,7 +87,7 @@ This doc answers **what** and **why**. For **how** see [CLAUDE.md](CLAUDE.md). F
 
 **Phase 1 is "done" when all of these are true:**
 
-1. **Working loop on a real Windows machine.** Press Alt+Space in Excel (or any real app), speak a question, release. Within ~7 seconds: pointer animates to the right UI element + voice explains the answer. Works 3 times in a row without crashing.
+1. **Working loop on a real Windows machine.** Press Ctrl+Shift+Space in Excel (or any real app), speak a question, release. Within ~7 seconds: pointer animates to the right UI element + voice explains the answer. Works 3 times in a row without crashing.
 2. **Multi-monitor + DPI verified.** Tested on at least 2 monitors (ideally with different scaling). Pointer lands within ±5 pixels of the intended target on both monitors.
 3. **Memory persists across sessions.** Close the app, reopen it, ask a follow-up question about the same Windows app. Clicky references the previous interaction ("Earlier you asked about the Save button...").
 4. **Memory is human-readable.** `~/.clicky-windows/memory/EXCEL.EXE.md` opens as a plain markdown file with clear sections for each interaction. No encoded binary, no opaque schema.
@@ -198,7 +198,7 @@ Full pull of `farzaa/clicky` open issues + all PRs via `gh api` on this date. Th
 |---|---|---|---|
 | [#27](https://github.com/farzaa/clicky/issues/27) | "Running out of credit — how can I use my own Codex or Claude API key?" | Open | **Phase 2 BYOK work.** Spec already locked in [DECISIONS.md § "Defer settings UI / keychain-backed BYOK to Phase 2"](DECISIONS.md): copy Grafyn's `keyring` + `platformdirs` + QInputDialog pattern. |
 | [PR #51](https://github.com/farzaa/clicky/pull/51) | "Add OpenRouter provider support" | Open, unmerged | **Phase 2 target.** Exactly what our `AIClient` provider abstraction enables — `OpenRouterClient` subclass with vision-tag regex fallback (since OpenRouter can't proxy Computer Use beta). |
-| [PR #47](https://github.com/farzaa/clicky/pull/47) | "local STT via Parakeet WebSocket server" | Closed, unmerged | **Validates local-STT demand.** We use `faster-whisper` for Phase 1 (CPU-local, no server). Parakeet is a Phase 2 `STT` subclass option. |
+| [PR #47](https://github.com/farzaa/clicky/pull/47) | "local STT via Parakeet WebSocket server" | Closed, unmerged | **Validates local-STT demand.** Phase 1 uses AssemblyAI `u3-rt-pro` streaming (latency-first). Phase 2 adds `FasterWhisperSTT` + `ParakeetSTT` subclasses for users who want offline mode.
 | [PR #52](https://github.com/farzaa/clicky/pull/52) | "Migrate transcription from AssemblyAI to ElevenLabs Scribe v2 Realtime" | Closed, unmerged | **Phase 2 STT upgrade target.** `ElevenLabsScribeSTT(STT)` subclass. |
 | [PR #40](https://github.com/farzaa/clicky/pull/40) | "Add Gemini and OpenAI chat providers" | Open, unmerged | **Phase 2 multi-model.** Another `AIClient` subclass direction. |
 | [PR #39, #41, #42](https://github.com/farzaa/clicky/pulls?q=LM+Studio) | "LM Studio / MLX local inference" | Closed/open, unmerged | **Phase 2 local-inference exploration, maybe never.** Computer Use beta won't work with local models, so these'd have to use the vision-tag fallback path. |
@@ -208,8 +208,8 @@ Full pull of `farzaa/clicky` open issues + all PRs via `gh api` on this date. Th
 
 | Upstream | Demand | Clicky status | Our response |
 |---|---|---|---|
-| [#35](https://github.com/farzaa/clicky/issues/35) | "Talking to Clicky requires 3 fingers" | Open | **Phase 1 Alt+Space decision validated.** [DECISIONS.md § "Alt+Space over Ctrl+Space"](DECISIONS.md). |
-| [#36](https://github.com/farzaa/clicky/issues/36) | "It doesn't stop once it starts speaking" | Open | **Phase 2 TTS interruption** — second hotkey press cancels the current `pyttsx3` speak call. |
+| [#35](https://github.com/farzaa/clicky/issues/35) | "Talking to Clicky requires 3 fingers" | Open | **Phase 1 Ctrl+Shift+Space decision validated.** [DECISIONS.md § "Ctrl+Shift+Space over Ctrl+Space"](DECISIONS.md). |
+| [#36](https://github.com/farzaa/clicky/issues/36) | "It doesn't stop once it starts speaking" | Open | **Phase 2 TTS interruption** — second hotkey press cancels the current Cartesia WebSocket stream (`tts.stop()` API wired in Phase 1, activated in Phase 2). |
 | [#38](https://github.com/farzaa/clicky/issues/38) | "If it can't type on my behalf what's the USP?" | Open | **Stays out of scope.** We guide + explain, not act. [PRD § "What Clicky Windows IS NOT"](PRD.md#what-clicky-windows-is-not) — we are explicitly not Claude Computer Use / Cowork. |
 | [#7](https://github.com/farzaa/clicky/issues/7) | "Non-English languages, context retention, audio" | Open | Multi-language is Phase 3 (Whisper supports it, prompt engineering needed). **Context retention IS our Phase 1 memory differentiator.** |
 | [PR #49](https://github.com/farzaa/clicky/pull/49) | "Hide cursor overlay while user is typing" | Open, unmerged | **Phase 2 overlay UX polish.** |
@@ -222,7 +222,7 @@ Full pull of `farzaa/clicky` open issues + all PRs via `gh api` on this date. Th
 
 | Upstream | Demand | Clicky status | Our response |
 |---|---|---|---|
-| [#1](https://github.com/farzaa/clicky/issues/1) | "What is the hotkey combo?" | Open — docs gap | **Documented in README** (written at end of Phase 1). Default Alt+Space, fallback Ctrl+Shift+Space. |
+| [#1](https://github.com/farzaa/clicky/issues/1) | "What is the hotkey combo?" | Open — docs gap | **Documented in README** (written at end of Phase 1). Default Ctrl+Shift+Space, fallback Ctrl+Shift+Space. |
 | [PR #16](https://github.com/farzaa/clicky/pull/16) | "Allow user to configure push-to-talk shortcut from panel" | Open, unmerged | **Phase 2** after settings UI exists. |
 
 **Security:**
@@ -258,8 +258,8 @@ Full pull of `farzaa/clicky` open issues + all PRs via `gh api` on this date. Th
 |---|---|---|---|---|
 | 1 | PyQt6 click-through unreliable on Win11 with certain GPU drivers | High | High (no overlay = no demo) | Apply Win32 layered window flags via ctypes after `show()`. Fallback: tkinter + `-transparentcolor` + pywin32. Document in DECISIONS.md which approach won on test machine. |
 | 2 | Per-monitor DPI math wrong on mixed-DPI setups | Very High | High (pointer lands in wrong place) | `SetProcessDpiAwareness(2)` at startup. Document all 3 coordinate spaces (physical, logical, Claude) in code comments. Step 1 acceptance: mouse over known UI element, verify printed coords ±2 px. |
-| 3 | Alt+Space suppression conflicts (antivirus, Logitech G HUB, IME) | Medium | Medium (degrades to "doesn't fire") | `pynput.Listener(suppress=True)` low-level hook. Fallback: Ctrl+Shift+Space, logged in DECISIONS.md. |
-| 4 | `faster-whisper` too slow on target CPU | Low | Medium | `int8` quantization; fall back to `tiny` model with docs explaining accuracy tradeoff. Pre-warm at startup. |
+| 3 | Ctrl+Shift+Space suppression conflicts (antivirus, Logitech G HUB, IME) | Medium | Medium (degrades to "doesn't fire") | `pynput.Listener(suppress=True)` low-level hook. Fallback: Ctrl+Shift+Space, logged in DECISIONS.md. |
+| 4 | AssemblyAI / Cartesia network unreachable (no internet, firewall block, provider outage) | Medium | High | Clear `RuntimeError` with diagnostic instructions at streaming client construction. Reactive fallback to `FasterWhisperSTT` + `Pyttsx3TTS` is a 1-2 hour Phase 2 subclass swap via the abstract base pattern. No preemptive Phase 1 fallback (YAGNI). |
 | 5 | Threading deadlocks (PyQt main loop + pynput thread + audio + Whisper + Anthropic workers) | High | High (silent freeze) | Single strict rule: only Qt signals cross thread boundaries. No UI calls from worker threads. Code review every cross-thread call. |
 | 6 | End-to-end latency > 8s feels broken | Medium | Medium (UX perception) | Print per-stage timing during dev. Pre-warm Whisper + audio. Optional: add audible "listening" cue on hotkey press so user gets immediate feedback. |
 | 7 | Overlay appears in screenshots sent to Claude | High | High (Claude tries to point at its own pointer) | Always `hide_for_capture()` before `mss.grab()`. Re-show after response. Small timing window — verify in Step 3. |
@@ -287,7 +287,7 @@ Things that have been proposed and rejected with reasons recorded in DECISIONS.m
 - **Electron port.** Rejected because tekram already tried it and it's unfinished. Electron buys nothing Python doesn't give us, loses binary size advantage. (DECISION: "Why not Electron")
 - **Screenshot to Vision only, no Computer Use API.** Rejected because original Clicky proves Computer Use is meaningfully more accurate. (DECISION: "Use Computer Use API beta directly")
 - **SQLite-only memory, no markdown.** Rejected because Karpathy's principle of "human-readable, LLM-maintained" beats opaque schemas for a differentiator we need to explain to users. (DECISION: "Karpathy markdown memory + SQLite index hybrid")
-- **Ctrl+Space hotkey.** Rejected because it conflicts with VS Code IntelliSense which would break developer users' autocomplete. (DECISION: "Alt+Space over Ctrl+Space")
+- **Ctrl+Space hotkey.** Rejected because it conflicts with VS Code IntelliSense which would break developer users' autocomplete. (DECISION: "Ctrl+Shift+Space over Ctrl+Space")
 - **Pure `openai-whisper`.** Rejected in favor of `faster-whisper` (CTranslate2 backend, 4× faster, drop-in replacement). (DECISION: "faster-whisper over openai-whisper")
 - **One giant execution plan upfront.** Rejected in favor of Superpowers per-component brainstorm → plan → TDD for the 5 hard components, skipping ceremony for the 4 trivial files. (DECISION: "Superpowers selective ceremony")
 - **Proactive mode in Phase 1.** Rejected per Karpathy: you don't know what to be proactive ABOUT until you have data. Build memory first, mine the patterns, then target proactive mode at the real patterns in Phase 2. (DECISION: "Proactive mode stays in Phase 2")

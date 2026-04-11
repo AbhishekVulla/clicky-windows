@@ -60,7 +60,7 @@ Only for the 5 hard components. Trivial files (config, stt, tts, hotkey) skip Su
 | `overlay.py` | PyQt6 transparent click-through overlay | **Yes (highest risk)** | Not started |
 | `stt.py` | `STT` abstract + `FasterWhisperSTT` | No (trivial) | Not started |
 | `tts.py` | `TTS` abstract + `Pyttsx3TTS` | No (trivial) | Not started |
-| `hotkey.py` | `pynput` Alt+Space push-to-talk | No (trivial) | Not started |
+| `hotkey.py` | `pynput` Ctrl+Shift+Space push-to-talk | No (trivial) | Not started |
 | `memory.py` | Karpathy markdown + SQLite index | **Yes (differentiator)** | Not started |
 | `app.py` | Orchestrator, threading, Qt signals | **Yes (2nd highest risk)** | Not started |
 | `tools/lint_memory.py` | Karpathy-style weekly health check | No (standalone CLI) | Not started |
@@ -84,7 +84,7 @@ Only for the 5 hard components. Trivial files (config, stt, tts, hotkey) skip Su
 
 | Step | Component | Status | Acceptance proof | Commit |
 |---|---|---|---|---|
-| A | CLAUDE.md: 8 specific edits | ✅ Done | CLAUDE.md updated 2026-04-11: faster-whisper, memory in Phase 1, Computer Use beta, memory.py + tools/lint_memory.py in file structure, Alt+Space hotkey, testing target, threading rule, three-coordinate-space doc | TBD |
+| A | CLAUDE.md: 8 specific edits | ✅ Done | CLAUDE.md updated 2026-04-11: faster-whisper, memory in Phase 1, Computer Use beta, memory.py + tools/lint_memory.py in file structure, Ctrl+Shift+Space hotkey, testing target, threading rule, three-coordinate-space doc | TBD |
 | B | PRD.md | ✅ Done | Written 2026-04-11. Problem statement, target user, IS/IS NOT, core loop, 10 acceptance criteria, Phase 2 scope, Phase 3 (not pre-committed), competitor landscape, validated demands, 12 risks, success metrics, rejected alternatives | TBD |
 | C | ROADMAP.md (this file) | 🟡 In progress | Written 2026-04-11. Files Index + all step statuses | TBD |
 | D | DECISIONS.md | ⏳ Pending | Initial decision entries from the plan | — |
@@ -95,9 +95,9 @@ Only for the 5 hard components. Trivial files (config, stt, tts, hotkey) skip Su
 | 3 | `overlay.py` **(highest risk)** | ✅ Done | **14/14 pytest unit tests green (full suite 53/53 in 1.89s)**. Per-monitor overlay architecture (overrode CLAUDE.md's "spans full virtual desktop" wording — see DECISIONS.md 2026-04-11 entry on Qt "islands-of-screens" gotcha). `OverlayController` + `OverlayWindow(QWidget)` + `apply_clickthrough_styles` ctypes helper + `screen_for_monitor` + `physical_to_local_logical` pure math functions. **Manual verification passed on 2880×1800 @ 200% DPI machine (all 5 checklist items):** blue pointer visible + smooth 400ms animation, clicks pass through to apps underneath, no taskbar entry, no focus stealing, correct 4-corner + center positions. **Boris #5 "Verification Before Done" self-critique pass applied pre-commit** — 5/5 Tier 1 cleanup items fixed: `itertools.cycle` replaces mutable-list closure, proper return types (`QScreen`, `OverlayWindow \| None`), `paintEvent(_event)` PEP 8 rename, `SetWindowLongW` error check raises `RuntimeError` with `ctypes.WinError()` context, 2 new `TestOverlayControllerLifecycle` tests covering `hide_for_capture()` / `show_after_capture()` (screenshot-integrity invariant). Full design + Boris self-critique at [`docs/superpowers/plans/2026-04-11-overlay.md`](docs/superpowers/plans/2026-04-11-overlay.md). | 06f7be8 |
 | 4 | `stt.py` | ⏳ Pending | `python -m stt` records 5s, prints transcript matching spoken words, latency <2s | — |
 | 5 | `tts.py` | ⏳ Pending | `python -m tts` speaks "Hello, I am Clicky Windows." audibly | — |
-| 6 | `hotkey.py` | ⏳ Pending | `python -m hotkey` prints PRESSED/RELEASED on Alt+Space hold. Windows window menu does NOT appear. | — |
+| 6 | `hotkey.py` | ⏳ Pending | `python -m hotkey` prints PRESSED/RELEASED on Ctrl+Shift+Space hold. Windows window menu does NOT appear. | — |
 | 6.5 | `memory.py` **(differentiator)** | ⏳ Pending | `python -m memory` seeds 3 fake interactions for `EXCEL.EXE`, `recall()` returns chronological entries, `infer_skill_level()` returns correct bucket. `~/.clicky-windows/memory/EXCEL.EXE.md` is human-readable. SQLite index updated. | — |
-| 7 | `app.py` **(2nd highest risk)** | ⏳ Pending | Open Excel or any real app, hold Alt+Space, ask "what's on screen and how do I save", release. Within ~7s: pointer animates to Save button, voice describes it. **3 successful runs in a row without crashing.** Recorded as demo video. | — |
+| 7 | `app.py` **(2nd highest risk)** | ⏳ Pending | Open Excel or any real app, hold Ctrl+Shift+Space, ask "what's on screen and how do I save", release. Within ~7s: pointer animates to Save button, voice describes it. **3 successful runs in a row without crashing.** Recorded as demo video. | — |
 | 7.5 | `tools/lint_memory.py` | ⏳ Pending | Seed 10 fake interactions across 2 apps, run lint, verify `insights.md` contains non-trivial summary (not just "you used Excel 5 times") | — |
 | 8 | Phase 1 polish | ⏳ Pending | 5+ real user sessions on a real task. `lint_memory.py` run surfaces an insight. README.md written. Demo video recorded. All 4 docs up to date. | — |
 
@@ -111,7 +111,7 @@ Only for the 5 hard components. Trivial files (config, stt, tts, hotkey) skip Su
 
 From [PRD.md § Phase 1 Scope + Acceptance Criteria](PRD.md#phase-1-scope--acceptance-criteria):
 
-- [ ] **1. Working loop on real Windows machine.** Press Alt+Space in Excel, ask a question, release, see pointer + hear answer. Works 3× in a row without crashing.
+- [ ] **1. Working loop on real Windows machine.** Press Ctrl+Shift+Space in Excel, ask a question, release, see pointer + hear answer. Works 3× in a row without crashing.
 - [ ] **2. Multi-monitor + DPI verified.** Tested on 2+ monitors. Pointer lands within ±5 px of target on both.
 - [ ] **3. Memory persists across sessions.** Close app, reopen, ask follow-up. Clicky references previous interaction.
 - [ ] **4. Memory is human-readable.** `cat EXCEL.EXE.md` shows clear interaction log.
