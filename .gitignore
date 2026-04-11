@@ -2,6 +2,9 @@
 .env
 *.env.local
 Anthropic API.txt
+STT TTS API.txt
+* API.txt
+*API*
 *api*key*
 *API*KEY*
 *.key
