@@ -61,15 +61,15 @@ This doc answers **what** and **why**. For **how** see [CLAUDE.md](CLAUDE.md). F
    d. Image resized to exact pixel dims with PIL LANCZOS
    e. Active Windows app detected (GetForegroundWindow + process name)
    f. memory.recall(app_name) reads ~/.clicky-windows/memory/<app>.md, injects into system prompt
-3. Claude Sonnet 4.6 call with Computer Use API beta:
-   - System prompt: recalled memory + "you're a screen-aware buddy, point with [POINT] tags"
-   - User content: image + voice transcript
-   - Tool: computer_20251124 with declared display dimensions
-   - Header: anthropic-beta: computer-use-2025-11-24
-4. Response parsed:
-   - Text (the spoken explanation)
-   - tool_use blocks with {"action":"left_click","coordinate":[x,y]} in declared resolution
-   - Coords clamped to [0,declared_w] × [0,declared_h]
+3. Claude Sonnet 4.6 call with Computer Use API beta (mirroring Clicky's `ElementLocationDetector.swift` verbatim):
+   - User content: image (base64 JPEG) + text (3-line prompt with transcript quoted, instructions co-located with the image — NOT in the SDK `system=` param)
+   - Tool: `{"type":"computer_20251124","name":"computer","display_width_px":...,"display_height_px":...}` with declared dimensions matching the resized image exactly
+   - Header: `anthropic-beta: computer-use-2025-11-24` (required to activate Computer Use + Claude's specialized pixel-counting training)
+   - Phase 2 will inject `memory.recall(app_name)` into the `history` list before the call; Phase 1 uses in-session history only
+4. Response parsed (via `ai.py`'s dual-access `parse_tool_use_coordinates` + `parse_response_text` helpers):
+   - Text blocks → TTS spoken response
+   - `tool_use` blocks with `{"action":"left_click","coordinate":[x,y]}` → pointer targets in declared resolution space
+   - Coords clamped to `[0, declared_w-1] × [0, declared_h-1]` before scaling (Claude occasionally returns out-of-bounds values)
 5. Coordinate scaling:
    - (declared_resolution) → (physical monitor pixels) via scale factors
    - (physical monitor pixels) → (virtual desktop logical pixels) for the overlay
@@ -114,12 +114,18 @@ This doc answers **what** and **why**. For **how** see [CLAUDE.md](CLAUDE.md). F
 
 - **50-100+ pytest unit tests** added across all modules (Phase 1 starts the test discipline, Phase 2 hardens it)
 - **Replay scenarios** for the full loop (recorded interactions → assert same output under mocked Anthropic responses)
-- **Proactive mode** (idle detection, focused-window capture) — targeted at the specific patterns found in Phase 1's markdown memory files via `lint_memory.py`. Don't guess what to be proactive about; mine it from real usage.
-- **BYOK / OpenRouter support** (`OpenRouterClient` subclass with vision-tag regex fallback, since OpenRouter can't proxy Computer Use beta)
-- **ElevenLabs TTS** (`ElevenLabsTTS` subclass of abstract `TTS`)
-- **AssemblyAI streaming STT** (`AssemblyAISTT` subclass of abstract `STT`)
-- **Clipboard copy** of Clicky's responses (Issue #43 on upstream)
-- **Configurable hotkey UI** (Issue #35 — alternative to editing config.py by hand)
+- **Proactive mode** (idle detection, focused-window capture) — targeted at the specific patterns found in Phase 1's markdown memory files via `lint_memory.py`. Don't guess what to be proactive about; mine it from real usage. *(validated by [danpeg/clicky](https://github.com/danpeg/clicky) 79-star fork)*
+- **BYOK / OpenRouter support** (`OpenRouterClient` subclass with vision-tag regex fallback, since OpenRouter can't proxy Computer Use beta) *(Issue [#27](https://github.com/farzaa/clicky/issues/27), PR [#51](https://github.com/farzaa/clicky/pull/51))*
+- **ElevenLabs TTS** (`ElevenLabsTTS` subclass of abstract `TTS`) *(PR [#52](https://github.com/farzaa/clicky/pull/52))*
+- **AssemblyAI streaming STT** (`AssemblyAISTT` subclass of abstract `STT`) *(PR [#47](https://github.com/farzaa/clicky/pull/47) local-STT validation)*
+- **Clipboard copy** of Clicky's responses *(Issue [#43](https://github.com/farzaa/clicky/issues/43), PR [#23](https://github.com/farzaa/clicky/pull/23))*
+- **Configurable hotkey UI** *(Issue [#35](https://github.com/farzaa/clicky/issues/35), PR [#16](https://github.com/farzaa/clicky/pull/16))*
+- **TTS interruption** — second hotkey press cancels current speech *(Issue [#36](https://github.com/farzaa/clicky/issues/36))*
+- **Listening cue overlay** — visible feedback when hotkey pressed *(PR [#58](https://github.com/farzaa/clicky/pull/58))*
+- **Hide overlay while typing** — UX polish *(PR [#49](https://github.com/farzaa/clicky/pull/49))*
+- **BYOK + settings UI with keyring** — copy Grafyn's pattern wholesale *(DECISIONS.md § "Defer settings UI / keychain-backed BYOK to Phase 2")*
+- **Multi-model: Gemini / OpenAI chat providers** *(PR [#40](https://github.com/farzaa/clicky/pull/40))*
+- **Security hardening + logging hygiene** *(Issues [#22](https://github.com/farzaa/clicky/issues/22) / [#34](https://github.com/farzaa/clicky/issues/34) / [#44](https://github.com/farzaa/clicky/issues/44), PR [#50](https://github.com/farzaa/clicky/pull/50))*
 - **PyInstaller bundle** + clean install path (no antivirus warnings; possibly code-signed)
 - **Tray icon** with minimal settings panel
 - **Diff-and-skip screenshot caching** (Karpathy-style "do less work" — hash last screenshot, skip Vision API if unchanged)
@@ -166,6 +172,85 @@ If triggered: port to Tauri 1.8 + Rust backend + Vue 3 frontend + Pinia, matchin
 5. **Clipboard copy** — [Issue #43](https://github.com/farzaa/clicky/issues/43). Can't paste responses (e.g., when Clicky returns code). Phase 2.
 6. **Configurable hotkey** — [Issue #35](https://github.com/farzaa/clicky/issues/35). 3-finger combo is awkward. Phase 2 (Phase 1 ships with `config.py` override).
 7. **Security** — [Issues #22/#34/#44](https://github.com/farzaa/clicky/issues). No shared proxy, no baked-in API keys, no credential leaks. Phase 1 compliant (`.env` only, Anthropic-direct, no proxy).
+
+### Upstream Snapshot (2026-04-11)
+
+Full pull of `farzaa/clicky` open issues + all PRs via `gh api` on this date. This table is the Phase 2 shopping list — every bullet in the Phase 2 Scope section below should trace back to one of these rows. If Farza closes/deletes/renames issues later, re-pull via `gh issue list --repo farzaa/clicky --state all` and `gh pr list --repo farzaa/clicky --state all`.
+
+**Core loop / accuracy:**
+
+| Upstream | Demand | Clicky status | Our response |
+|---|---|---|---|
+| [#24](https://github.com/farzaa/clicky/issues/24) | "not working on multiple monitors" | Open bug in upstream | **Phase 1 already handles.** Step 1 `capture.py` uses `SetProcessDpiAwareness(2)` + `mss.monitors` enumeration + cursor-based monitor selection, verified via the Step 1 crosshair test. |
+| [#37](https://github.com/farzaa/clicky/issues/37) | "Make the cursor vanish" (from screenshots) | Open — screenshot APIs can't capture the OS cursor layer | **Inherited limitation.** We document it in README at end of Phase 1; not fixable at the screenshot-API level without drawing a decoy marker. |
+| [PR #48](https://github.com/farzaa/clicky/pull/48) | "Fix cursor overlay invisible on secondary monitors" | Open upstream bug | **Phase 1 Step 3 risk.** Our `overlay.py` must span full virtual desktop to avoid this; we fail the Step 3 verification gate if pointer can't render on all monitors. |
+
+**Memory / differentiator:**
+
+| Upstream | Demand | Clicky status | Our response |
+|---|---|---|---|
+| [#30](https://github.com/farzaa/clicky/issues/30) | "Stateless Claude wrapper: no memory between sessions" | Open, no plans from upstream | **Phase 1 differentiator.** `memory.py` (Step 6.5) — Karpathy markdown + SQLite index. See [DECISIONS.md § "Persistent memory is IN Phase 1"](DECISIONS.md). |
+| [OpenClaw Gateway mention in #30](https://github.com/farzaa/clicky/issues/30) | Memory, tools, multi-model backend | Open | Validates our markdown-memory direction but we don't depend on OpenClaw; we own our storage. |
+
+**BYOK / multi-model:**
+
+| Upstream | Demand | Clicky status | Our response |
+|---|---|---|---|
+| [#27](https://github.com/farzaa/clicky/issues/27) | "Running out of credit — how can I use my own Codex or Claude API key?" | Open | **Phase 2 BYOK work.** Spec already locked in [DECISIONS.md § "Defer settings UI / keychain-backed BYOK to Phase 2"](DECISIONS.md): copy Grafyn's `keyring` + `platformdirs` + QInputDialog pattern. |
+| [PR #51](https://github.com/farzaa/clicky/pull/51) | "Add OpenRouter provider support" | Open, unmerged | **Phase 2 target.** Exactly what our `AIClient` provider abstraction enables — `OpenRouterClient` subclass with vision-tag regex fallback (since OpenRouter can't proxy Computer Use beta). |
+| [PR #47](https://github.com/farzaa/clicky/pull/47) | "local STT via Parakeet WebSocket server" | Closed, unmerged | **Validates local-STT demand.** We use `faster-whisper` for Phase 1 (CPU-local, no server). Parakeet is a Phase 2 `STT` subclass option. |
+| [PR #52](https://github.com/farzaa/clicky/pull/52) | "Migrate transcription from AssemblyAI to ElevenLabs Scribe v2 Realtime" | Closed, unmerged | **Phase 2 STT upgrade target.** `ElevenLabsScribeSTT(STT)` subclass. |
+| [PR #40](https://github.com/farzaa/clicky/pull/40) | "Add Gemini and OpenAI chat providers" | Open, unmerged | **Phase 2 multi-model.** Another `AIClient` subclass direction. |
+| [PR #39, #41, #42](https://github.com/farzaa/clicky/pulls?q=LM+Studio) | "LM Studio / MLX local inference" | Closed/open, unmerged | **Phase 2 local-inference exploration, maybe never.** Computer Use beta won't work with local models, so these'd have to use the vision-tag fallback path. |
+| [PR #31](https://github.com/farzaa/clicky/pull/31) | "Local OpenRouter ElevenLabs settings" | Closed, unmerged | Phase 2 multi-provider settings UI direction. |
+
+**Reliability / UX:**
+
+| Upstream | Demand | Clicky status | Our response |
+|---|---|---|---|
+| [#35](https://github.com/farzaa/clicky/issues/35) | "Talking to Clicky requires 3 fingers" | Open | **Phase 1 Alt+Space decision validated.** [DECISIONS.md § "Alt+Space over Ctrl+Space"](DECISIONS.md). |
+| [#36](https://github.com/farzaa/clicky/issues/36) | "It doesn't stop once it starts speaking" | Open | **Phase 2 TTS interruption** — second hotkey press cancels the current `pyttsx3` speak call. |
+| [#38](https://github.com/farzaa/clicky/issues/38) | "If it can't type on my behalf what's the USP?" | Open | **Stays out of scope.** We guide + explain, not act. [PRD § "What Clicky Windows IS NOT"](PRD.md#what-clicky-windows-is-not) — we are explicitly not Claude Computer Use / Cowork. |
+| [#7](https://github.com/farzaa/clicky/issues/7) | "Non-English languages, context retention, audio" | Open | Multi-language is Phase 3 (Whisper supports it, prompt engineering needed). **Context retention IS our Phase 1 memory differentiator.** |
+| [PR #49](https://github.com/farzaa/clicky/pull/49) | "Hide cursor overlay while user is typing" | Open, unmerged | **Phase 2 overlay UX polish.** |
+| [PR #58](https://github.com/farzaa/clicky/pull/58) | "focus-rectangle drawing on push-to-talk" | Closed, unmerged | **Phase 2 listening cue.** Visible feedback the instant the hotkey is pressed. |
+| [PR #23](https://github.com/farzaa/clicky/pull/23) | "auto-copy response to clipboard" | Open, unmerged | **Phase 2, links to [#43](https://github.com/farzaa/clicky/issues/43).** |
+| [PR #45](https://github.com/farzaa/clicky/pull/45) | "Practice mode" | Closed, unmerged | **Phase 3** (quiz-style learning mode). |
+| [PR #18](https://github.com/farzaa/clicky/pull/18) | "TFT coaching" | Closed, unmerged | **Out of scope** — game-specific, not a general product direction. |
+
+**Hotkey / config:**
+
+| Upstream | Demand | Clicky status | Our response |
+|---|---|---|---|
+| [#1](https://github.com/farzaa/clicky/issues/1) | "What is the hotkey combo?" | Open — docs gap | **Documented in README** (written at end of Phase 1). Default Alt+Space, fallback Ctrl+Shift+Space. |
+| [PR #16](https://github.com/farzaa/clicky/pull/16) | "Allow user to configure push-to-talk shortcut from panel" | Open, unmerged | **Phase 2** after settings UI exists. |
+
+**Security:**
+
+| Upstream | Demand | Clicky status | Our response |
+|---|---|---|---|
+| [#22](https://github.com/farzaa/clicky/issues/22) | "Anthropic API key committed" | Open | **Phase 1 compliant.** `.env` only, hardened `.gitignore`, rotate after Phase 1. |
+| [#34](https://github.com/farzaa/clicky/issues/34), [#44](https://github.com/farzaa/clicky/issues/44) | Security/privacy audit notes | Open | **Phase 2 security review pass.** |
+| [PR #50](https://github.com/farzaa/clicky/pull/50) | "Remove sensitive data from debug logs" | Open, unmerged | **Phase 2 logging hygiene.** |
+| [PR #15](https://github.com/farzaa/clicky/pull/15) | "Harden Cloudflare Worker" | Open, unmerged | **Not applicable.** We don't run a proxy — Phase 1 and 2 are Anthropic-direct + `.env`. |
+
+**Platform ports:**
+
+| Upstream | Demand | Clicky status | Our response |
+|---|---|---|---|
+| [#21](https://github.com/farzaa/clicky/issues/21), [#26](https://github.com/farzaa/clicky/issues/26) | "Add Windows version" | Open — #1 demand | **Clicky Windows = this project.** |
+| [#19](https://github.com/farzaa/clicky/issues/19) | "I don't have a mac" | Open | Same as above. |
+| [#13](https://github.com/farzaa/clicky/issues/13) | "Debian/Linux support" | Open | **Phase 3 maybe.** Qt is cross-platform but pynput hotkey suppression + Windows-specific DPI code would need Linux equivalents. |
+| [PR #54](https://github.com/farzaa/clicky/pull/54), [PR #53](https://github.com/farzaa/clicky/pull/53) | Competing "Add Windows port" PRs | Closed, unmerged — Farza isn't accepting them | **Validates open lane.** No upstream Windows port is getting merged, so the polished persistent-memory Windows version (us) has no upstream competition. |
+
+**Clicky bugs that are NOT our problem:**
+
+| Upstream | Demand | Clicky status | Our response |
+|---|---|---|---|
+| [#12](https://github.com/farzaa/clicky/issues/12) | "Can't open settings — empty screen" | Upstream SwiftUI bug | Doesn't apply — we have no settings panel in Phase 1, Phase 2 will use PyQt6. |
+| [PR #29](https://github.com/farzaa/clicky/pull/29) | "Replace Cloudflare Worker with local Claude Agent SDK" | Open, unmerged | Doesn't apply — we're already Anthropic-direct, no Worker. |
+
+**The `[POINT]` tag question (resolved here for completeness):** zero issues or PRs in `farzaa/clicky` mention `[POINT]` tags. The pattern exists only as a hypothetical OpenRouter-compatibility fallback I considered during brainstorming and deferred to Phase 2. See [DECISIONS.md § "Use Claude Computer Use API beta directly, not vision-tag regex fallback"](DECISIONS.md) and `docs/superpowers/specs/2026-04-11-ai-design.md`.
 
 ## Risks
 
