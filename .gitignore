@@ -9,6 +9,12 @@ Anthropic API.txt
 *_secret.*
 *.pem
 
+# Dev-session archives — local reference only, not product
+B0 projects research.txt
+Claude Code Clicky Chat.txt
+PLAN.txt
+STARTER_PROMPT.md
+
 # Python
 __pycache__/
 *.py[cod]
