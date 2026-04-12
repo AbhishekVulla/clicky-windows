@@ -103,7 +103,7 @@ class TestAssemblyAIStreamingSTT:
         assert params.sample_rate == 16000
         assert params.speech_model == "u3-rt-pro"
         assert params.encoding == Encoding.pcm_s16le
-        assert params.format_turns is True
+        assert params.format_turns is False
 
         # 5. Audio stream was started.
         fake_audio_stream.start.assert_called_once()

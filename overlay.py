@@ -36,34 +36,45 @@ from __future__ import annotations
 import ctypes
 from itertools import cycle
 
+from enum import Enum, auto
+
 from PyQt6.QtCore import (
     QEasingCurve,
     QPoint,
     QPointF,
     QPropertyAnimation,
+    QTimer,
     Qt,
     pyqtProperty,
 )
-from PyQt6.QtGui import QColor, QGuiApplication, QPainter, QPen, QPolygonF, QScreen
+from PyQt6.QtGui import QColor, QCursor, QGuiApplication, QPainter, QPen, QPolygonF, QScreen
 from PyQt6.QtWidgets import QWidget
+
+
+class _OverlayState(Enum):
+    IDLE = auto()
+    POINTING = auto()
+    HIDDEN = auto()
 
 # --- Cursor polygon shape ----------------------------------------------------
 
 _CURSOR_VERTICES = [
     (0, 0),       # tip (anchor point — lands on the target coordinate)
     (0, 24),      # left edge down
-    (5, 19),      # notch inward (where the diagonal bar meets the arrow body)
+    (5, 19),      # notch inward
     (10, 28),     # lower-right barb tip
     (13, 26),     # barb right edge
     (8, 17),      # barb back up to body
     (16, 17),     # body right edge (widest point)
 ]
-"""Classic arrow cursor shape as (dx, dy) offsets from the tip.
+"""Blue cursor shape. Tip at (0,0) anchors on the target coordinate.
+Translucent dodger-blue fill with thin dark outline.
+"""
 
-The tip vertex (0,0) is anchored at pointer_pos so point_at(x,y) puts the
-tip exactly on the target UI element. Dodger-blue fill, 2px white stroke.
-~16x28 pixels bounding box — similar visual footprint to the old 20px-radius ball
-but semantically correct (tip on target instead of center on target).
+_CURSOR_FOLLOW_LERP = 0.15
+"""Spring interpolation factor for cursor following. Each frame, cursor moves
+15% of the remaining distance toward the target. Lower = smoother/laggier.
+0.15 gives a natural 'buddy following you' feel — like a puppy trotting after you.
 """
 
 
@@ -293,8 +304,8 @@ class OverlayWindow(QWidget):
         # 400ms linear matches config.POINTER_ANIMATION_MS. Bezier easing
         # is Phase 2 polish (see DECISIONS.md).
         self._animation = QPropertyAnimation(self, b"pointerPos")
-        self._animation.setDuration(400)
-        self._animation.setEasingCurve(QEasingCurve.Type.Linear)
+        self._animation.setDuration(300)
+        self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)
 
     def paintEvent(self, _event) -> None:
         """Draw a blue arrow cursor polygon at the current pointer position.
@@ -306,9 +317,16 @@ class OverlayWindow(QWidget):
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setBrush(QColor(30, 144, 255))  # dodger blue
-        painter.setPen(QPen(QColor(255, 255, 255), 2))
         px, py = self._pointer_pos.x(), self._pointer_pos.y()
+
+        # Glow: semi-transparent blue circle behind the cursor
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(30, 144, 255, 35))
+        painter.drawEllipse(QPointF(px + 5, py + 10), 22, 22)
+
+        # Cursor polygon
+        painter.setBrush(QColor(30, 144, 255, 200))  # dodger blue, more opaque
+        painter.setPen(QPen(QColor(40, 40, 40, 100), 1))
         poly = QPolygonF([
             QPointF(px + dx, py + dy) for dx, dy in _CURSOR_VERTICES
         ])
@@ -347,40 +365,37 @@ class OverlayWindow(QWidget):
 # --- Controller --------------------------------------------------------------
 
 class OverlayController:
-    """Manages one OverlayWindow per physical monitor.
+    """Manages one OverlayWindow per physical monitor + cursor following.
 
-    Created once at app startup. app.py calls point_at() with physical
-    pixel coordinates from Claude + the CaptureResult.monitor dict, and
-    the controller routes to the right overlay via screen_for_monitor +
-    physical_to_local_logical. hide_for_capture()/show_after_capture()
-    operate on all overlays atomically so Claude never sees our pointer
-    in its screenshot.
+    State machine:
+    - IDLE: 16ms timer polls QCursor.pos(), cursor follows mouse with offset
+    - POINTING: timer stopped, animation drives cursor to Claude's target,
+      3s dwell, then fly back to mouse, resume IDLE
+    - HIDDEN: timer stopped, overlays hidden for screen capture
 
-    Dependency injection: overlay_factory and screens are injectable so
-    tests can substitute mocks without instantiating real QWidgets or
-    requiring a QApplication. In production both default to the real
-    OverlayWindow class and QGuiApplication.screens() respectively.
+    Phase 1 = always-visible mode only. Cursor visible from launch.
+
+    Dependency injection: overlay_factory, screens, and cursor_pos_fn are
+    injectable so tests can substitute mocks without real QWidgets.
     """
+
+    _FOLLOW_OFFSET_X = 35
+    _FOLLOW_OFFSET_Y = 25
+    _DWELL_MS = 3000
+    _FOLLOW_INTERVAL_MS = 16
 
     def __init__(
         self,
         overlay_factory=None,
         screens: list[QScreen] | None = None,
+        cursor_pos_fn=None,
     ) -> None:
-        """Construct one overlay per physical monitor.
-
-        Args:
-            overlay_factory: callable taking a QScreen and returning an
-                OverlayWindow-like object. Defaults to OverlayWindow. Tests
-                inject a mock factory to avoid real QWidget instantiation.
-            screens: list of QScreens to create overlays for. Defaults to
-                QGuiApplication.screens(). Tests inject a list of mock
-                screens to avoid needing a running QApplication.
-        """
         if overlay_factory is None:
             overlay_factory = OverlayWindow
         if screens is None:
             screens = QGuiApplication.screens()
+        self._cursor_pos_fn = cursor_pos_fn or QCursor.pos
+
         self.overlays: list[OverlayWindow] = []
         for qscreen in screens:
             overlay = overlay_factory(qscreen)
@@ -388,40 +403,129 @@ class OverlayController:
             overlay.apply_win32_clickthrough()
             self.overlays.append(overlay)
 
+        self._state = _OverlayState.IDLE
+        self._pointing_overlay: OverlayWindow | None = None
+
+        self._follow_timer = QTimer()
+        self._follow_timer.setInterval(self._FOLLOW_INTERVAL_MS)
+        self._follow_timer.timeout.connect(self._on_follow_tick)
+        self._follow_timer.start()
+
+    def _on_follow_tick(self) -> None:
+        """Poll cursor position and lerp the buddy cursor toward it.
+
+        Instead of snapping directly to the mouse position (which looks like
+        teleporting), each frame moves 15% of the remaining distance. This
+        creates a smooth 'buddy following you' feel — the cursor lazily
+        drifts toward your mouse like a puppy trotting after you.
+        """
+        if self._state != _OverlayState.IDLE:
+            return
+        global_pos = self._cursor_pos_fn()
+        screen = QGuiApplication.screenAt(global_pos)
+        if screen is None:
+            return
+        target_overlay = self._overlay_for_screen(screen)
+        if target_overlay is None:
+            return
+        for ov in self.overlays:
+            if ov is not target_overlay:
+                ov._pointer_visible = False
+                ov.update()
+
+        local = target_overlay.mapFromGlobal(global_pos)
+        target_x = local.x() + self._FOLLOW_OFFSET_X
+        target_y = local.y() + self._FOLLOW_OFFSET_Y
+
+        current_x = target_overlay._pointer_pos.x()
+        current_y = target_overlay._pointer_pos.y()
+
+        dx = target_x - current_x
+        dy = target_y - current_y
+        dist_sq = dx * dx + dy * dy
+
+        if dist_sq < 4:
+            new_x, new_y = target_x, target_y
+        else:
+            step_x = int(dx * _CURSOR_FOLLOW_LERP)
+            step_y = int(dy * _CURSOR_FOLLOW_LERP)
+            if dx != 0 and step_x == 0:
+                step_x = 1 if dx > 0 else -1
+            if dy != 0 and step_y == 0:
+                step_y = 1 if dy > 0 else -1
+            new_x = current_x + step_x
+            new_y = current_y + step_y
+
+        target_overlay._pointer_pos = QPoint(new_x, new_y)
+        target_overlay._pointer_visible = True
+        target_overlay.update()
+
     def point_at(
         self,
         physical_x: int,
         physical_y: int,
         monitor: dict,
     ) -> None:
-        """Route the animated pointer to the overlay covering `monitor`.
+        """Fly the cursor from current position to Claude's target coordinate."""
+        self._follow_timer.stop()
+        self._state = _OverlayState.POINTING
 
-        Args:
-            physical_x: virtual-desktop physical pixel x (output of
-                capture.unscale_claude_coords).
-            physical_y: virtual-desktop physical pixel y.
-            monitor: mss-style monitor dict from CaptureResult.monitor.
-        """
         screens = QGuiApplication.screens()
         target_screen = screen_for_monitor(monitor, screens)
         target_overlay = self._overlay_for_screen(target_screen)
         if target_overlay is None:
-            # Fallback: primary overlay (first in list)
             if not self.overlays:
                 return
             target_overlay = self.overlays[0]
+
+        self._pointing_overlay = target_overlay
         local_x, local_y = physical_to_local_logical(
             physical_x, physical_y, target_screen
         )
+        target_overlay._pointer_visible = True
         target_overlay.animate_pointer_to(local_x, local_y)
+        target_overlay._animation.finished.connect(self._on_point_animation_finished)
+
+    def _on_point_animation_finished(self) -> None:
+        """After arriving at target, dwell 3s then fly back to mouse."""
+        if self._pointing_overlay:
+            self._pointing_overlay._animation.finished.disconnect(
+                self._on_point_animation_finished
+            )
+        QTimer.singleShot(self._DWELL_MS, self._fly_back)
+
+    def _fly_back(self) -> None:
+        """Animate the cursor back to the current mouse position."""
+        if self._state == _OverlayState.HIDDEN:
+            return
+        if self._pointing_overlay is None:
+            self._resume_idle()
+            return
+        global_pos = self._cursor_pos_fn()
+        local = self._pointing_overlay.mapFromGlobal(global_pos)
+        target = QPoint(
+            local.x() + self._FOLLOW_OFFSET_X,
+            local.y() + self._FOLLOW_OFFSET_Y,
+        )
+        self._pointing_overlay._animation.finished.connect(self._on_return_finished)
+        self._pointing_overlay.animate_pointer_to(target.x(), target.y())
+
+    def _on_return_finished(self) -> None:
+        """Return flight complete — resume mouse following."""
+        if self._pointing_overlay:
+            self._pointing_overlay._animation.finished.disconnect(
+                self._on_return_finished
+            )
+        self._pointing_overlay = None
+        self._resume_idle()
+
+    def _resume_idle(self) -> None:
+        if self._state == _OverlayState.HIDDEN:
+            return
+        self._state = _OverlayState.IDLE
+        self._follow_timer.start()
 
     def _overlay_for_screen(self, screen: QScreen) -> OverlayWindow | None:
-        """Find the overlay whose screen_name matches the target screen's name.
-
-        Pure lookup function, testable without Qt runtime. Returns None
-        if no overlay matches (controller was constructed with an
-        incompatible screen list).
-        """
         target_name = screen.name()
         for overlay in self.overlays:
             if overlay.screen_name == target_name:
@@ -429,17 +533,27 @@ class OverlayController:
         return None
 
     def hide_for_capture(self) -> None:
-        """Hide ALL overlays before mss.grab() so Claude doesn't see our
-        pointer in the screenshot. Must be called from the main Qt thread."""
+        """Hide ALL overlays + stop timer for screen capture."""
+        self._follow_timer.stop()
+        if self._pointing_overlay and self._pointing_overlay._animation.state() == QPropertyAnimation.State.Running:
+            self._pointing_overlay._animation.stop()
+            try:
+                self._pointing_overlay._animation.finished.disconnect()
+            except TypeError:
+                pass
+        self._state = _OverlayState.HIDDEN
         for overlay in self.overlays:
+            overlay._pointer_visible = False
             overlay.hide()
 
     def show_after_capture(self) -> None:
-        """Re-show ALL overlays after capture completes. Also re-applies
-        the Win32 ex-styles in case Qt reset them during show/hide."""
+        """Re-show ALL overlays + restart cursor following."""
         for overlay in self.overlays:
             overlay.show()
             overlay.apply_win32_clickthrough()
+        self._pointing_overlay = None
+        self._state = _OverlayState.IDLE
+        self._follow_timer.start()
 
 
 # --- Manual verification entry point ----------------------------------------

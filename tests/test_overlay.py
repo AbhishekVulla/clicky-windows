@@ -223,8 +223,7 @@ class TestCursorPolygonGeometry:
         assert _CURSOR_VERTICES[0] == (0, 0)
 
     def test_all_vertices_within_bounding_box(self):
-        """All vertices must be non-negative (tip is top-left anchor)
-        and within a reasonable bounding box (~30x30 pixels)."""
+        """All vertices within a reasonable bounding box."""
         from overlay import _CURSOR_VERTICES
         for dx, dy in _CURSOR_VERTICES:
             assert 0 <= dx <= 30, f"dx={dx} out of bounds"

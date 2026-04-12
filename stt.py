@@ -173,17 +173,17 @@ class AssemblyAIStreamingSTT(STT):
 
         self._client: Optional[StreamingClient] = None
         self._audio_stream = None
-        self._started = False
+        self._connected = False
+        self._recording = False
+        self._started = False  # backwards compat for old start()/stop()
         self._partial_cb: Optional[Callable[[str], None]] = None
 
         # Populated by WebSocket-thread event handlers.
         self._final_transcript = ""
         self._final_event = threading.Event()
         self._latest_partial = ""
-        # B2 fix: capture streaming errors from the WS thread so stop() can
-        # surface them as RuntimeError instead of silently returning an empty
-        # transcript. Assigned by _on_error, read/raised/reset in stop().
         self._stream_error: Exception | None = None
+        self._chunk_count = 0
 
     # -- DI factory defaults --------------------------------------------------
 
@@ -216,18 +216,16 @@ class AssemblyAIStreamingSTT(STT):
 
     # -- Public API -----------------------------------------------------------
 
-    def start(self) -> None:
-        """Connect the WebSocket and open the mic. Idempotent.
+    # -- New lifecycle: connect once at startup, record per hotkey press ------
 
-        Raises :class:`RuntimeError` with an actionable diagnostic when
-        ``api_key`` is missing/empty (B3 fix), before any SDK call, so the
-        user never sees the cryptic AssemblyAI auth error out of the
-        ``StreamingClient`` constructor.
+    def connect(self) -> None:
+        """Open mic + WebSocket once at startup. Call before any recording.
+
+        After this returns, the mic is hot (capturing audio to /dev/null)
+        and the WebSocket is connected. start_recording() just flips a flag.
         """
-        # B3: validate api_key truthiness BEFORE any SDK call or state mutation,
-        # so a missing key surfaces as a clear actionable message instead of a
-        # cryptic SDK auth error deep inside _default_client_factory. Rationale:
-        # DECISIONS.md "Priority inversion" + Boris #4 "Verification Before Done".
+        if self._connected:
+            return
         if not self._api_key:
             raise RuntimeError(
                 "ASSEMBLYAI_API_KEY missing or empty -- add it to .env. "
@@ -235,51 +233,15 @@ class AssemblyAIStreamingSTT(STT):
                 "($50 free credits, no credit card)."
             )
 
-        if self._started:
-            return
+        import time as _t
+        _t0 = _t.time()
 
-        # Reset per-session transcript state so a re-used STT instance doesn't
-        # leak previous utterances into the new session.
-        self._final_transcript = ""
-        self._latest_partial = ""
-        self._final_event.clear()
-        self._stream_error = None
-
-        # 1. WebSocket client (cloud) -- wrap connect errors with a diagnostic
-        #    so the user sees exactly what to check.
-        try:
-            self._client = self._client_factory(self._api_key)
-            self._client.on(StreamingEvents.Turn, self._on_turn)
-            self._client.on(StreamingEvents.Error, self._on_error)
-            self._client.connect(
-                StreamingParameters(
-                    sample_rate=self._sample_rate,
-                    speech_model=self._speech_model,
-                    encoding=Encoding.pcm_s16le,
-                    format_turns=True,
-                )
-            )
-        except Exception as exc:
-            raise RuntimeError(
-                "AssemblyAI streaming WebSocket connection failed "
-                f"(url={ASSEMBLYAI_STREAMING_URL}, model={self._speech_model}).\n"
-                f"Original error: {type(exc).__name__}: {exc}\n"
-                "Troubleshooting: check ASSEMBLYAI_API_KEY in .env, "
-                "check your internet connection, and check your AssemblyAI "
-                "account credits at https://www.assemblyai.com/dashboard"
-            ) from exc
-
-        # 2. Microphone stream -- if this fails, disconnect the WS we just
-        #    opened so we don't leak a dangling cloud session.
+        # 1. Open mic (~400-1000ms on Windows via portaudio/WASAPI).
         try:
             self._audio_stream = self._audio_stream_factory(self._on_audio_chunk)
             self._audio_stream.start()
+            print(f"[stt] mic opened in {(_t.time()-_t0)*1000:.0f}ms", flush=True)
         except Exception as exc:
-            try:
-                self._client.disconnect(terminate=True)
-            except Exception:
-                pass
-            self._client = None
             raise RuntimeError(
                 "Microphone input stream failed to open "
                 f"(sample_rate={self._sample_rate}, blocksize={self._chunk_frames}).\n"
@@ -289,109 +251,148 @@ class AssemblyAIStreamingSTT(STT):
                 "for Python, and check no other app has exclusive mic access."
             ) from exc
 
-        self._started = True
+        # 2. WebSocket (~800-1200ms on Windows).
+        _t1 = _t.time()
+        try:
+            self._client = self._client_factory(self._api_key)
+            self._client.on(StreamingEvents.Turn, self._on_turn)
+            self._client.on(StreamingEvents.Error, self._on_error)
+            self._client.connect(
+                StreamingParameters(
+                    sample_rate=self._sample_rate,
+                    speech_model=self._speech_model,
+                    encoding=Encoding.pcm_s16le,
+                    format_turns=False,  # True adds ~1-2s latency for formatting we don't need
+                )
+            )
+            print(f"[stt] WebSocket connected in {(_t.time()-_t1)*1000:.0f}ms", flush=True)
+        except Exception as exc:
+            try:
+                self._audio_stream.stop()
+                self._audio_stream.close()
+            except Exception:
+                pass
+            self._audio_stream = None
+            raise RuntimeError(
+                "AssemblyAI streaming WebSocket connection failed "
+                f"(url={ASSEMBLYAI_STREAMING_URL}, model={self._speech_model}).\n"
+                f"Original error: {type(exc).__name__}: {exc}\n"
+                "Troubleshooting: check ASSEMBLYAI_API_KEY in .env, "
+                "check your internet connection, and check your AssemblyAI "
+                "account credits at https://www.assemblyai.com/dashboard"
+            ) from exc
 
-    def stop(self) -> str:
-        """Signal end of utterance via ``force_endpoint``, wait for final
-        transcript with a bounded timeout, spawn a daemon thread for the slow
-        teardown, and return within ~500ms.
+        print(f"[stt] total connect() time: {(_t.time()-_t0)*1000:.0f}ms", flush=True)
+        self._connected = True
 
-        R1 fix: the teardown steps (``audio_stream.stop/close``,
-        ``client.disconnect``) are moved to a daemon thread because
-        ``StreamingClient.disconnect(terminate=True)`` internally joins two
-        SDK worker threads that poll their queues with a 1-second timeout
-        (see ``assemblyai/streaming/v3/client.py:126-137`` -- the ``disconnect``
-        method ``join()``s ``_read_thread`` + ``_write_thread``, and both
-        threads use ``queue.get(timeout=1)``). Worst-case synchronous
-        ``disconnect()`` is therefore 1-2s even on a healthy WebSocket, which
-        blows the Phase 1 500ms SLA on ``stop()``. A daemon thread is the
-        only way to enforce the SLA while still releasing resources cleanly.
+    def start_recording(self) -> None:
+        """Begin forwarding mic audio to AssemblyAI. Called on hotkey press.
 
-        B2 fix: if ``_on_error`` captured a ``_stream_error`` (e.g. from an
-        AssemblyAI auth/credit failure), raise it here instead of silently
-        returning an empty transcript. ``stream_error`` is captured BEFORE
-        teardown and raised at the end so callers see the error from the
-        WebSocket thread even when teardown is in flight.
-
-        Blocking budget:
-          * ``force_endpoint()``       -- sub-ms (enqueues a ControlMessage).
-          * ``_final_event.wait()``    -- bounded by ``_FINAL_TRANSCRIPT_TIMEOUT_S``
-                                          (2s ceiling, ~150ms P50).
-          * daemon thread spawn        -- sub-ms, non-blocking.
-        Every other step is in-memory state mutation.
+        Takes <1ms because mic + WebSocket are already open from connect().
+        Just flips _recording = True so _on_audio_chunk starts forwarding.
         """
-        if not self._started:
-            return ""
+        if not self._connected:
+            print("[stt] WARNING: not connected, calling connect() now", flush=True)
+            self.connect()
+        client_alive = self._client is not None
+        audio_alive = self._audio_stream is not None
+        print(f"[stt] start_recording: client={client_alive}, audio_stream={audio_alive}", flush=True)
+        self._final_transcript = ""
+        self._latest_partial = ""
+        self._final_event.clear()
+        self._stream_error = None
+        self._chunk_count = 0
+        self._recording = True
 
-        # 1. Enqueue the force_endpoint control message -- fast, non-blocking.
-        #    Must happen BEFORE _final_event.wait() so the server actually
-        #    flushes the turn and sends the final formatted Turn back.
+    def stop_recording(self) -> str:
+        """Stop recording, send ForceEndpoint, return final transcript.
+
+        Called on hotkey release. Blocks for up to _FINAL_TRANSCRIPT_TIMEOUT_S
+        waiting for AssemblyAI's final formatted Turn. Does NOT close the mic
+        or WebSocket — they stay alive for the next press.
+        """
+        if not self._recording:
+            return ""
+        self._recording = False
+        print(f"[stt] stop_recording: {self._chunk_count} chunks forwarded, latest_partial={self._latest_partial!r}", flush=True)
+
         try:
             if self._client is not None:
                 self._client.force_endpoint()
         except Exception as exc:
-            # force_endpoint on a torn-down client may raise; treat as stream
-            # error and unblock the wait below so we don't hang 2s for nothing.
             if self._stream_error is None:
-                self._stream_error = RuntimeError(
-                    f"force_endpoint failed: {exc}"
-                )
+                self._stream_error = RuntimeError(f"force_endpoint failed: {exc}")
             self._final_event.set()
 
-        # 2. Wait for the final transcript with a bounded timeout -- the ONLY
-        #    blocking call in stop() (and it's capped at _FINAL_TRANSCRIPT_TIMEOUT_S).
-        self._final_event.wait(timeout=_FINAL_TRANSCRIPT_TIMEOUT_S)
+        # Wait for Turn events. AssemblyAI often sends a short partial first,
+        # then the full transcript 1-2s later. We wait for the LONGEST
+        # transcript within the timeout window, not just the first one.
+        import time as _t
+        deadline = _t.time() + _FINAL_TRANSCRIPT_TIMEOUT_S
+        while _t.time() < deadline:
+            self._final_event.wait(timeout=0.3)
+            if self._final_event.is_set():
+                # Got a Turn — but there might be a longer one coming.
+                # Reset the event and wait 300ms more for a better result.
+                self._final_event.clear()
+                remaining = deadline - _t.time()
+                if remaining > 0.3:
+                    self._final_event.wait(timeout=0.3)
+                    if not self._final_event.is_set():
+                        break  # 300ms of silence — no more Turns coming
+                else:
+                    break  # near deadline, take what we have
+            else:
+                break  # 300ms with no Turn at all
 
-        # 3. Capture the result and error state BEFORE firing teardown, because
-        #    the daemon thread nulls out self._client / self._audio_stream.
         result = (self._final_transcript or self._latest_partial or "").strip()
         stream_error = self._stream_error
-
-        # Mark stopped so subsequent calls know state is being torn down.
-        self._started = False
-
-        # Snapshot the resources the daemon thread will release, then detach
-        # them from self so a subsequent start() can rebuild cleanly without
-        # racing the daemon.
-        audio_stream = self._audio_stream
-        client = self._client
-        self._audio_stream = None
-        self._client = None
-
-        # 4. Spawn daemon thread for the slow teardown. Fire-and-forget -- any
-        #    errors during teardown are swallowed because the caller already
-        #    got their result and there's no one to report to. Named
-        #    "stt-teardown" so it's debuggable via threading.enumerate() if it
-        #    ever hangs.
-        def _teardown():
-            try:
-                if audio_stream is not None:
-                    try:
-                        audio_stream.stop()
-                    except Exception:
-                        pass
-                    try:
-                        audio_stream.close()
-                    except Exception:
-                        pass
-                if client is not None:
-                    try:
-                        client.disconnect(terminate=True)
-                    except Exception:
-                        pass
-            except Exception:
-                pass  # daemon thread must never propagate exceptions
-
-        threading.Thread(
-            target=_teardown, daemon=True, name="stt-teardown"
-        ).start()
-
-        # Reset error state so subsequent start() calls work cleanly.
         self._stream_error = None
 
         if stream_error is not None:
             raise stream_error
+        return result
 
+    def disconnect(self) -> None:
+        """Close mic + WebSocket. Called on app shutdown."""
+        self._recording = False
+        self._connected = False
+
+        if self._audio_stream is not None:
+            try:
+                self._audio_stream.stop()
+                self._audio_stream.close()
+            except Exception:
+                pass
+            self._audio_stream = None
+
+        if self._client is not None:
+            def _teardown(client):
+                try:
+                    client.disconnect(terminate=True)
+                except Exception:
+                    pass
+            threading.Thread(
+                target=_teardown, args=(self._client,),
+                daemon=True, name="stt-teardown",
+            ).start()
+            self._client = None
+
+    # -- Backwards-compatible start()/stop() for __main__ gate ----------------
+
+    def start(self) -> None:
+        """Legacy: connect + start_recording in one call."""
+        self.connect()
+        self.start_recording()
+        self._started = True
+
+    def stop(self) -> str:
+        """Legacy: stop_recording + disconnect in one call."""
+        if not self._started:
+            return ""
+        self._started = False
+        result = self.stop_recording()
+        self.disconnect()
         return result
 
     def on_partial_transcript(self, callback: Callable[[str], None]) -> None:
@@ -405,29 +406,25 @@ class AssemblyAIStreamingSTT(STT):
         """``sounddevice`` callback: forward raw PCM bytes to the WebSocket.
 
         Runs on the portaudio callback thread. Must be fast and must not
-        raise -- any exception tears down the whole audio stream.
+        raise. Only forwards audio when _recording is True (hotkey held).
+        When _recording is False (idle), chunks are discarded — mic stays hot.
         """
-        if self._client is None:
+        if not self._recording:
             return
+        if self._client is None:
+            print("[stt] WARNING: _recording=True but _client is None — audio dropped", flush=True)
+            return
+        self._chunk_count += 1
         try:
-            # ``indata`` is a cffi buffer from RawInputStream. bytes(...) gives
-            # a copy of the underlying int16 PCM samples, which is what the
-            # StreamingClient.stream() API expects.
             self._client.stream(bytes(indata))
-        except Exception:
-            # Swallow: if the WS died we'll surface it via _on_error/stop().
-            pass
+        except Exception as exc:
+            print(f"[stt] client.stream() FAILED: {exc}", flush=True)
 
     def _on_turn(self, _client, event: TurnEvent) -> None:
-        """Handle an incoming :class:`TurnEvent` from the WebSocket.
-
-        Partial (``turn_is_formatted == False``): forward to the user
-        callback. Final (``turn_is_formatted == True``): append to the
-        accumulated transcript and set ``_final_event`` so ``stop()`` can
-        return. Runs on the WS client thread.
-        """
+        """Handle an incoming :class:`TurnEvent` from the WebSocket."""
         text = getattr(event, "transcript", "") or ""
         is_formatted = bool(getattr(event, "turn_is_formatted", False))
+        print(f"[stt] Turn event: formatted={is_formatted}, recording={self._recording}, text={text[:80]!r}", flush=True)
 
         if is_formatted:
             # Formatted turns are the "final for this utterance" signal.

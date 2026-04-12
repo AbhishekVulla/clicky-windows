@@ -124,7 +124,7 @@ See DECISIONS.md 'Priority inversion' for the research."""
 
 CARTESIA_VOICE_ID: str = os.getenv(
     "CARTESIA_VOICE_ID",
-    "e07c00bc-4134-4eae-9ea4-1a55fb45746b",  # "Brooke - Big Sister" — confident adult female, conversational
+    "f786b574-daa5-4673-aa0c-cbe3e8534c02",  # "Katie - Friendly Fixer" — Cartesia-recommended for voice agents
 )
 """Cartesia voice ID for Sonic-3. Default is "Brooke - Big Sister" — a confident
 adult female voice described as "for conversational use cases" in Cartesia's
@@ -159,8 +159,10 @@ INDEX_DB_PATH: Path = Path(os.getenv("INDEX_DB_PATH", str(_DEFAULT_MEMORY_DIR / 
 INSIGHTS_PATH: Path = Path(os.getenv("INSIGHTS_PATH", str(_DEFAULT_MEMORY_DIR / "insights.md")))
 """Output of tools/lint_memory.py — Karpathy-style weekly health check."""
 
-MEMORY_RECALL_MAX_CHARS: int = 3000
-"""Max characters of recalled memory to inject into Claude's system prompt per request."""
+MEMORY_RECALL_MAX_CHARS: int = 1500
+"""Max characters of recalled memory to inject into the user message per request.
+~1500 chars = last 5-6 interactions. Clicky macOS sends zero persistent memory —
+our memory is the differentiator but too much context slows Claude down."""
 
 
 # ── Overlay ──────────────────────────────────────────────────────────────────
