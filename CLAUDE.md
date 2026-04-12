@@ -8,25 +8,31 @@ Clicky is macOS-only. Windows has 76% of desktop users and zero polished screen-
 
 ## How It Works (Core Loop)
 ```
+ 0. App startup: stt.connect() pre-opens mic + AssemblyAI WebSocket (one-time
+    1-3s cost). Overlay cursor starts following mouse at 60fps.
+
  1. User holds Ctrl+Alt+Space — hotkey.py observes via pynput.Listener(suppress=False)
-    → stt.py opens AssemblyAI streaming WebSocket + sounddevice mic
+    → tts.stop() kills any playing audio instantly (abort + response.close)
+    → stt.start_recording() flips _recording=True (<1ms, mic already hot)
+    → app detects foreground app via ctypes GetForegroundWindow
 
  2. User releases:
-    a. stt.stop() sends ForceEndpoint, awaits final transcript (~150ms P50, 2s ceiling)
+    a. stt.stop_recording() sends ForceEndpoint, waits for longest transcript
+       within 2s window (format_turns=False for speed)
     b. overlay.hide_for_capture() — so Claude never sees our own blue cursor
-    c. capture.capture_all_screens() → list[LabeledCapture] sorted cursor-first,
-       each labeled with "primary focus" marker + pixel dimensions
+    c. capture.capture_all_screens() → list[LabeledCapture] sorted cursor-first
     d. memory.recall(app_name) reads tail of ~/.clicky-windows/memory/<app>.md
+       (1500 chars max, injected with "use silently, don't summarize")
 
- 3. ai.ask_stream(labeled_images, transcript, history,
-                   system_prompt=_CLICKY_SYSTEM_PROMPT, max_tokens=1024)
+ 3. ai.ask_stream(images, transcript, history)
     — plain vision messages.stream() (GA, NOT Computer Use beta)
-    — 35-line system prompt ported from Clicky's companionVoiceResponseSystemPrompt
+    — Clicky's verbatim 35-line system prompt (companionVoiceResponseSystemPrompt)
     — Claude embeds [POINT:x,y:label(:screenN)?] at end of spoken response
+    — Supports OpenRouter via ANTHROPIC_BASE_URL env var (zero code changes)
 
- 4. Progressive text_deltas flow to sentence splitter → tts.speak_sentence()
-    while Claude still generates later sentences — 300-500ms perceived latency win
-    (Clicky has streaming infra but uses onTextChunk:{_in} empty callback)
+ 4. tts.speak(full_response) plays the complete response via Cartesia Sonic-3
+    (Phase 1 speaks full response; sentence-level chunking deferred to Phase 2
+    because speak_sentence() cancels previous sentence — needs a queue)
 
  5. Stream closes → parse_point_tag() regex extracts (x, y) from accumulated text,
     strips the tag from spoken_text (TTS never reads "POINT colon 640 comma 400")
@@ -118,7 +124,8 @@ Clicky Windows/
 ├── ROADMAP.md          ← step status + acceptance proof per step
 ├── DECISIONS.md        ← append-only architectural decision log
 ├── README.md           ← user-facing (written LAST, end of Phase 1)
-├── app.py              ← (Step 7, pending) Qt main orchestrator + threading
+├── app.py              ← Qt main orchestrator + PTT pipeline + debug logging
+├── debug_log.py        ← Per-interaction debug folders (screenshots + timing + coords)
 ├── capture.py          ← screen capture + cursor + DPI + aspect-ratio resize + multi-screen
 ├── ai.py               ← AIClient abstract + AnthropicClient (plain vision + [POINT] regex)
 ├── overlay.py          ← per-monitor PyQt6 + Win32 click-through + blue cursor polygon
@@ -165,7 +172,7 @@ Clicky Windows/
 
 ## Dependencies (Phase 1)
 ```
-anthropic        # Claude SDK — plain vision messages.stream() (NOT Computer Use beta)
+anthropic        # Claude SDK — plain vision messages.stream(). Supports OpenRouter via ANTHROPIC_BASE_URL env var
 mss              # Multi-monitor DPI-aware screen capture
 PyQt6            # Transparent per-monitor overlay + QPropertyAnimation
 pynput           # Global hotkey (Listener suppress=False observe-only)
