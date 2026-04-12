@@ -632,4 +632,56 @@ User caught this during review on 2026-04-12 evening. Rather than assume the fix
 
 ---
 
+## 2026-04-12 (evening 3): ai.py refactor — adopt Clicky's actual vision-tag shipping pattern (supersedes 2026-04-11 "Use Computer Use API beta directly" + "Mirror ElementLocationDetector.swift exactly")
+
+**Context.** The 2026-04-11 entries locked us to Clicky's `ElementLocationDetector.swift` (Computer Use API beta, `computer_20251124` tool, `anthropic-beta: computer-use-2025-11-24` header, `max_tokens=256`, no system prompt). Our `ai.py` Step 2 implemented this verbatim. Live-API gate passed — pixel-accurate `(263, 779)` within 5 pixels of ground truth on the 2880×1800 @ 200% DPI test machine. Functionally correct. But during Step 7 brainstorming, user pushback forced a line-by-line read of Clicky's Swift source via `gh api`.
+
+**Research pass finding (verified, not inherited).** `ElementLocationDetector.swift` is **dead code** — zero references across all 11 non-test Swift files (verified by grep-ing every Clicky Swift file for `ElementLocationDetector`). Clicky's actual shipping path is `ClaudeAPI.analyzeImageStreaming` called from `CompanionManager.sendTranscriptToClaudeWithScreenshot` (lines 590-720 of CompanionManager.swift): plain vision streaming, `max_tokens: 1024`, 35-line system prompt (`companionVoiceResponseSystemPrompt`, lines 544-581) instructing Claude to embed `[POINT:x,y:label(:screenN)?]` at the end of its streamed text response. Coordinates parsed via `parsePointingCoordinates` regex (line 784). NO Computer Use tool, NO beta header. The 2026-04-11 "Computer Use is more accurate" claim came from a comment block INSIDE the dead `ElementLocationDetector.swift` file asserting Computer Use's specialized pixel-counting training is superior — that comment describes code Clicky never shipped in production. The 2026-04-11 decision inherited the claim as ground truth without verifying.
+
+**Decision.** Refactor `ai.py` to match Clicky's actual shipping pattern. Specifically:
+1. Remove `tools=[computer_20251124]` + `extra_headers={"anthropic-beta": "computer-use-2025-11-24"}`. Use plain `self.client.messages.stream(...)` (GA, not beta).
+2. Add `_CLICKY_SYSTEM_PROMPT` constant — port Clicky's 35-line `companionVoiceResponseSystemPrompt` verbatim, adapt only closing references ("Control+Option" → "Ctrl+Alt+Space", "Clicky" → "Clicky Windows").
+3. Add `_POINT_TAG_RE` regex + `parse_point_tag()` helper + `PointParseResult` dataclass — Python port of Clicky's `parsePointingCoordinates`.
+4. Add `_StreamingAnthropicResponse` context manager + `AnthropicClient.ask_stream(labeled_images, transcript, history, system_prompt=_CLICKY_SYSTEM_PROMPT, max_tokens=1024)` returning it. Exposes `text_deltas()` iterator + `final_result() -> PointParseResult`.
+5. Retain `ask()` as a thin batch wrapper (internally calls `ask_stream`, consumes the whole stream, returns same `{"text", "points"}` dict) for backwards compat with `__main__` gate.
+6. Bump `_CLICKY_MAX_TOKENS` 256 → 1024 as a parameter default.
+7. Delete dead helpers: `parse_tool_use_coordinates`, `build_user_prompt`.
+8. Delete `config.py` constants `COMPUTER_USE_BETA` + `COMPUTER_USE_TOOL_TYPE`.
+9. Bundle `capture.py` multi-screen extension (`LabeledCapture` dataclass + `capture_all_screens()` returning `list[LabeledCapture]` sorted cursor-screen-first). Locks `ai.py`'s final API signature now instead of a Phase 2 breaking change. Our single-monitor test machine exercises `len == 1` in practice.
+10. Bundle `overlay.py` ball → real cursor polygon upgrade. Replace `drawEllipse` with `drawPolygon(QPolygonF([...]))` using a classic Windows arrow shape (~8 vertices). Dodger-blue fill, 2px white stroke. **Tip-anchored** at `pointer_pos` — semantically correct for "point at (x, y)" (the ball's center-anchoring was 20px offset from the actual target).
+
+**Alternatives considered:**
+- **Option A (keep Computer Use, add streaming + system prompt + bump max_tokens):** ~2-3h smaller surgery. Rejected — retains an unvalidated accuracy claim (Clicky never shipped Computer Use), retains beta-header risk (header already shifted once `2025-01-24` → `2025-11-24`), and Phase 2 multi-provider subclasses (OpenRouter→non-Anthropic, Gemini, local models) need a vision-tag fallback code path anyway since non-Anthropic providers strip beta headers. Keeping Computer Use means maintaining TWO code paths in Phase 2.
+- **Option B (refactor to Clicky's vision-tag pattern) — CHOSEN.** ~9-12h including Docs-Comprehensive PRD rewrite + cursor upgrade + multi-screen capture.
+- **Option C (hybrid two parallel calls — plain vision for speech + Computer Use batch for coordinates):** ~6-10h. ~2x API cost. Most complex orchestration. Overkill for Phase 1's ONE tester.
+
+**Why Option B won.** (1) Empirical validation — 3500-star Clicky ships this exact pattern in production. (2) Conversational quality matches Farza's demo cadence ("Since you're shooting on Black Magic RAW...") because of 1024 tokens + persona system prompt + plain vision training, which Computer Use's coordinate-focused training bias fights. (3) Sentence-level TTS chunking over the progressive stream becomes a legitimate improvement over Clicky's `onTextChunk: { _ in }` empty callback (they stream for network efficiency but discard progressive value). (4) Phase 2 OpenRouter / Gemini / local-model subclasses drop in cleanly without fallback paths. (5) Plain `messages.stream()` is GA — Computer Use is beta. (6) Cheaper per interaction (no Computer Use tool-definition overhead in the prompt). (7) User explicit decision: *"looks like vision tags is the way then since he has already played and experimented with it."*
+
+**OpenRouter correction (was unverified caveat, now WebSearch-verified).** DECISIONS.md 2026-04-11 claim *"OpenRouter can't proxy Computer Use beta features"* is **partially wrong**. OpenRouter → Anthropic passes through native tool use + beta headers (per [OpenRouter Anthropic docs](https://openrouter.ai/anthropic)). OpenRouter → non-Anthropic (Gemini, GPT-5, local) strips beta headers. So if we'd kept Computer Use, Phase 2 OpenRouter→Anthropic would still work; only OpenRouter→other-provider would need fallback. The *forcing* reasons for Option B remain (1)-(6) above; (4) is weaker than originally stated but still relevant.
+
+**Consequences.** Docs-first execution order (to survive `/compact` mid-refactor):
+- **Phase D (docs FIRST, this session before compact):** DECISIONS.md this entry, CLAUDE.md updates, ROADMAP.md Step 2 footnote, memory files (2 research-discipline lessons + `project_phase1_current_state.md` snapshot update + `MEMORY.md` index), PRD.md comprehensive rewrite (Core Loop update + new Codebase Architecture + User Journeys + Invariants sections).
+- **Phase C (code, next session after compact + rehydration):** `capture.py` multi-screen, `ai.py` vision-tag refactor, `overlay.py` ball→cursor polygon, `config.py` Computer Use constants deletion.
+- **Phase T (tests, bundled with C):** `test_ai.py` full rewrite (~20-23 tests), `test_capture.py` extend (~25-27), `test_overlay.py` extend (~16). Full suite target ~98-105.
+- **Phase V (verify, pre-commit):** Boris #5 self-critique + `superpowers:code-reviewer` + manual live-API A/B gate on `debug_capture.jpg` (old Computer Use path vs new vision-tag path, document quality delta) + manual overlay gate for the new cursor shape.
+- **Phase S (ship):** 3-commit batch (docs, code refactor, cursor upgrade) + push to origin/main after user explicit OK.
+
+**Superseded entries (marked for future-Claude, retained per append-only rule):**
+- 2026-04-11 "Use Claude Computer Use API beta directly, not vision-tag regex fallback" — **SUPERSEDED-FOR-PHASE-1** by this entry. Accuracy claim was inherited from dead-code comments, never validated in Clicky production.
+- 2026-04-11 "Aspect-ratio-aware resolution picking from [(1024,768),(1280,800),(1366,768)]" — **STILL VALID for the resolution-picking logic**, but the "Mirror Clicky's `ElementLocationDetector.swift`" framing is wrong (dead code). Aspect-ratio matching in Clicky actually lives in `CompanionScreenCaptureUtility.swift`, the capture layer. Our `capture.pick_resolution` logic is correct; only the attribution was wrong.
+
+**Research-discipline lessons (promoted to memory files this session):**
+1. **Reference-source read discipline** (`feedback_reference_source_read_discipline.md`, new this session): For any project porting code from a reference repo, read every non-trivial source file in the reference LINE-BY-LINE before drafting any component's design. "100% context" means source reads, not doc reads. Doc-level claims about the reference can be inherited assumptions that don't match the actual source.
+2. **Verification-not-caveating discipline** (appended to `feedback_brutally_honest_mode.md` Verification section): Never use *"note the caveat while still presenting the core finding"* as an escape from verifying a claim via WebSearch / `gh api` / installed source grep. Verification takes seconds; caveats rot and mislead future-Claude. Concrete failure this session: OpenRouter+Computer Use compatibility was treated as "unverified caveat" for multiple turns when a single WebSearch call would have given the verified answer (which turned out to be the opposite of the inherited claim).
+
+**References:**
+- Clicky source: `leanring-buddy/CompanionManager.swift` lines 544-720 (system prompt + orchestrator + `parsePointingCoordinates`)
+- Clicky source: `leanring-buddy/ClaudeAPI.swift` lines 95-200 (`analyzeImageStreaming`)
+- Clicky source: `leanring-buddy/ElementLocationDetector.swift` (dead code, 0 refs grep-verified across all 11 non-test Swift files)
+- WebSearch [Anthropic Computer Use tool docs](https://platform.claude.com/docs/en/agents-and-tools/tool-use/computer-use-tool), [OpenRouter Anthropic provider](https://openrouter.ai/anthropic), [OpenRouter Claude Code integration](https://openrouter.ai/docs/guides/coding-agents/claude-code-integration)
+- Plan file: `C:\Users\Abhis\.claude\plans\streamed-tumbling-sunbeam.md` (full task breakdown + Phase 2 readiness audit + cross-file impact audit)
+- User quotes 2026-04-12 (evening): *"did you even check the actual Clicky GitHub repo?"* / *"looks like vision tags is the way then since he has already played and experimented with it"* / *"the PRD should contain the entire codebase architecture and userflow/journey and have ZERO ambiguity"*
+
+---
+
 <!-- Append new decisions below this line. NEVER delete old entries. Format: ## YYYY-MM-DD: Short title → Context → Decision → Alternatives → Why → Consequences → References -->

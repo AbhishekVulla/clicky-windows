@@ -57,3 +57,6 @@ desktop.ini
 
 # Claude Code local plugin settings (Superpowers install is local scope, gitignored by default)
 .claude/settings.local.json
+
+# Superpowers brainstorming visual-companion session files (mockups + events + server state)
+.superpowers/

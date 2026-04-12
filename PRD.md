@@ -1,299 +1,352 @@
 # Clicky Windows — Product Requirements Document
 
-**Status:** Phase 1 in progress
-**Last updated:** 2026-04-11
+**Status:** Phase 1 in progress (pre-Step-7 `ai.py` refactor underway)
+**Last updated:** 2026-04-12 (evening 3)
 **Owner:** Abhishek Vulla ([Building 0](file:///C:/Users/Abhis/OneDrive/Documents/2nd%20Brain/wiki/building0.md))
 
-This doc answers **what** and **why**. For **how** see [CLAUDE.md](CLAUDE.md). For **where are we now** see [ROADMAP.md](ROADMAP.md). For **why we chose X over Y** see [DECISIONS.md](DECISIONS.md).
+This doc answers **what** and **why** + the full **Codebase Architecture** + **User Journeys** + **Invariants** (the single source of truth against post-compact drift). For **how** see [CLAUDE.md](CLAUDE.md). For **where are we now** see [ROADMAP.md](ROADMAP.md). For **why we chose X over Y** see [DECISIONS.md](DECISIONS.md).
 
 ---
 
 ## Problem Statement
 
-**Non-technical Windows users learning unfamiliar software are stuck reading static help pages while trying to act on them.** Farza Majeed, creator of the macOS original Clicky that inspired this project, put the user mentality in [his LinkedIn demo post](https://www.linkedin.com/posts/farza-majeed-76685612a_i-built-this-thing-called-clicky-its-an-ugcPost-7447137596067188737-7zJK) more clearly than any abstraction: *"I've been procrastinating learning for a long time because I don't want to watch 1 hour YouTube video about it — I just want to learn by doing."* The current failure mode: open a new app (Excel, Photoshop, Blender, a game, an accounting package), get lost, Google the problem, read a written tutorial in one window, try to follow along in another, lose your place, ask ChatGPT, paste screenshots, get generic instructions that don't match what's actually on your screen right now. This loop is the default experience for ~76% of desktop users (Windows' market share) and has no polished solution.
+**Non-technical Windows users learning unfamiliar software are stuck reading static help pages while trying to act on them.** Farza Majeed, creator of the macOS original Clicky that inspired this project, put the user mentality in [his LinkedIn demo post](https://www.linkedin.com/posts/farza-majeed-76685612a_i-built-this-thing-called-clicky-its-an-ugcPost-7447137596067188737-7zJK): *"I've been procrastinating learning for a long time because I don't want to watch 1 hour YouTube video about it — I just want to learn by doing."* The default failure mode: open a new app (Excel, Photoshop, Blender, a game, an accounting package), get lost, Google the problem, read a tutorial in one window, try to follow along in another, lose your place, ask ChatGPT, paste screenshots, get generic instructions that don't match your actual screen. This loop is the default experience for ~76% of desktop users (Windows market share) and has no polished solution.
 
-**Evidence this is a real problem, not a speculation:**
-- Farza Majeed built [Clicky](https://github.com/farzaa/clicky) (macOS) to learn DaVinci Resolve. 3,500 stars, 609 forks, viral on X/LinkedIn in days.
-- Real usage immediately expanded beyond the original "learn software" framing: a mom building her first Lovable app, a dentist debugging software, traders analyzing live charts, designers getting Figma feedback, chess players getting live coaching, Blender learners, Slack-reply writers.
-- [Issue #26 on farzaa/clicky](https://github.com/farzaa/clicky/issues/26) — Windows version — 18 comments, the single most-requested feature.
-- Two independent Windows port attempts exist: tekram/clicky-windows (Electron, 14 stars, unfinished) and a PhD researcher (Mushtaq Bilal) who vibe-coded his own Windows clone in 2 hours with Claude Code after discovering Clicky was Mac-only.
-- [Issue #30 on farzaa/clicky](https://github.com/farzaa/clicky/issues/30) — persistent memory — explicit complaint: "It's a stateless Claude wrapper: no memory between sessions, no tools, no persistent context."
+**Evidence this is a real problem:**
+- Farza Majeed built [Clicky](https://github.com/farzaa/clicky) to learn DaVinci Resolve. 3,500 stars, 609 forks, viral on X/LinkedIn in days.
+- Real usage expanded beyond "learn software": a mom building her first Lovable app, a dentist debugging software, traders on live charts, designers getting Figma feedback, chess players getting live coaching.
+- [Issue #26 on farzaa/clicky](https://github.com/farzaa/clicky/issues/26) — Windows version — 18 comments, the #1 most-requested feature. Two independent Windows port attempts exist (tekram/clicky-windows Electron unfinished; a PhD researcher vibe-coded a 2-hour Claude Code clone). Natique Ibrar Alam commented *"Day 0 of asking if this is available on Windows"* on Farza's LinkedIn post — first-party evidence of the unfulfilled Windows demand.
+- [Issue #30](https://github.com/farzaa/clicky/issues/30) — persistent memory — explicit complaint: *"It's a stateless Claude wrapper: no memory between sessions, no tools, no persistent context."*
 
-**The structural problem, stated crisply:** AI help is conversational (ChatGPT) or static (help docs). What's missing is AI that **sees what you see**, **talks to you while you act**, and **remembers what you've already learned**. Point-and-explain, adapted to your level, for any software, without setup.
+**The structural problem:** AI help is conversational (ChatGPT) or static (help docs). What's missing is AI that **sees what you see**, **talks to you while you act**, and **remembers what you've already learned**. Point-and-explain, for any software, without setup.
 
 ## Target User
 
-**Primary: Non-technical Windows users learning unfamiliar software alone.** A parent wanting to build a first app on Lovable. A small-business owner learning QuickBooks. A student learning Photoshop. Someone trying to figure out a new game's inventory system. Someone debugging why their Excel VLOOKUP isn't working.
+**Primary:** Non-technical Windows users learning unfamiliar software alone. A parent building a first Lovable app. A small-business owner learning QuickBooks. A student learning Photoshop. Someone debugging an Excel VLOOKUP.
 
-**Secondary: Developers wanting an always-on screen-aware assistant.** Code review context, rubber-duck debugging, documentation lookups while reading error messages. This is me (Abhishek) and anyone else building software on Windows.
+**Secondary:** Developers wanting an always-on screen-aware assistant for rubber-duck debugging and documentation lookups — this is Abhishek (Phase 1 tester) and anyone else building software on Windows.
 
-**Explicitly NOT the target:** Mac users (Clicky exists), enterprise teams ([Littlebird](https://www.producthunt.com/products/littlebird) exists), people doing 24/7 screen recording for replay ([Screenpipe](https://github.com/screenpipe/screenpipe) exists), people who want Claude to autonomously control their computer (Claude Cowork / Grunty exist).
+**Explicitly NOT the target:** Mac users (Clicky exists), enterprise teams ([Littlebird](https://www.producthunt.com/products/littlebird) exists), 24/7 screen-recording replayers ([Screenpipe](https://github.com/screenpipe/screenpipe) exists), people who want Claude to autonomously control their computer (Claude Cowork / Grunty exist).
 
 **Why Windows:** 76% of desktop market share. Zero polished screen-aware AI buddies with pointing + voice. The macOS equivalent (Clicky, Clippi) exists and is loved — the demand is proven, the Windows gap is real.
 
 ## What Clicky Windows IS
 
-1. **An AI teacher that lives as a buddy next to your cursor** (design inspired by [farzaa/clicky](https://github.com/farzaa/clicky)'s macOS original). Press and hold Ctrl+Alt+Space, speak a question, release. Clicky captures your screen, asks Claude, and responds with voice while a transparent blue pointer animates to the exact UI element you should click next. **You click it yourself — Clicky never takes control of your mouse.** The "learn by doing" UX promise is: point and explain, you act, conversational back-and-forth, build skill through use rather than tutorial-watching.
-2. **Persistent memory** — one Markdown file per Windows app in `~/.clicky-windows/memory/<app>.md`. Every interaction appended. Next time you open that app, Clicky recalls what you asked last time and adapts ("I see you're back in Photoshop — last time you were working with the pen tool, need more help with that?").
-3. **Windows-native.** Multi-monitor. Mixed DPI. Per-monitor v2 DPI awareness. Win32 layered window flags for true click-through (clicks pass through to the app underneath).
-4. **Latency-first, feels like a buddy next to you.** The whole UX promise is sub-second perceived response: press Ctrl+Alt+Space, speak, release, and the buddy is already responding before you've even dropped your hand. This drives every Phase 1 stack choice — AssemblyAI `u3-rt-pro` streaming STT with `ForceEndpoint` on hotkey release (~150ms P50 final transcript), Claude Sonnet 4.6 with response streaming, Cartesia Sonic-3 WebSocket TTS (~200ms first audible word), sentence-level TTS chunking overlapping Claude generation. Target end-to-end perceived latency: ~800-1200ms from hotkey release to first spoken word. Privacy is NOT a Phase 1 acceptance criterion — your screenshot + transcript + memory are sent to Anthropic regardless of STT/TTS backend. Phase 2 adds opt-in local subclasses (`FasterWhisperSTT`, `Pyttsx3TTS`) for users who want an offline mode. See [DECISIONS.md § "Priority inversion: latency over local-first" (2026-04-11 session 3)](DECISIONS.md) for the full rationale and why the original "local-first" framing was phantom scope.
-5. **Transparent about what it remembers.** You can `cat ~/.clicky-windows/memory/EXCEL.EXE.md` any time and read exactly what Clicky has stored about your Excel interactions. No black-box embeddings, no mystery vector DB. Markdown files a human can audit.
+1. **An AI teacher that lives as a buddy next to your cursor** (design inspired by [farzaa/clicky](https://github.com/farzaa/clicky)'s macOS original). Press and hold Ctrl+Alt+Space, speak a question, release. Clicky captures your screen(s), asks Claude, and responds with voice while a transparent blue cursor overlay animates to the exact UI element you should click next. **You click it yourself — Clicky never takes control of your mouse.** The "learn by doing" UX promise: point and explain, you act, conversational back-and-forth, build skill through use rather than tutorial-watching.
+2. **Persistent memory** — one Markdown file per Windows app at `~/.clicky-windows/memory/<app>.md`. Every interaction appended. Next time you open that app, Clicky recalls what you asked last time and adapts ("I see you're back in Photoshop — last time you were working with the pen tool, need more help with that?").
+3. **Windows-native.** Multi-monitor. Mixed DPI. Per-monitor v2 DPI awareness. Win32 layered-window flags for true click-through (clicks pass through to the app underneath).
+4. **Latency-first, feels like a buddy next to you.** Target end-to-end perceived latency: **~800-1200ms** from hotkey release to first spoken word (~150ms AssemblyAI `ForceEndpoint` + ~500-800ms Claude TTFT + ~200ms Cartesia TTFB − ~300ms sentence-streaming overlap). The UX promise is sub-second perceived response; every stack choice is driven by this. Privacy is NOT a Phase 1 acceptance criterion — screenshots + transcripts + memory are sent to Anthropic + AssemblyAI + Cartesia regardless. Phase 2 adds opt-in local subclasses (FasterWhisperSTT, Pyttsx3TTS) for users who want offline mode. See [DECISIONS.md § "Priority inversion: latency over local-first" (2026-04-11 session 3)](DECISIONS.md).
+5. **Transparent about what it remembers.** You can `cat ~/.clicky-windows/memory/EXCEL.EXE.md` any time and read exactly what Clicky has stored about your Excel interactions. No embeddings, no vector DB, no mystery schemas. Markdown files a human can audit.
+6. **BYOK from day 1.** Phase 1 reads Anthropic + AssemblyAI + Cartesia API keys from `.env`. No Cloudflare Worker proxy (unlike Clicky's production, which holds keys server-side). Solves upstream Clicky issues #22/#27/#32/#33 that Farza hasn't shipped.
 
 ## What Clicky Windows IS NOT
 
-1. **Not a chatbot.** It's push-to-talk with a visual pointer, not a text conversation. If you want text-based Claude, use Claude.ai or Claude Desktop.
-2. **Not a screen recorder.** It doesn't record your screen 24/7, doesn't index what you do, doesn't watch you in the background. Push-to-talk only — nothing happens until you press the hotkey.
-3. **Not Claude Desktop Cowork.** Cowork is an agent that *controls* your computer autonomously. Clicky points and explains — it doesn't click buttons for you. You stay in control.
-4. **Not a coding assistant.** It doesn't auto-complete code, doesn't understand your git state, doesn't compete with Cursor or Copilot. A developer can use it to ask "what does this error message mean?" but it's not a code-completion tool.
-5. **Not a meeting assistant.** It doesn't join calls, doesn't transcribe meetings, doesn't compete with GhostDesk.
-6. **Not a productivity dashboard.** It doesn't track your time, doesn't index your apps, doesn't generate reports.
-7. **Not cloud-based.** No account system, no team features, no SaaS pricing. Runs 100% on your machine with BYOK (bring your own Anthropic API key in `.env`).
-8. **Not a Tauri/Rust/Vue app in Phase 1.** Python + PyQt6, like Wallee. Phase 3 may revisit if Python hits a wall, but it's not pre-committed.
-9. **Not an autonomous agent. Clicky never takes control of your mouse or keyboard.** We use Claude Computer Use API beta for its **pixel-accurate coordinate extraction**, not its computer-control capability. When Claude returns a `tool_use` block with `{"action":"left_click","coordinate":[x,y]}`, we read the coordinate and animate our transparent overlay to point at it — we never call `pyautogui.click()` or simulate a keystroke. The user always physically clicks themselves. This is a product boundary locked on 2026-04-12 after a user clarification pass: the same as how Farza's original Clicky works on macOS, by design. If you want autonomous computer control, use Claude Cowork or Grunty — those are different tools for a different job. Clicky points and explains; you act.
+1. **Not a chatbot.** Push-to-talk with visual pointer, not text conversation. For text-based Claude, use Claude.ai or Claude Desktop.
+2. **Not a screen recorder.** Doesn't record 24/7, doesn't index what you do, doesn't watch in the background. Push-to-talk only.
+3. **Not Claude Desktop Cowork.** Cowork autonomously controls your computer. Clicky points and explains — doesn't click for you.
+4. **Not a coding assistant.** Doesn't auto-complete, doesn't understand git state, doesn't compete with Cursor or Copilot. A dev can ask "what does this error mean?" but it's not a code-completion tool.
+5. **Not a meeting assistant.** Doesn't join calls, doesn't transcribe meetings.
+6. **Not a productivity dashboard.** Doesn't track time, doesn't generate reports.
+7. **Not cloud-based.** No account system, no SaaS pricing. Runs 100% on your machine with BYOK.
+8. **Not a Tauri/Rust/Vue app in Phase 1.** Python + PyQt6, Wallee-style. Phase 3 may revisit if Python hits a wall.
+9. **Not an autonomous agent. Clicky never takes control of your mouse or keyboard.** We draw a transparent blue cursor overlay pointing at the UI element Claude identifies — we never call `pyautogui.click()` or simulate a keystroke. The user always physically clicks themselves. **This is a hard product boundary.** If you want autonomous computer control, use Claude Cowork or Grunty — different tools for a different job.
 
 ## Core Loop
 
 ```
-1. User holds Ctrl+Alt+Space (push-to-talk) while speaking a question
-2. On key release:
-   a. AssemblyAI streaming WebSocket receives `ForceEndpoint` message; final transcript arrives ~150ms P50 after release
-   b. Screen captured via mss (DPI-aware, monitor under cursor)
-   c. Resolution picked from [(1024,768),(1280,800),(1366,768)] by aspect-ratio match
-   d. Image resized to exact pixel dims with PIL LANCZOS
-   e. Active Windows app detected (GetForegroundWindow + process name)
-   f. memory.recall(app_name) reads ~/.clicky-windows/memory/<app>.md, injects into system prompt
-3. Claude Sonnet 4.6 call with Computer Use API beta (mirroring Clicky's `ElementLocationDetector.swift` verbatim):
-   - User content: image (base64 JPEG) + text (3-line prompt with transcript quoted, instructions co-located with the image — NOT in the SDK `system=` param)
-   - Tool: `{"type":"computer_20251124","name":"computer","display_width_px":...,"display_height_px":...}` with declared dimensions matching the resized image exactly
-   - Header: `anthropic-beta: computer-use-2025-11-24` (required to activate Computer Use + Claude's specialized pixel-counting training)
-   - Phase 2 will inject `memory.recall(app_name)` into the `history` list before the call; Phase 1 uses in-session history only
-4. Response parsed (via `ai.py`'s dual-access `parse_tool_use_coordinates` + `parse_response_text` helpers):
-   - Text blocks → TTS spoken response
-   - `tool_use` blocks with `{"action":"left_click","coordinate":[x,y]}` → pointer targets in declared resolution space
-   - Coords clamped to `[0, declared_w-1] × [0, declared_h-1]` before scaling (Claude occasionally returns out-of-bounds values)
-5. Coordinate scaling:
-   - (declared_resolution) → (physical monitor pixels) via scale factors
-   - (physical monitor pixels) → (virtual desktop logical pixels) for the overlay
-6. Overlay animates blue arrow from current position to target via QPropertyAnimation (400ms linear)
-7. Cartesia Sonic-3 WebSocket streams TTS audio chunks as Claude generates text (sentence-level chunking — flush to TTS on `.`/`!`/`?` boundaries), sounddevice output stream plays them in real time, overlapping pointer animation. First audible word within ~200ms of Claude's first sentence completing.
-8. Interaction appended to ~/.clicky-windows/memory/<app>.md
-9. SQLite index updated (interaction count, last_seen, first_seen)
+ 1. User holds Ctrl+Alt+Space → hotkey.py observes via pynput.Listener(suppress=False)
+    → stt.py opens AssemblyAI streaming WebSocket + sounddevice mic input
+
+ 2. User releases:
+    a. stt.stop() sends ForceEndpoint, awaits final transcript (~150ms P50, 2s ceiling)
+    b. overlay.hide_for_capture() — so Claude never sees our own blue cursor
+    c. capture.capture_all_screens() → list[LabeledCapture] sorted cursor-first,
+       each labeled with "primary focus" marker + pixel dimensions
+    d. memory.recall(app_name) reads the tail of ~/.clicky-windows/memory/<app>.md
+
+ 3. ai.ask_stream(labeled_images, transcript, history,
+                   system_prompt=_CLICKY_SYSTEM_PROMPT, max_tokens=1024)
+    — plain vision messages.stream() — GA Anthropic API, NOT Computer Use beta
+    — 35-line system prompt ported from Clicky's companionVoiceResponseSystemPrompt
+    — Claude embeds [POINT:x,y:label(:screenN)?] at end of spoken response
+    — Returns a streaming context manager
+
+ 4. Progressive text_deltas flow to sentence splitter → tts.speak_sentence()
+    while Claude still generates later sentences (300-500ms perceived latency win —
+    Clicky has the streaming infrastructure but uses onTextChunk:{_in} empty callback)
+
+ 5. Stream closes → parse_point_tag() regex extracts coordinate from accumulated text,
+    strips the tag from spoken_text (TTS never reads "POINT colon 640 comma 400")
+
+ 6. overlay.show_after_capture() → overlay.point_at() routes (via screen_number
+    or cursor-screen fallback) to the correct per-monitor OverlayWindow →
+    blue cursor polygon animates to target (tip anchored at pointer_pos via QPropertyAnimation)
+
+ 7. memory.record() appends interaction (app, window title, transcript,
+    stripped response, [(x, y)]) to ~/.clicky-windows/memory/<app>.md + SQLite index
 ```
 
-**End-to-end perceived latency budget: ~800-1200ms from hotkey release to first audible word.** Breakdown: ~150ms AssemblyAI `ForceEndpoint` finalization + ~500-800ms Claude Sonnet 4.6 TTFT + ~200ms Cartesia Sonic-3 TTFB, minus ~300ms sentence-streaming overlap (Claude still generates while TTS plays sentence 1). See [DECISIONS.md § "Priority inversion: latency > local-first"](DECISIONS.md) for the full budget derivation and why the original ≤7s / pyttsx3 / faster-whisper framing was phantom scope.
+**End-to-end perceived latency budget: ~800-1200ms** from hotkey release to first audible word. Breakdown: ~150ms AssemblyAI `ForceEndpoint` + ~500-800ms Claude Sonnet 4.6 TTFT + ~200ms Cartesia Sonic-3 TTFB, minus ~300ms sentence-streaming overlap (Claude still generates while TTS plays the first sentence). See [DECISIONS.md 2026-04-11 session 3 "Priority inversion: latency > local-first"](DECISIONS.md) for budget derivation.
+
+**Note on the Claude call:** `ai.py` was originally a verbatim port of Clicky's `ElementLocationDetector.swift` using Computer Use API beta (`computer_20251124` tool, `anthropic-beta: computer-use-2025-11-24` header). During Step 7 brainstorming (2026-04-12 evening 3), research-pass verification discovered that file is **dead code** — zero references across all 11 non-test Clicky Swift files (grep-verified via `gh api`). Clicky's actual shipping path is `ClaudeAPI.analyzeImageStreaming` + `CompanionManager.parsePointingCoordinates` (vision-tag regex). Pre-Step-7 refactor in progress to correct `ai.py`. See [DECISIONS.md 2026-04-12 (evening 3) "ai.py refactor"](DECISIONS.md).
+
+---
+
+## Codebase Architecture
+
+**Module map** — each Phase 1 Python file mapped to its role, public API, I/O, threading model, and dependencies. This is the single source of truth against post-compact drift; if PRD describes X and code does Y, the code is authoritative and PRD is stale — update PRD.
+
+| File | Role | Public API | Inputs | Outputs | Threading | Depends on |
+|---|---|---|---|---|---|---|
+| **`config.py`** | Env loading + constants | `ANTHROPIC_API_KEY`, `ASSEMBLYAI_API_KEY`, `CARTESIA_API_KEY`, `MODEL_ID`, `HOTKEY`, `CANDIDATE_RESOLUTIONS`, `ASSEMBLYAI_SPEECH_MODEL`, `ASSEMBLYAI_STREAMING_URL`, `AUDIO_SAMPLE_RATE`, `AUDIO_CHUNK_FRAMES`, `CARTESIA_MODEL_ID`, `CARTESIA_VOICE_ID`, `CARTESIA_OUTPUT_SAMPLE_RATE`, `MEMORY_DIR`, `INDEX_DB_PATH`, `INSIGHTS_PATH`, `MEMORY_RECALL_MAX_CHARS`, `POINTER_ANIMATION_MS`, `E2E_LATENCY_BUDGET_S` | `.env` file via `python-dotenv` | Module-level constants | Main thread (import-time only) | `python-dotenv` |
+| **`capture.py`** | Screen capture + DPI + aspect-ratio resize + multi-screen labels | `capture_active_screen() → CaptureResult`, `capture_all_screens() → list[LabeledCapture]` (post-refactor), `unscale_claude_coords()`, `set_dpi_awareness()`, `get_cursor_position()`, `list_monitors()`, `monitor_containing()`, `pick_resolution()`, `resize_for_claude()` | Cursor position (GetCursorPos ctypes), monitor list (mss) | PIL Images + metadata (labels, pixel dims, scale factors) | Main thread (ctypes Win32 calls) | `mss`, `Pillow`, `ctypes` |
+| **`ai.py`** | `AIClient` abstract + `AnthropicClient` concrete | `AnthropicClient.ask()` batch wrapper, `AnthropicClient.ask_stream() → _StreamingAnthropicResponse` (post-refactor), `parse_point_tag() → PointParseResult` (post-refactor), `parse_response_text()`, `image_to_base64_jpeg()` | `list[LabeledCapture]` + transcript string + history list + system_prompt + max_tokens | Streamed text deltas (progressive) + `PointParseResult` (spoken_text, coordinate, element_label, screen_number) | Worker thread (Anthropic SDK HTTP streaming blocks on network I/O) | `anthropic` SDK, PIL |
+| **`overlay.py`** | Per-monitor click-through transparent cursor overlay | `OverlayController(overlay_factory, screens)`, `OverlayController.point_at(physical_x, physical_y, monitor)`, `OverlayController.hide_for_capture()`, `OverlayController.show_after_capture()`, `OverlayWindow.animate_pointer_to(local_logical_x, local_logical_y)`, `screen_for_monitor()`, `physical_to_local_logical()`, `apply_clickthrough_styles()` | Physical pixel (x, y) + `CaptureResult.monitor` dict | `QPainter.drawPolygon(QPolygonF([...]))` draws blue cursor (post-refactor) or `drawEllipse` draws blue ball (pre-refactor) on the correct per-monitor `OverlayWindow` | **Main Qt thread ONLY** (PyQt6 is NOT thread-safe) | PyQt6, `ctypes` (Win32 layered-window flags) |
+| **`stt.py`** | STT abstract + AssemblyAI streaming concrete | `AssemblyAIStreamingSTT.start()`, `.stop() → str`, `.on_partial_transcript(callback)` | `sounddevice.RawInputStream` mic PCM16 16kHz mono 1024-frame chunks | Final transcript string (blocks ~150ms on stop, 2s ceiling) | Worker thread (WebSocket client + daemon-thread teardown in `stop()` for 500ms SLA) | `assemblyai` SDK, `sounddevice` |
+| **`tts.py`** | TTS abstract + Cartesia Sonic-3 concrete | `CartesiaSonicTTS.speak(text)` non-blocking, `.speak_sentence(text)` non-blocking, `.stop()` flag-based | Text string | Audio played via `sounddevice.OutputStream` (PCM float32 44.1kHz) | Worker thread (HTTP streaming + one daemon thread per `speak` call) | `cartesia` SDK, `sounddevice`, `numpy` |
+| **`hotkey.py`** | Push-to-talk state machine | `PushToTalkHotkey(on_press, on_release, listener_class=...)`, `.start()`, `.stop()` | Win32 low-level keyboard events (via `pynput.Listener(suppress=False)` low-level hook) | `on_press()` / `on_release()` callbacks fired on state transitions (Ctrl+Alt+Space ALL held → RECORDING; any released → IDLE) | pynput listener thread; callbacks marshaled to Qt main via `pyqtSignal` in `app.py` | `pynput` |
+| **`memory.py`** | Karpathy markdown + SQLite WAL index | `MemoryStore()`, `.recall(app_name, max_chars) → str`, `.record(app_name, window_title, user_question, claude_response, pointer_targets)`, `.list_known_apps() → list[dict]` | App name (for routing), interaction data | Markdown file at `~/.clicky-windows/memory/<app>.md` + SQLite row at `~/.clicky-windows/index.db` | Any thread (SQLite WAL + fresh connection per call; Phase 1 has ONE writer which is the Qt main thread via `app.py`) | `sqlite3`, `pathlib` |
+| **`app.py`** (Step 7, pending) | Qt main orchestrator + thread coordination | `py -3.13 -m app` entry point | Qt main loop wires all the above via `pyqtSignal` | Full PTT loop end-to-end | Main Qt thread + 5+ worker threads (pynput listener + sounddevice input + AssemblyAI WebSocket + Anthropic HTTP streaming + Cartesia HTTP streaming) | All the above + PyQt6 + `pyqtSignal` |
+| **`tools/lint_memory.py`** (Step 7.5, pending) | Karpathy-style weekly health check | `py -3.13 -m tools.lint_memory` | Reads all `.md` files in `~/.clicky-windows/memory/` | Writes `~/.clicky-windows/insights.md` with patterns and non-obvious observations | Main thread (standalone CLI, no Qt) | `memory.py` (imports `MemoryStore`) |
+
+**Thread model rule:** only `pyqtSignal` crosses thread boundaries. No UI calls from worker threads, ever. PyQt6 is not thread-safe. STT/AI/TTS workers emit Qt signals; Qt main thread slot handlers call overlay + memory methods. `app.py` (Step 7) enforces this.
+
+**Provider abstraction rule:** `AIClient`, `STT`, `TTS` abstract base classes exist from day 1 so Phase 2 multi-provider support (`OpenRouterClient`, `GeminiClient`, `ElevenLabsTTS`, `FasterWhisperSTT`, `LocalLMClient`, etc.) is a subclass drop, not a refactor of `app.py`. Mirrors Wallee's `BuddyTranscriptionProvider` protocol pattern.
+
+---
+
+## User Journeys
+
+### Phase 1: First run (developer-tester only, Abhishek)
+1. `git clone https://github.com/AbhishekVulla/clicky-windows && cd clicky-windows`
+2. `py -3.13 -m pip install -r requirements.txt`
+3. `cp .env.example .env`, edit with `ANTHROPIC_API_KEY` + `ASSEMBLYAI_API_KEY` + `CARTESIA_API_KEY`
+4. **If Claude Desktop for Windows is installed:** disable its Ctrl+Alt+Space binding in Settings → Keyboard Shortcuts → Ctrl+Alt+Space → None (known conflict documented in DECISIONS.md 2026-04-12 evening).
+5. `py -3.13 -m app` in a terminal
+6. Terminal stays open as long as Clicky runs. App is now listening globally for Ctrl+Alt+Space.
+7. User opens any Windows app (Excel, Notepad, Photoshop, whatever).
+8. User holds Ctrl+Alt+Space, speaks a question ("how do I freeze the top row"), releases.
+9. Within ~1-2 seconds: blue cursor overlay animates to a UI element (e.g., the View tab) + Clicky's voice starts speaking the answer ("you'll want to head up to the View tab, then click Freeze Panes...").
+10. User clicks the pointed-to element themselves (Clicky never clicks for them).
+11. `Ctrl+C` in the terminal to quit.
+
+### Phase 1: Typical PTT interaction
+See [Core Loop](#core-loop) above.
+
+### Phase 1: Multi-session memory accumulation
+1. **Session 1** (Monday 10am): User asks "how do I freeze the top row" in Excel → Clicky points at View → Freeze Panes → voice explains it → `memory.record()` appends the interaction to `~/.clicky-windows/memory/excel.exe.md`.
+2. **Session 2** (Thursday 2pm): User opens Excel again, holds Ctrl+Alt+Space, asks "remind me how to freeze panes?"
+3. `memory.recall("excel.exe")` reads the tail of the markdown file → injected into the user message text content block before the current transcript.
+4. Claude sees the prior interaction in context → references it: *"you asked about this on Monday — same place, View tab → Freeze Panes → Freeze Top Row."*
+5. User feels the difference between a stateless Claude wrapper and a buddy who remembers.
+6. **Demo video (Step 8 acceptance criterion):** MUST show 2+ sessions of the same app because the memory differentiator only lands when the user experiences cross-session recall. A single-session demo looks identical to Clicky's stateless demo.
+
+### Phase 1: Quit flow
+1. User hits `Ctrl+C` in the terminal running `py -3.13 -m app`.
+2. Qt main loop receives `KeyboardInterrupt` via signal handler.
+3. App stops the pynput listener, stops the STT WebSocket (daemon-thread teardown keeps shutdown within ~500ms), stops any in-flight Cartesia HTTP stream (flag-based stop), hides overlays, closes SQLite connection.
+4. Terminal returns to shell. Next run starts fresh; memory files persist on disk.
+
+### Phase 2: First run (non-technical user, PACKAGED — PENDING Phase 2)
+Target UX (not yet built):
+1. User downloads `Clicky-Windows-Setup.msi` from a release.
+2. Double-click → Windows installer walks through accept-license + install-location + "install for all users?" dialogs.
+3. On first launch, a PyQt6 `QInputDialog` wizard prompts for API keys: Anthropic (required) + AssemblyAI (required) + Cartesia (required). Keys stored in Windows Credential Manager via `keyring` lib (mirror of Grafyn's `settings.rs` migration pattern).
+4. App silently starts as a background process. System tray icon appears (the ONLY visible chrome).
+5. Right-click tray icon → "Open Settings" (hotkey rebind, voice selection, memory dir, about) / "Quit" / "Help".
+6. User uses Ctrl+Alt+Space as in Phase 1.
+7. Optional: user toggles "Start on login" in settings — app auto-launches via `SMAppService`-equivalent.
+8. When a new version ships, auto-updater checks a release feed on startup, prompts the user, downloads + restarts.
+
+---
+
+## Invariants (load-bearing rules — breaking any of these breaks the project)
+
+Every rule below is "load-bearing" — it encodes a lesson learned the hard way. Breaking them causes silent failures, security holes, or UX regressions. If you are future-Claude reading this post-compact, treat these as non-negotiable unless the user explicitly tells you to override.
+
+1. **`pynput.Listener(suppress=False)` — observe-only, NEVER `suppress=True`.** `suppress=True` installs a global `WH_KEYBOARD_LL` hook that blocks EVERY key event system-wide, disabling all typing globally. There is NO per-combo opt-out. Caught 2026-04-12 morning — user directly verbatim: *"NO MY KEYBOARD IS DISABBLED, NOTHING WORKS, I CANT TYPE."* See DECISIONS.md 2026-04-12 entries.
+2. **Per-monitor overlays, NOT virtual-desktop-spanning.** Qt 6's "islands-of-screens" geometry on mixed-DPI Windows 11 silently puts coordinates in gaps between monitors. `overlay.py` has `OverlayController` managing `list[OverlayWindow]` — one per physical monitor from `QGuiApplication.screens()`. Routed via `screen_for_monitor()` metadata match against `CaptureResult.monitor`. See DECISIONS.md 2026-04-11 "Per-monitor overlays".
+3. **`overlay.hide_for_capture()` fires BEFORE every `mss.grab()`.** If Claude sees our own blue cursor in its input screenshot, it'll try to point at itself — infinite feedback loop. `overlay.py` exposes `hide_for_capture()` + `show_after_capture()`; `app.py` calls them around every capture.
+4. **Win32 layered-window flags applied via ctypes AFTER `QWidget.show()`.** Flags: `WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`. OR'd in, NEVER overwritten (would wipe Qt's own flags). Followed by `SetWindowPos(SWP_FRAMECHANGED)` so changes take effect immediately. `apply_clickthrough_styles` raises `RuntimeError` with `ctypes.WinError()` context if `SetWindowLongW` returns 0 — no silent click-through breakage.
+5. **DPI awareness is mandatory.** `ctypes.windll.shcore.SetProcessDpiAwareness(2)` at startup (per-monitor v2). Without it, mixed-scaling multi-monitor setups put the pointer in the wrong place. Idempotent — safe to call every capture.
+6. **Three coordinate spaces, always document the conversion:** (A) physical pixels virtual-desktop, (B) Qt logical DIP per screen, (C) screenshot pixel space Claude returns coordinates in. `capture.unscale_claude_coords` maps C→A. `overlay.physical_to_local_logical` maps A→B per-screen via that screen's own `devicePixelRatio` (NEVER cached globally — mixed-DPI setups have different ratios per screen). `ai.parse_point_tag` extracts coordinates in space C from the `[POINT:x,y]` tag.
+7. **Memory recall injection goes into the user message text content block, NOT the `system=` param.** `system=` stays fixed at `_CLICKY_SYSTEM_PROMPT` (Clicky's persona + pointing instructions). Memory context is per-turn data, not persona. Matches Clicky's shipping pattern.
+8. **`ai.py` uses vision-tag `[POINT:x,y:label(:screenN)?]` pattern, NOT Computer Use API beta** (post-refactor). Clicky's `ElementLocationDetector.swift` (which we originally ported) is dead code — 0 references across all 11 non-test Swift files, grep-verified. The 2026-04-11 "Use Computer Use API beta directly" decision is SUPERSEDED-FOR-PHASE-1 by the 2026-04-12 (evening 3) refactor decision. See DECISIONS.md.
+9. **Only `pyqtSignal` crosses thread boundaries.** PyQt6 is not thread-safe. No UI calls from worker threads, ever. STT/AI/TTS all run on worker threads, communicate with Qt main via `pyqtSignal`. `app.py` (Step 7) enforces this.
+10. **Clicky NEVER autonomously clicks.** We draw an overlay pointing at (x, y) — the user clicks themselves. Hard product boundary per "What Clicky IS NOT" item 9. If a future contributor proposes adding `pyautogui.click()` or equivalent, reject and point them here.
+11. **API keys in `.env` only for Phase 1. Never committed.** `.gitignore` blocks `.env`, `*API*KEY*`, `*.key`, `*.pem`, `*secret*`, `Anthropic API.txt`, `STT TTS API.txt`. Phase 2 migrates to Windows Credential Manager via Python `keyring` lib.
+12. **Reference-source read discipline** (learned 2026-04-12 evening 3): for any component that ports code from a reference repo, read every non-trivial source file in the reference LINE-BY-LINE via `gh api` BEFORE drafting any design. Doc-level claims ("Clicky uses X") can be inherited assumptions that don't match the actual source. `ai.py` was a verbatim port of Clicky's DEAD CODE because the 2026-04-11 decision was based on a partial source read. Cost: ~6-9h of pre-Step-7 refactor work. See `feedback_reference_source_read_discipline.md`.
+13. **Verification-not-caveating discipline** (learned 2026-04-12 evening 3): never use "note the caveat while still presenting the core finding" as an escape from verifying a non-trivial SDK/API/platform/source claim. WebSearch / `gh api` / installed source grep takes seconds. Caveats rot and mislead future-Claude. See `feedback_brutally_honest_mode.md` Verification discipline rules 4+5.
+14. **Hotkey is Ctrl+Alt+Space** (3-finger modifier+key combo). NEVER Ctrl+Space (VS Code IntelliSense), NEVER Ctrl+Shift+Space (Excel/Sheets Select-All), NEVER Alt+Space with `suppress=True` (globally destructive). Claude Desktop for Windows users must disable its Ctrl+Alt+Space binding in its Settings (same pattern Raycast/Flow-Launcher users follow). Phase 1.5 Win32 `RegisterHotKey` subclass deferred.
+15. **`MemoryStore` has 4 public methods, NOT 5:** `__init__`, `recall`, `record`, `list_known_apps`. `infer_skill_level` was removed 2026-04-12 per user pushback (*"This is not Khan Academy now is it? The whole value is learn by doing"*). No pedagogical framework. Just raw markdown tail reads. The LLM can infer engagement depth from the raw markdown without pre-digested labels.
+16. **Superpowers plans: ONE combined plan doc per component.** No separate `specs/` file. Three docs = bureaucracy (the ai.py ceremony mistake from Step 2). Boris #5 self-critique + `superpowers:code-reviewer` independent pass pre-commit for non-trivial feature commits.
+
+---
 
 ## Phase 1 Scope + Acceptance Criteria
 
-**Scope:** 12 code files + 4 docs + private GitHub repo. See [ROADMAP.md](ROADMAP.md) for the step-by-step execution order.
+**Scope:** 12 code files + 5 docs (CLAUDE + PRD + ROADMAP + DECISIONS + README-at-end) + private GitHub repo. See [ROADMAP.md](ROADMAP.md) for step-by-step execution order.
 
 **Phase 1 is "done" when all of these are true:**
 
-1. **Working loop on a real Windows machine.** Press Ctrl+Alt+Space in Excel (or any real app), speak a question, release. Within ~7 seconds: pointer animates to the right UI element + voice explains the answer. Works 3 times in a row without crashing.
-2. **Multi-monitor + DPI verified.** Tested on at least 2 monitors (ideally with different scaling). Pointer lands within ±5 pixels of the intended target on both monitors.
-3. **Memory persists across sessions.** Close the app, reopen it, ask a follow-up question about the same Windows app. Clicky references the previous interaction ("Earlier you asked about the Save button...").
-4. **Memory is human-readable.** `~/.clicky-windows/memory/EXCEL.EXE.md` opens as a plain markdown file with clear sections for each interaction. No encoded binary, no opaque schema.
-5. **5+ real user sessions on a real task.** Abhishek uses Clicky Windows himself for at least 5 meaningful sessions (e.g., learning Blender, debugging something in VS Code, using an unfamiliar app). Not test sessions — actual usage.
-6. **`lint_memory.py` produces meaningful insights.** Running the standalone Karpathy-style health check script scans the memory files and writes `~/.clicky-windows/insights.md` with patterns, common questions, and at least one non-obvious observation — the **unexpected finding** candidate for the B0 case study.
-7. **~50-80 pytest unit tests pass.** Coverage: coordinate math (capture.py), API response parsing + clamping (ai.py), memory CRUD + recall (memory.py), hotkey state machine (hotkey.py). Manual verification for overlay, STT audio loop, TTS, and full E2E loop (no automated test for these — no headless mode).
-8. **Demo video recorded.** 30-90 second screen recording showing the full loop working on a real task. This is the proof for the B0 enforcement rule ("No task is 'done' without acceptance proof").
-9. **All 4 docs up to date.** CLAUDE.md, PRD.md (this file), ROADMAP.md (all steps marked done with acceptance proof), DECISIONS.md (every non-obvious decision logged). README.md written last.
-10. **Private GitHub repo with full history.** Conventional commits, one commit per step at minimum. Public release is a Phase 2 decision.
+1. **Working loop on a real Windows machine.** Press Ctrl+Alt+Space in Excel (or any real app), speak a question, release. Within ~1-2 seconds: blue cursor animates to the right UI element + voice explains the answer. Works 3 times in a row without crashing.
+2. **Multi-monitor + DPI verified.** Tested on at least 2 monitors (ideally with different scaling). Pointer lands within ±5 pixels of the intended target on both monitors. _(Phase 1 tester machine is single-monitor; multi-monitor verification happens when Abhishek plugs in an external display.)_
+3. **Memory persists across sessions.** Close the app, reopen it, ask a follow-up about the same Windows app. Clicky references the previous interaction.
+4. **Memory is human-readable.** `~/.clicky-windows/memory/EXCEL.EXE.md` opens as a plain markdown file with clear per-interaction sections. No encoded binary, no opaque schema.
+5. **5+ real user sessions on a real task.** Not test sessions — actual usage on a real task (learning Blender, debugging in VS Code, using an unfamiliar app, etc.).
+6. **`lint_memory.py` produces meaningful insights.** Writes `~/.clicky-windows/insights.md` with patterns + at least one non-obvious observation — the **unexpected finding** candidate for the B0 case study.
+7. **~100 pytest unit tests pass** in <3s. Coverage: coordinate math, API response parsing, memory CRUD, hotkey state machine, capture DPI/resize, overlay geometry, STT/TTS DI mocks, vision-tag regex parser. Manual verification for overlay click-through, STT audio loop, TTS playback, full E2E loop (no headless mode).
+8. **Demo video recorded.** 30-90 second screen recording showing the full loop on a real task. MUST show 2+ sessions of the same app so the memory differentiator lands.
+9. **All 5 docs up to date.** CLAUDE.md, PRD.md (this file), ROADMAP.md, DECISIONS.md, README.md.
+10. **Private GitHub repo with full history.** Conventional commits, one commit per step minimum.
 
 **Phase 1 will NOT have:**
-- Proactive mode (Phase 2 — Karpathy: "wait for the data")
-- BYOK / OpenRouter (Phase 2 — Computer Use beta is Anthropic-direct only)
-- ElevenLabs TTS, AssemblyAI streaming STT (Phase 2 subclasses)
-- Clipboard copy, settings UI, tray icon, theme toggle
-- Polished bezier pointer animations
-- PyInstaller bundle / MSI installer
-- Auto-updater, crash reporting, telemetry
-- Automated tests for the full screen→AI→overlay→voice loop
+- Proactive mode (Phase 2 — Karpathy: wait for the data)
+- Settings UI, tray icon, MSI installer, auto-updater, code signing (Phase 2 packaging)
+- BYOK keychain migration (Phase 1 is `.env` only — non-tech users can't run Phase 1 anyway)
+- ElevenLabs TTS, FasterWhisper STT, Gemini/OpenAI/local-model `AIClient` subclasses (Phase 2 subclasses)
+- Clipboard copy, theme toggle, dark mode, hide-overlay-while-typing
+- Polished bezier pointer animations (current: QEasingCurve.Type.Linear 400ms)
+- Automated tests for the full screen→AI→overlay→voice loop (no headless mode exists)
 
 ## Phase 2 Scope (2-4 weeks, only if Phase 1 validates)
 
-**Goal:** match the B0 bar by rigour proportional to problem. Reference: Wallee (3K LOC Python + 517 tests + 60 replay scenarios + safety-critical architecture).
+**Goal:** match the B0 bar by rigour proportional to problem. Reference: Wallee (3K LOC Python + 517 tests + 60 replay scenarios + safety-critical architecture). Every item below traces to an actual user demand from Clicky upstream issues/PRs (sourced via the Upstream Snapshot below).
 
-- **50-100+ pytest unit tests** added across all modules (Phase 1 starts the test discipline, Phase 2 hardens it)
-- **Replay scenarios** for the full loop (recorded interactions → assert same output under mocked Anthropic responses)
-- **Proactive mode** (idle detection, focused-window capture) — targeted at the specific patterns found in Phase 1's markdown memory files via `lint_memory.py`. Don't guess what to be proactive about; mine it from real usage. *(validated by [danpeg/clicky](https://github.com/danpeg/clicky) 79-star fork)*
-- **BYOK / OpenRouter support** (`OpenRouterClient` subclass with vision-tag regex fallback, since OpenRouter can't proxy Computer Use beta) *(Issue [#27](https://github.com/farzaa/clicky/issues/27), PR [#51](https://github.com/farzaa/clicky/pull/51))*
-- **ElevenLabs TTS** (`ElevenLabsTTS` subclass of abstract `TTS`) *(PR [#52](https://github.com/farzaa/clicky/pull/52))*
-- **AssemblyAI streaming STT** (`AssemblyAISTT` subclass of abstract `STT`) *(PR [#47](https://github.com/farzaa/clicky/pull/47) local-STT validation)*
-- **Clipboard copy** of Clicky's responses *(Issue [#43](https://github.com/farzaa/clicky/issues/43), PR [#23](https://github.com/farzaa/clicky/pull/23))*
-- **Configurable hotkey UI** *(Issue [#35](https://github.com/farzaa/clicky/issues/35), PR [#16](https://github.com/farzaa/clicky/pull/16))*
-- **TTS interruption** — second hotkey press cancels current speech *(Issue [#36](https://github.com/farzaa/clicky/issues/36))*
-- **Listening cue overlay** — visible feedback when hotkey pressed *(PR [#58](https://github.com/farzaa/clicky/pull/58))*
-- **Hide overlay while typing** — UX polish *(PR [#49](https://github.com/farzaa/clicky/pull/49))*
-- **BYOK + settings UI with keyring** — copy Grafyn's pattern wholesale *(DECISIONS.md § "Defer settings UI / keychain-backed BYOK to Phase 2")*
-- **Multi-model: Gemini / OpenAI chat providers** *(PR [#40](https://github.com/farzaa/clicky/pull/40))*
-- **Security hardening + logging hygiene** *(Issues [#22](https://github.com/farzaa/clicky/issues/22) / [#34](https://github.com/farzaa/clicky/issues/34) / [#44](https://github.com/farzaa/clicky/issues/44), PR [#50](https://github.com/farzaa/clicky/pull/50))*
-- **PyInstaller bundle** + clean install path (no antivirus warnings; possibly code-signed)
-- **Tray icon** with minimal settings panel
-- **Diff-and-skip screenshot caching** (Karpathy-style "do less work" — hash last screenshot, skip Vision API if unchanged)
-- **UIA accessibility tree fast path** for productivity apps (Excel, Word, Chrome, File Explorer) — fall back to screenshot for creative apps (Photoshop, Blender). This is where Clicky Windows can actually beat the original Clicky — Mac has no equivalent to Windows UIA.
+- **50-100+ additional pytest tests** across all modules + replay scenarios (Wallee-style mocked-Anthropic deterministic replays)
+- **Proactive mode** — idle detection + focused-window capture. **Targets come from `lint_memory.py` real patterns, not guessed.** Validated by [danpeg/clicky](https://github.com/danpeg/clicky) (79 stars in 3 days).
+- **BYOK / OpenRouter support** (`OpenRouterClient(AIClient)` subclass). OpenRouter → Anthropic passes through native tool use; OpenRouter → non-Anthropic providers strip beta headers. Our post-refactor vision-tag path works across both. Issues [#27](https://github.com/farzaa/clicky/issues/27), [#33](https://github.com/farzaa/clicky/issues/33), PR [#51](https://github.com/farzaa/clicky/pull/51).
+- **Settings panel + system tray icon** via `settings_panel.py` + `system_tray.py`. Tray icon is the ONLY way a non-tech user can see/quit a background process. Issue [#60](https://github.com/farzaa/clicky/issues/60) (new). Grafyn's `settings.rs` pattern wholesale: `keyring` lib for keychain, `platformdirs` for non-sensitive settings.
+- **Configurable hotkey UI** — rebind without code change. Issue [#35](https://github.com/farzaa/clicky/issues/35), PR [#16](https://github.com/farzaa/clicky/pull/16).
+- **TTS interruption** — second hotkey press cancels current speech. Issue [#36](https://github.com/farzaa/clicky/issues/36). `tts.stop()` stub already exists in Phase 1.
+- **Clipboard copy** of responses. Issue [#43](https://github.com/farzaa/clicky/issues/43), PR [#23](https://github.com/farzaa/clicky/pull/23).
+- **Listening cue overlay** — focus rectangle on hotkey press. PR [#58](https://github.com/farzaa/clicky/pull/58).
+- **Hide overlay while user is typing.** PR [#49](https://github.com/farzaa/clicky/pull/49).
+- **Multi-language support.** Issue [#7](https://github.com/farzaa/clicky/issues/7). Claude handles multi-language natively; AssemblyAI u3-rt-pro supports it; adapt `_CLICKY_SYSTEM_PROMPT` per language.
+- **Multi-model `AIClient` subclasses:** `GeminiClient`, `OpenAIClient`, `LocalLMClient` (for LM Studio / MLX / Ollama). PR [#40](https://github.com/farzaa/clicky/pull/40), PRs [#39](https://github.com/farzaa/clicky/pull/39) / [#41](https://github.com/farzaa/clicky/pull/41) / [#42](https://github.com/farzaa/clicky/pull/42). Post-refactor vision-tag path makes these all clean subclass drops — no fallback code paths.
+- **Additional `STT` / `TTS` subclasses:** `FasterWhisperSTT` (offline), `ElevenLabsTTS`, `EdgeTTS`, `DeepgramNova3STT`. PR [#47](https://github.com/farzaa/clicky/pull/47), PR [#52](https://github.com/farzaa/clicky/pull/52).
+- **Security hardening + logging scrubbing.** Issues [#22](https://github.com/farzaa/clicky/issues/22), [#34](https://github.com/farzaa/clicky/issues/34), [#44](https://github.com/farzaa/clicky/issues/44), PR [#50](https://github.com/farzaa/clicky/pull/50).
+- **PyInstaller bundle + WiX MSI installer + EV code signing + auto-updater** (pyupdater or custom). Unavoidable for distribution to non-tech users.
+- **Diff-and-skip screenshot caching** — hash last screenshot, skip Claude call if unchanged. Karpathy-style "do less work."
+- **UIA accessibility tree fast path** for productivity apps (Excel, Word, Chrome, File Explorer). Where Clicky Windows can beat the macOS original — Mac has no UIA equivalent.
 - **"Unexpected finding" writeup published** — the B0 editorial standard. One essay about what building this revealed. Not a marketing post.
-- **5+ real users beyond Abhishek** with documented feedback you can quote
+- **5+ real users beyond Abhishek** with documented feedback.
 
 ## Phase 3: Tauri Rewrite (NOT pre-committed)
 
 Only triggered if Phase 2 hits a Python-specific wall:
-- PyInstaller bundle too fat / slow / triggers too many antivirus false positives
+- PyInstaller bundle too fat / slow / triggers antivirus false positives
 - GIL contention causes user-visible latency that can't be optimized away
 - PyQt6 overlay reliability issues across Win10/11 + GPU driver combinations
-- Sharing with non-technical users surfaces "I can't install Python" pain that PyInstaller can't solve
+- "Can't install Python" pain non-technical users report that PyInstaller can't solve
 
-If triggered: port to Tauri 1.8 + Rust backend + Vue 3 frontend + Pinia, matching Grafyn's architecture shape. See the Phase 2 checklist in `streamed-tumbling-sunbeam.md` (the frozen strategic plan) for the specific Grafyn parity items if we get here.
+If triggered: port to Tauri 2.0 + Rust backend + Vue 3 frontend + Pinia, matching Grafyn's architecture. See the Grafyn patterns in [`WKJBryan/Grafyn`](https://github.com/WKJBryan/Grafyn).
 
-**Most likely: never needed.** The honest bet is Python + hardening clears the B0 bar like Wallee did.
+**Most likely: never needed.** Wallee (3K LOC Python, safety-critical) clears the B0 bar by rigour, not language.
 
 ## Competitor Landscape
 
 | Competitor | Platform | Points at screen? | Voice? | Memory? | Open source? | Price | Our edge |
 |---|---|---|---|---|---|---|---|
-| **Clicky** (farzaa/clicky) | macOS only | Yes | Yes | No | Yes, MIT | Free | Windows + memory |
+| **Clicky** (farzaa/clicky) | macOS only | Yes | Yes | No | Yes, MIT | Free (Cloudflare Worker proxy holds keys) | Windows + persistent memory + BYOK |
 | **Clippi.us** | macOS only, "Windows soon" | Yes | Yes | No | No | Free | Windows + memory + open source + shipped |
 | **GhostDesk** | Windows | No | Voice out only | No | No | $9.99/mo | Points, free, memory |
 | **Screenpipe** | Win + Mac | No | No | Records everything | Yes | Free | Interactive push-to-talk, not passive recording |
-| **tekram/clicky-windows** | Windows (Electron) | Partial | Yes | No | Yes | Free | Memory, polished, shipped (tekram has 14 stars and unfinished PLAN docs) |
-| **danpeg/clicky** (fork) | macOS | Yes, proactive | Yes | No | Yes | Free | Windows. (Copy their proactive-mode idea in Phase 2, targeted at real memory patterns.) |
+| **tekram/clicky-windows** | Windows (Electron) | Partial | Yes | No | Yes | Free | Memory, polished, shipped (tekram is 14 stars, unfinished) |
+| **danpeg/clicky** (fork) | macOS | Yes, proactive | Yes | No | Yes | Free | Windows. Copy their proactive-mode idea in Phase 2, targeted at real memory patterns. |
 | **Claude Cowork / Grunty** | Cross-platform | N/A (controls, doesn't point) | No | No | Grunty yes | Varies | Different category — we guide, they act |
 | **Microsoft Copilot Vision** | Win 11 | No | No | No | No | Bundled | Points, voice, memory |
 | **Littlebird** | Cross-platform | No | No | Yes | No | Enterprise, $11M raised | Consumer, free, visual pointer |
-| **Precogni** | macOS alpha | No | Limited | Privacy-focused | No | Alpha | Windows, ships sooner |
-| **Vercept** (acquired by Anthropic Feb 2026) | ??? | Unknown | Unknown | Unknown | No | Not yet shipped | **STRATEGIC THREAT** — Anthropic will ship first-party Windows screen-aware AI. Phase 1 must ship before they do. Memory is the long-term moat. |
-| **[trili.ai](https://trili.ai/)** (*"Master Any Software"*) | Windows | No (text instructions only, *"Click the Insert menu"*) | Partial (text-first chat, voice button secondary) | Unknown (screenshot didn't show it) | **No** (closed SaaS) | Unknown | **Genuinely different design philosophy, not a superset.** Evidence: user-provided 2026-04-12 screenshot showing a ~20% sidebar panel, text chat interface, and pre-planned structured tutorials ("STEP 1 OF 7 — Click on the 'Insert' menu"). This is Khan Academy-style pedagogy. Clicky Windows is the opposite: transparent click-through overlay with 0% screen cost, voice-first push-to-talk, conversational "learn by doing" per Farza's pitch, per-app persistent memory as the differentiator. **Our edges:** open source + BYOK, zero screen real estate cost, voice+pointing fidelity, persistent memory. Phase 2 competitive review will do the install + deep feature comparison; Phase 1 ships the differentiated product rather than racing to clone. |
+| **[trili.ai](https://trili.ai/)** (*"Master Any Software"*) | Windows | No (text instructions only) | Partial (text-first) | Unknown | No (closed SaaS) | Unknown | **Opposite design philosophy.** trili.ai ships sidebar panel + text chat + pre-planned "STEP 1 OF 7" structured tutorials (Khan Academy model). Clicky Windows ships transparent click-through overlay + voice-first + conversational "learn by doing" + persistent memory. Evidence: user-provided 2026-04-12 screenshot. |
+| **Vercept** (acquired by Anthropic, Feb 2026) | ??? | Unknown | Unknown | Unknown | No | Not yet shipped | **STRATEGIC THREAT** — Anthropic will ship first-party Windows screen-aware AI. Phase 1 must ship before they do. Memory is the long-term moat. |
 
-**Key insight from competitive analysis:** nobody has shipped *Windows + pointing + voice + memory* as a single product. tekram has Windows + pointing + voice but no memory and is unfinished. danpeg has macOS + pointing + voice + proactive but no memory. Clicky/Clippi have macOS + pointing + voice but no memory. **The combination is open.**
+**Key insight:** nobody has shipped *Windows + pointing + voice + memory* as a single product. **The combination is open.** Our edges: open source + BYOK from day 1 + zero screen-cost overlay + voice-first + conversational learn-by-doing + persistent memory.
 
-## Validated User Demands (sourced from Clicky GitHub issues + forks + social)
+## Validated User Demands (sourced from Clicky GitHub issues + forks + Farza's social)
 
-1. **Windows version** — #1 request on farzaa/clicky. [Issue #26](https://github.com/farzaa/clicky/issues/26), 18 comments. Two independent forks attempting it.
-2. **Persistent memory** — #2 request. [Issue #30](https://github.com/farzaa/clicky/issues/30). Explicit quote: "It's a stateless Claude wrapper: no memory between sessions, no tools, no persistent context."
-3. **Proactive mode** — validated by viral fork. [danpeg/clicky](https://github.com/danpeg/clicky) got 79 stars in 3 days without marketing by adding idle-detection + focused-window capture. Phase 2.
-4. **BYOK / multi-model** — [Issue #27](https://github.com/farzaa/clicky/issues/27), 5 comments. OpenRouter, local models, own API keys. Phase 2.
-5. **Clipboard copy** — [Issue #43](https://github.com/farzaa/clicky/issues/43). Can't paste responses (e.g., when Clicky returns code). Phase 2.
-6. **Configurable hotkey** — [Issue #35](https://github.com/farzaa/clicky/issues/35). 3-finger combo is awkward. Phase 2 (Phase 1 ships with `config.py` override).
-7. **Security** — [Issues #22/#34/#44](https://github.com/farzaa/clicky/issues). No shared proxy, no baked-in API keys, no credential leaks. Phase 1 compliant (`.env` only, Anthropic-direct, no proxy).
-8. **Farza's Clicky demo + Natique Ibrar Alam's "Day 0 of asking if this is available on Windows" comment** on the LinkedIn post — first-party evidence of the "learn by doing" framing landing with real users AND of the unfulfilled Windows demand. Captured verbatim in `I built this thing called Clicky..txt` (dev-session archive, gitignored) on 2026-04-12 for future reference.
+Every Phase 2 Scope bullet traces to one or more of these:
 
-### Upstream Snapshot (2026-04-11)
+1. **Windows version** — #1 request on farzaa/clicky. [Issue #26](https://github.com/farzaa/clicky/issues/26) (18 comments), [#21](https://github.com/farzaa/clicky/issues/21), [#19](https://github.com/farzaa/clicky/issues/19), [#54](https://github.com/farzaa/clicky/issues/54). Two independent forks.
+2. **Persistent memory** — #2 request. [Issue #30](https://github.com/farzaa/clicky/issues/30) ("stateless Claude wrapper: no memory between sessions"). Our Phase 1 differentiator.
+3. **Proactive mode** — validated by the [danpeg/clicky](https://github.com/danpeg/clicky) fork (79 stars in 3 days without marketing).
+4. **BYOK / multi-model** — Issues [#22](https://github.com/farzaa/clicky/issues/22), [#27](https://github.com/farzaa/clicky/issues/27), [#32](https://github.com/farzaa/clicky/issues/32), [#33](https://github.com/farzaa/clicky/issues/33); PR [#51](https://github.com/farzaa/clicky/pull/51). Our Phase 1 ships `.env` BYOK; Phase 2 adds keychain UI.
+5. **Clipboard copy** — [Issue #43](https://github.com/farzaa/clicky/issues/43), PR [#23](https://github.com/farzaa/clicky/pull/23).
+6. **Configurable hotkey** — [Issue #35](https://github.com/farzaa/clicky/issues/35) ("3-finger combo awkward"), PR [#16](https://github.com/farzaa/clicky/pull/16).
+7. **TTS interruption** — [Issue #36](https://github.com/farzaa/clicky/issues/36) ("doesn't stop once it starts speaking").
+8. **Multi-language** — [Issue #7](https://github.com/farzaa/clicky/issues/7).
+9. **Settings UI** — [Issue #60](https://github.com/farzaa/clicky/issues/60) (new).
+10. **Linux support** — [Issue #13](https://github.com/farzaa/clicky/issues/13), [Issue #59](https://github.com/farzaa/clicky/issues/59) (new).
+11. **Security hardening** — Issues [#22](https://github.com/farzaa/clicky/issues/22), [#34](https://github.com/farzaa/clicky/issues/34), [#44](https://github.com/farzaa/clicky/issues/44), PR [#50](https://github.com/farzaa/clicky/pull/50).
+12. **Farza's demo + Natique's "Day 0 of asking if this is available on Windows" LinkedIn comment** — first-party evidence that the "learn by doing" framing lands AND the Windows demand is unfulfilled. Captured verbatim in `I built this thing called Clicky..txt` (dev-session archive, gitignored).
 
-Full pull of `farzaa/clicky` open issues + all PRs via `gh api` on this date. This table is the Phase 2 shopping list — every bullet in the Phase 2 Scope section below should trace back to one of these rows. If Farza closes/deletes/renames issues later, re-pull via `gh issue list --repo farzaa/clicky --state all` and `gh pr list --repo farzaa/clicky --state all`.
+### Upstream Snapshot (2026-04-12)
 
-**Core loop / accuracy:**
+Pull `gh issue list --repo farzaa/clicky --state all` + `gh pr list --repo farzaa/clicky --state all` periodically to refresh. **Pattern:** Farza rejects most feature PRs (local STT, MLX/LM Studio, ElevenLabs migration, OpenRouter expansion, TFT coaching, Practice mode, clipboard copy all CLOSED UNMERGED). Clicky stays minimal by design. **Strategic implication:** our raise-the-bar angle is shipping the features users want that Farza won't merge upstream.
 
-| Upstream | Demand | Clicky status | Our response |
-|---|---|---|---|
-| [#24](https://github.com/farzaa/clicky/issues/24) | "not working on multiple monitors" | Open bug in upstream | **Phase 1 already handles.** Step 1 `capture.py` uses `SetProcessDpiAwareness(2)` + `mss.monitors` enumeration + cursor-based monitor selection, verified via the Step 1 crosshair test. |
-| [#37](https://github.com/farzaa/clicky/issues/37) | "Make the cursor vanish" (from screenshots) | Open — screenshot APIs can't capture the OS cursor layer | **Inherited limitation.** We document it in README at end of Phase 1; not fixable at the screenshot-API level without drawing a decoy marker. |
-| [PR #48](https://github.com/farzaa/clicky/pull/48) | "Fix cursor overlay invisible on secondary monitors" | Open upstream bug | **Phase 1 Step 3 risk.** Our `overlay.py` must span full virtual desktop to avoid this; we fail the Step 3 verification gate if pointer can't render on all monitors. |
-
-**Memory / differentiator:**
-
-| Upstream | Demand | Clicky status | Our response |
-|---|---|---|---|
-| [#30](https://github.com/farzaa/clicky/issues/30) | "Stateless Claude wrapper: no memory between sessions" | Open, no plans from upstream | **Phase 1 differentiator.** `memory.py` (Step 6.5) — Karpathy markdown + SQLite index. See [DECISIONS.md § "Persistent memory is IN Phase 1"](DECISIONS.md). |
-| [OpenClaw Gateway mention in #30](https://github.com/farzaa/clicky/issues/30) | Memory, tools, multi-model backend | Open | Validates our markdown-memory direction but we don't depend on OpenClaw; we own our storage. |
-
-**BYOK / multi-model:**
-
-| Upstream | Demand | Clicky status | Our response |
-|---|---|---|---|
-| [#27](https://github.com/farzaa/clicky/issues/27) | "Running out of credit — how can I use my own Codex or Claude API key?" | Open | **Phase 2 BYOK work.** Spec already locked in [DECISIONS.md § "Defer settings UI / keychain-backed BYOK to Phase 2"](DECISIONS.md): copy Grafyn's `keyring` + `platformdirs` + QInputDialog pattern. |
-| [PR #51](https://github.com/farzaa/clicky/pull/51) | "Add OpenRouter provider support" | Open, unmerged | **Phase 2 target.** Exactly what our `AIClient` provider abstraction enables — `OpenRouterClient` subclass with vision-tag regex fallback (since OpenRouter can't proxy Computer Use beta). |
-| [PR #47](https://github.com/farzaa/clicky/pull/47) | "local STT via Parakeet WebSocket server" | Closed, unmerged | **Validates local-STT demand.** Phase 1 uses AssemblyAI `u3-rt-pro` streaming (latency-first). Phase 2 adds `FasterWhisperSTT` + `ParakeetSTT` subclasses for users who want offline mode.
-| [PR #52](https://github.com/farzaa/clicky/pull/52) | "Migrate transcription from AssemblyAI to ElevenLabs Scribe v2 Realtime" | Closed, unmerged | **Phase 2 STT upgrade target.** `ElevenLabsScribeSTT(STT)` subclass. |
-| [PR #40](https://github.com/farzaa/clicky/pull/40) | "Add Gemini and OpenAI chat providers" | Open, unmerged | **Phase 2 multi-model.** Another `AIClient` subclass direction. |
-| [PR #39, #41, #42](https://github.com/farzaa/clicky/pulls?q=LM+Studio) | "LM Studio / MLX local inference" | Closed/open, unmerged | **Phase 2 local-inference exploration, maybe never.** Computer Use beta won't work with local models, so these'd have to use the vision-tag fallback path. |
-| [PR #31](https://github.com/farzaa/clicky/pull/31) | "Local OpenRouter ElevenLabs settings" | Closed, unmerged | Phase 2 multi-provider settings UI direction. |
-
-**Reliability / UX:**
-
-| Upstream | Demand | Clicky status | Our response |
-|---|---|---|---|
-| [#35](https://github.com/farzaa/clicky/issues/35) | "Talking to Clicky requires 3 fingers" | Open | **Phase 1 Ctrl+Alt+Space decision validated.** [DECISIONS.md § "Ctrl+Alt+Space over Ctrl+Space"](DECISIONS.md). |
-| [#36](https://github.com/farzaa/clicky/issues/36) | "It doesn't stop once it starts speaking" | Open | **Phase 2 TTS interruption** — second hotkey press cancels the current Cartesia WebSocket stream (`tts.stop()` API wired in Phase 1, activated in Phase 2). |
-| [#38](https://github.com/farzaa/clicky/issues/38) | "If it can't type on my behalf what's the USP?" | Open | **Stays out of scope.** We guide + explain, not act. [PRD § "What Clicky Windows IS NOT"](PRD.md#what-clicky-windows-is-not) — we are explicitly not Claude Computer Use / Cowork. |
-| [#7](https://github.com/farzaa/clicky/issues/7) | "Non-English languages, context retention, audio" | Open | Multi-language is Phase 3 (Whisper supports it, prompt engineering needed). **Context retention IS our Phase 1 memory differentiator.** |
-| [PR #49](https://github.com/farzaa/clicky/pull/49) | "Hide cursor overlay while user is typing" | Open, unmerged | **Phase 2 overlay UX polish.** |
-| [PR #58](https://github.com/farzaa/clicky/pull/58) | "focus-rectangle drawing on push-to-talk" | Closed, unmerged | **Phase 2 listening cue.** Visible feedback the instant the hotkey is pressed. |
-| [PR #23](https://github.com/farzaa/clicky/pull/23) | "auto-copy response to clipboard" | Open, unmerged | **Phase 2, links to [#43](https://github.com/farzaa/clicky/issues/43).** |
-| [PR #45](https://github.com/farzaa/clicky/pull/45) | "Practice mode" | Closed, unmerged | **Phase 3** (quiz-style learning mode). |
-| [PR #18](https://github.com/farzaa/clicky/pull/18) | "TFT coaching" | Closed, unmerged | **Out of scope** — game-specific, not a general product direction. |
-
-**Hotkey / config:**
-
-| Upstream | Demand | Clicky status | Our response |
-|---|---|---|---|
-| [#1](https://github.com/farzaa/clicky/issues/1) | "What is the hotkey combo?" | Open — docs gap | **Documented in README** (written at end of Phase 1). Default Ctrl+Alt+Space via `pynput.Listener(suppress=False)` (observe-only). Alt+Space was rejected for Phase 1 because pynput's `suppress=True` is globally destructive — see [DECISIONS.md 2026-04-12](DECISIONS.md). Phase 1.5 may add a Win32 `RegisterHotKey` subclass restoring Alt+Space. |
-| [PR #16](https://github.com/farzaa/clicky/pull/16) | "Allow user to configure push-to-talk shortcut from panel" | Open, unmerged | **Phase 2** after settings UI exists. |
-
-**Security:**
-
-| Upstream | Demand | Clicky status | Our response |
-|---|---|---|---|
-| [#22](https://github.com/farzaa/clicky/issues/22) | "Anthropic API key committed" | Open | **Phase 1 compliant.** `.env` only, hardened `.gitignore`, rotate after Phase 1. |
-| [#34](https://github.com/farzaa/clicky/issues/34), [#44](https://github.com/farzaa/clicky/issues/44) | Security/privacy audit notes | Open | **Phase 2 security review pass.** |
-| [PR #50](https://github.com/farzaa/clicky/pull/50) | "Remove sensitive data from debug logs" | Open, unmerged | **Phase 2 logging hygiene.** |
-| [PR #15](https://github.com/farzaa/clicky/pull/15) | "Harden Cloudflare Worker" | Open, unmerged | **Not applicable.** We don't run a proxy — Phase 1 and 2 are Anthropic-direct + `.env`. |
-
-**Platform ports:**
-
-| Upstream | Demand | Clicky status | Our response |
-|---|---|---|---|
-| [#21](https://github.com/farzaa/clicky/issues/21), [#26](https://github.com/farzaa/clicky/issues/26) | "Add Windows version" | Open — #1 demand | **Clicky Windows = this project.** |
-| [#19](https://github.com/farzaa/clicky/issues/19) | "I don't have a mac" | Open | Same as above. |
-| [#13](https://github.com/farzaa/clicky/issues/13) | "Debian/Linux support" | Open | **Phase 3 maybe.** Qt is cross-platform but pynput hotkey suppression + Windows-specific DPI code would need Linux equivalents. |
-| [PR #54](https://github.com/farzaa/clicky/pull/54), [PR #53](https://github.com/farzaa/clicky/pull/53) | Competing "Add Windows port" PRs | Closed, unmerged — Farza isn't accepting them | **Validates open lane.** No upstream Windows port is getting merged, so the polished persistent-memory Windows version (us) has no upstream competition. |
-
-**Clicky bugs that are NOT our problem:**
-
-| Upstream | Demand | Clicky status | Our response |
-|---|---|---|---|
-| [#12](https://github.com/farzaa/clicky/issues/12) | "Can't open settings — empty screen" | Upstream SwiftUI bug | Doesn't apply — we have no settings panel in Phase 1, Phase 2 will use PyQt6. |
-| [PR #29](https://github.com/farzaa/clicky/pull/29) | "Replace Cloudflare Worker with local Claude Agent SDK" | Open, unmerged | Doesn't apply — we're already Anthropic-direct, no Worker. |
-
-**The `[POINT]` tag question (resolved here for completeness):** zero issues or PRs in `farzaa/clicky` mention `[POINT]` tags. The pattern exists only as a hypothetical OpenRouter-compatibility fallback I considered during brainstorming and deferred to Phase 2. See [DECISIONS.md § "Use Claude Computer Use API beta directly, not vision-tag regex fallback"](DECISIONS.md) and `docs/superpowers/specs/2026-04-11-ai-design.md`.
+| Area | Upstream | Phase mapping |
+|---|---|---|
+| Multi-monitor bug | [#24](https://github.com/farzaa/clicky/issues/24), [PR #48](https://github.com/farzaa/clicky/pull/48) | Phase 1 solved via per-monitor overlay architecture (DECISIONS.md 2026-04-11). |
+| Cursor-in-screenshot | [#37](https://github.com/farzaa/clicky/issues/37) | Inherited limitation — screenshot APIs don't capture OS cursor layer. Document in README. |
+| Persistent memory | [#30](https://github.com/farzaa/clicky/issues/30) | Phase 1 differentiator. `memory.py` ships. |
+| BYOK / custom API keys | [#22](https://github.com/farzaa/clicky/issues/22), [#27](https://github.com/farzaa/clicky/issues/27), [#32](https://github.com/farzaa/clicky/issues/32), [#33](https://github.com/farzaa/clicky/issues/33) | Phase 1 ships `.env` BYOK. Phase 2 adds `keyring`-backed settings panel. |
+| OpenRouter | [PR #51](https://github.com/farzaa/clicky/pull/51), [PR #31](https://github.com/farzaa/clicky/pull/31), [PR #6](https://github.com/farzaa/clicky/pull/6) | Phase 2 `OpenRouterClient(AIClient)` subclass. Post-refactor vision-tag path works across all providers. |
+| Multi-model (Gemini / OpenAI) | [PR #40](https://github.com/farzaa/clicky/pull/40) | Phase 2 subclass drops. |
+| Local models (LM Studio / MLX / Parakeet) | [PR #39](https://github.com/farzaa/clicky/pull/39), [#41](https://github.com/farzaa/clicky/pull/41), [#42](https://github.com/farzaa/clicky/pull/42), [#47](https://github.com/farzaa/clicky/pull/47) | Phase 2+. Vision-tag pattern works with local models (most expose OpenAI-compatible APIs); Phase 1's Computer Use path would have blocked this. |
+| ElevenLabs TTS | [PR #52](https://github.com/farzaa/clicky/pull/52) | Phase 2 `ElevenLabsTTS(TTS)` subclass. |
+| Configurable hotkey UI | [#35](https://github.com/farzaa/clicky/issues/35), [PR #16](https://github.com/farzaa/clicky/pull/16) | Phase 2 settings panel. |
+| TTS interruption | [#36](https://github.com/farzaa/clicky/issues/36) | Phase 2 full cancel. Phase 1 has `tts.stop()` flag-based stub. |
+| Clipboard copy | [#43](https://github.com/farzaa/clicky/issues/43), [PR #23](https://github.com/farzaa/clicky/pull/23) | Phase 2 one-line addition. |
+| Listening cue overlay | [PR #58](https://github.com/farzaa/clicky/pull/58) | Phase 2 polish. |
+| Hide overlay while typing | [PR #49](https://github.com/farzaa/clicky/pull/49) | Phase 2 polish. |
+| Multi-language | [#7](https://github.com/farzaa/clicky/issues/7) | Phase 2 system prompt parameterization + locale detection. |
+| Security hardening + logs | [#22](https://github.com/farzaa/clicky/issues/22), [#34](https://github.com/farzaa/clicky/issues/34), [#44](https://github.com/farzaa/clicky/issues/44), [PR #50](https://github.com/farzaa/clicky/pull/50) | Phase 2 logging scrubbing + audit pass. Phase 1 is already `.env`-only + no committed keys + hardened `.gitignore`. |
+| Linux support | [#13](https://github.com/farzaa/clicky/issues/13), [#59](https://github.com/farzaa/clicky/issues/59) | Phase 2+. Most modules are cross-platform; `capture.py` + `overlay.py` need X11/Wayland code paths. |
+| Settings UI | [#60](https://github.com/farzaa/clicky/issues/60) | Phase 2. Unavoidable for non-tech distribution. |
+| Windows-specific | [#26](https://github.com/farzaa/clicky/issues/26), [#21](https://github.com/farzaa/clicky/issues/21), [#19](https://github.com/farzaa/clicky/issues/19), [#54](https://github.com/farzaa/clicky/issues/54), [PR #53](https://github.com/farzaa/clicky/pull/53), [PR #54](https://github.com/farzaa/clicky/pull/54) | Clicky Windows = this project. No upstream Windows ports are getting merged, so the polished persistent-memory Windows version (us) has no upstream competition. |
+| Upstream SwiftUI bug (doesn't apply) | [#12](https://github.com/farzaa/clicky/issues/12) | N/A — we don't use SwiftUI. |
+| Cloudflare Worker replacement | [PR #29](https://github.com/farzaa/clicky/pull/29) | N/A — we're Anthropic-direct, no Worker. |
 
 ## Risks
 
 | # | Risk | Probability | Impact | Mitigation |
 |---|---|---|---|---|
-| 1 | PyQt6 click-through unreliable on Win11 with certain GPU drivers | High | High (no overlay = no demo) | Apply Win32 layered window flags via ctypes after `show()`. Fallback: tkinter + `-transparentcolor` + pywin32. Document in DECISIONS.md which approach won on test machine. |
-| 2 | Per-monitor DPI math wrong on mixed-DPI setups | Very High | High (pointer lands in wrong place) | `SetProcessDpiAwareness(2)` at startup. Document all 3 coordinate spaces (physical, logical, Claude) in code comments. Step 1 acceptance: mouse over known UI element, verify printed coords ±2 px. |
-| 3 | Ctrl+Alt+Space hotkey conflicts (Claude Desktop for Windows is the verified real one; rare third-party mappers, IME, VS Code Parameter Hints as minor) | Medium | Low (minor UX nit, no crash) | `pynput.Listener(suppress=False)` observe-only — we do NOT consume key events, so conflicts degrade to "app underneath also sees the key" rather than "app underneath loses the key." Verified clean against Excel / Sheets / Windows window menu / Copilot / VS Code. **Verified conflict: Claude Desktop for Windows binds Ctrl+Alt+Space to its quick-access prompt** (surfaced 2026-04-12 evening manual gate). Phase 1 users must disable the Claude Desktop binding in its Settings (`Keyboard Shortcuts > Ctrl+Alt+Space > None`), same pattern Raycast / Flow Launcher / PowerToys Run users follow for their own Alt+Space / Windows menu / Copilot conflicts. Phase 2 configurable hotkey UI (PR #16) lets users rebind without touching either app. Phase 1.5 Win32 `RegisterHotKey` subclass (deferred) suppresses the combo at the OS level, eliminating the conflict entirely. See [DECISIONS.md 2026-04-12 (evening) "Ctrl+Alt+Space replaces Ctrl+Shift+Space"](DECISIONS.md). |
-| 4 | AssemblyAI / Cartesia network unreachable (no internet, firewall block, provider outage) | Medium | High | Clear `RuntimeError` with diagnostic instructions at streaming client construction. Reactive fallback to `FasterWhisperSTT` + `Pyttsx3TTS` is a 1-2 hour Phase 2 subclass swap via the abstract base pattern. No preemptive Phase 1 fallback (YAGNI). |
-| 5 | Threading deadlocks (PyQt main loop + pynput thread + audio + Whisper + Anthropic workers) | High | High (silent freeze) | Single strict rule: only Qt signals cross thread boundaries. No UI calls from worker threads. Code review every cross-thread call. |
-| 6 | End-to-end latency > 8s feels broken | Medium | Medium (UX perception) | Print per-stage timing during dev. Pre-warm Whisper + audio. Optional: add audible "listening" cue on hotkey press so user gets immediate feedback. |
-| 7 | Overlay appears in screenshots sent to Claude | High | High (Claude tries to point at its own pointer) | Always `hide_for_capture()` before `mss.grab()`. Re-show after response. Small timing window — verify in Step 3. |
-| 8 | Computer Use API token costs spiral during testing | Low | Low | Print token counts after every call. Use `claude-haiku-4-5-20251001` for prompt engineering iteration, swap to Sonnet 4.6 for real tests. Budget cap in `config.py`. |
-| 9 | Anthropic ships first-party Windows screen-aware AI (Vercept) while we're building | Strategic | Strategic | Ship Phase 1 in 1-2 weeks, not months. The memory differentiator is the moat — generic "AI sees your screen" will be commoditized. |
-| 10 | The "unexpected finding" never materializes and there's no B0 case study angle | Medium | Medium (Phase 2 loses the editorial anchor) | `lint_memory.py` is the explicit lens for finding it. If 5 real sessions don't produce one, that itself is a finding ("screen-aware memory is less differentiating than expected in practice — here's why"). |
-| 11 | The plan underestimates real engineering time | Medium | Medium | Accept the budget: 1-2 weeks for MVP, 2-4 weeks for hardening. Grafyn took 63 days for v0.1.8. Don't beat yourself up if Phase 1 extends to 3 weeks. |
-| 12 | Claude Code makes architectural mistakes that need rework | Medium | Medium | Superpowers brainstorming HARD-GATE forces design approval before code is written. Per-component user verification gate. Worst case: one component gets rewritten. |
+| 1 | PyQt6 click-through unreliable on Win11 with certain GPU drivers | High | High (no overlay = no demo) | Win32 layered-window flags via ctypes after `show()`. Fallback: tkinter + `-transparentcolor` + pywin32. Verified clean on 2880×1800 @ 200% DPI test machine. |
+| 2 | Per-monitor DPI math wrong on mixed-DPI setups | Very High | High (pointer lands wrong place) | `SetProcessDpiAwareness(2)` at startup. Per-monitor overlay architecture. Three coordinate spaces documented in code + Invariant #6. |
+| 3 | Ctrl+Alt+Space hotkey conflicts with Claude Desktop for Windows | Medium | Low (UX nit, no crash) | `suppress=False` observe-only means conflicts degrade to "app underneath also sees the key" rather than "key is lost." Phase 1 users must disable Claude Desktop's binding in its Settings (same pattern Raycast / Flow Launcher users follow for Alt+Space / Copilot conflicts). Phase 2 configurable hotkey UI lets users rebind without touching either app. Phase 1.5 Win32 `RegisterHotKey` subclass (deferred) suppresses the combo at the OS level. See DECISIONS.md 2026-04-12 (evening). |
+| 4 | AssemblyAI / Cartesia / Anthropic network unreachable | Medium | High | Clear `RuntimeError` with diagnostic at every streaming client construction. Phase 2 offline subclass swap is 1-2h work via abstract base. No preemptive Phase 1 fallback (YAGNI). |
+| 5 | Threading deadlocks (Qt main + 5+ worker threads) | High | High (silent freeze) | Invariant #9: only `pyqtSignal` crosses thread boundaries. No UI calls from worker threads. Code-reviewer independent pass on `app.py` (Step 7) specifically looks for violations. |
+| 6 | End-to-end latency exceeds budget (>2s feels broken) | Medium | Medium | Per-stage timing prints during dev. Pre-warm sounddevice + Cartesia on startup. Optional listening cue overlay on hotkey press for immediate feedback. |
+| 7 | Overlay appears in screenshots sent to Claude → infinite feedback loop | High | High | Invariant #3: `overlay.hide_for_capture()` fires before every `mss.grab()`. `TestOverlayControllerLifecycle` tests protect this. |
+| 8 | API token costs spiral during testing | Low | Low | Per-call cost logging. Haiku 4.5 fallback for prompt-engineering iteration (after Phase 1.5 header compatibility work). Budget cap in `config.py`. |
+| 9 | Anthropic ships first-party Windows screen-aware AI (Vercept acquisition) while we're building | Strategic | Strategic | Ship Phase 1 in weeks, not months. Memory is the long-term moat — generic "AI sees your screen" will be commoditized; per-app persistent memory + BYOK + user-first framing is harder to copy. |
+| 10 | "Unexpected finding" never materializes → no B0 case study angle | Medium | Medium | `lint_memory.py` is the explicit lens. If 5 real sessions produce no insight, that itself is a finding. |
+| 11 | Plan underestimates real engineering time | Medium | Medium | Accept the budget: 1-2 weeks for MVP, 2-4 weeks for hardening. Grafyn took 63 days for v0.1.8. |
+| 12 | Claude Code makes architectural mistakes that need rework | Medium (VERIFIED by Step 7 research pass catching our Step 2 ai.py dead-code port) | Medium | Superpowers brainstorming HARD-GATE forces design approval before code. Boris #5 + code-reviewer pre-commit passes. **Reference-source read discipline** (Invariant #12) — read the reference repo line-by-line BEFORE any port, not after. Verification-not-caveating discipline (Invariant #13) — verify every non-trivial claim via `gh api` / WebSearch / installed source grep. |
 
-## Success Metrics (what makes Phase 1 a "success")
+## Success Metrics
 
-**Minimum viable:** all 10 Phase 1 acceptance criteria above met. Working loop, 5 real sessions, demo video, docs, tests, private repo.
+**Minimum viable:** all 10 Phase 1 acceptance criteria met. Working loop, 5 real sessions, demo video, docs, tests, private repo.
 
-**Good:** the above + the `insights.md` surfaces a non-obvious pattern + Abhishek actually uses it organically for a week on a real task (not a demo).
+**Good:** the above + `insights.md` surfaces a non-obvious pattern + Abhishek uses it organically for a week on a real task.
 
-**Great:** the above + the insight turns into a shareable writeup (Twitter thread, LinkedIn post, or B0 case study draft) + at least one outside person has tried it and given feedback.
+**Great:** the above + insight becomes a shareable writeup (Twitter thread, LinkedIn post, or B0 case study draft) + at least one outside person has tried it and given feedback.
 
-**Moonshot:** the above + a second non-technical user (someone in Abhishek's family or from SUTD) uses it independently without hand-holding and comes back with an observation Abhishek didn't expect.
+**Moonshot:** the above + a second non-technical user uses it independently without hand-holding and comes back with an observation Abhishek didn't expect.
 
 ## Out of Scope (explicitly rejected)
 
-Things that have been proposed and rejected with reasons recorded in DECISIONS.md:
+All rejection reasons recorded in DECISIONS.md — see there for full rationale.
 
-- **Tauri rewrite in Phase 2.** Rejected because Wallee proves Python at 3K LOC clears the B0 bar. Language is not the disqualifier; rigour is. (DECISION: "Why Python through Phase 2")
-- **Electron port.** Rejected because tekram already tried it and it's unfinished. Electron buys nothing Python doesn't give us, loses binary size advantage. (DECISION: "Why not Electron")
-- **Screenshot to Vision only, no Computer Use API.** Rejected because original Clicky proves Computer Use is meaningfully more accurate. (DECISION: "Use Computer Use API beta directly")
-- **SQLite-only memory, no markdown.** Rejected because Karpathy's principle of "human-readable, LLM-maintained" beats opaque schemas for a differentiator we need to explain to users. (DECISION: "Karpathy markdown memory + SQLite index hybrid")
-- **Ctrl+Space hotkey.** Rejected because it conflicts with VS Code IntelliSense which would break developer users' autocomplete. (DECISION: "Ctrl+Alt+Space over Ctrl+Space")
-- **Pure `openai-whisper`.** Rejected in favor of `faster-whisper` (CTranslate2 backend, 4× faster, drop-in replacement). (DECISION: "faster-whisper over openai-whisper")
-- **One giant execution plan upfront.** Rejected in favor of Superpowers per-component brainstorm → plan → TDD for the 5 hard components, skipping ceremony for the 4 trivial files. (DECISION: "Superpowers selective ceremony")
-- **Proactive mode in Phase 1.** Rejected per Karpathy: you don't know what to be proactive ABOUT until you have data. Build memory first, mine the patterns, then target proactive mode at the real patterns in Phase 2. (DECISION: "Proactive mode stays in Phase 2")
-- **User-scope Superpowers install.** Rejected in favor of local scope. Isolated to this project, fully reversible, no cross-project bugs, solo dev doesn't need the "shared with collaborators" behavior. (DECISION: "Superpowers local scope")
+- **Tauri rewrite in Phase 2.** Wallee proves Python at 3K LOC clears the B0 bar. Language is not the disqualifier; rigour is.
+- **Electron port.** tekram/clicky-windows tried it. Unfinished. Electron buys nothing Python doesn't give us.
+- **SQLite-only memory, no markdown.** Karpathy's "human-readable, LLM-maintained" principle beats opaque schemas for a differentiator we need to explain to users.
+- **Ctrl+Space hotkey.** Conflicts with VS Code IntelliSense — hard no, breaks developer-users' autocomplete.
+- **One giant execution plan upfront.** Superpowers per-component brainstorm → plan → TDD → Boris #5 + code-reviewer for high-risk components (overlay, app.py); lean ceremony for trivial modules.
+- **Proactive mode in Phase 1.** Karpathy: wait for the data. Targets come from `lint_memory.py` real usage patterns, not guesses.
+- **User-scope Superpowers install.** Local scope only — isolated, reversible, no cross-project bugs.
+- **~~Screenshot to Vision only, no Computer Use API~~** — ~~rejected 2026-04-11~~ **SUPERSEDED 2026-04-12 (evening 3).** Vision-only with `[POINT:x,y:label]` regex IS the shipping pattern. Clicky's `ElementLocationDetector.swift` (which we originally ported) is dead code. See DECISIONS.md 2026-04-12 (evening 3) "ai.py refactor" entry — the rejection of the vision-tag path was based on a partial source read and is now overturned.
+- **~~Pure `openai-whisper`~~** — ~~rejected in favor of `faster-whisper`~~ **SUPERSEDED 2026-04-11 session 3.** Phase 1 uses AssemblyAI `u3-rt-pro` streaming for latency-first. `FasterWhisperSTT` becomes a Phase 2 offline subclass.
+- **`infer_skill_level` method in `memory.py`.** Removed 2026-04-12 per user pushback (*"This is not Khan Academy now is it?"*). No pedagogical framework. The LLM infers engagement depth from raw markdown.
+- **Theming (light/dark QSS).** Not vanity as such but irrelevant to Clicky Windows's UX shape — a settings panel opened once a week doesn't need user-configurable theming; PyQt6's default system-chrome-following behavior is fine.
 
 See [DECISIONS.md](DECISIONS.md) for full rationale on each.
