@@ -243,6 +243,87 @@ class TestSetDpiAwareness:
         set_dpi_awareness()
 
 
+# --- capture_all_screens ------------------------------------------------------
+
+class TestCaptureAllScreens:
+    """Tests for capture.capture_all_screens using mocked OS functions."""
+
+    def test_single_monitor_returns_one_labeled_capture(self, mocker):
+        from PIL import Image
+        from capture import capture_all_screens, LabeledCapture
+
+        mocker.patch("capture.set_dpi_awareness")
+        mocker.patch("capture.get_cursor_position", return_value=(500, 400))
+        mocker.patch("capture.list_monitors", return_value=[
+            {"left": 0, "top": 0, "width": 2880, "height": 1800},
+        ])
+        fake_img = Image.new("RGB", (2880, 1800), color=(100, 100, 100))
+        mocker.patch("capture._capture_monitor", return_value=fake_img)
+
+        results = capture_all_screens()
+        assert len(results) == 1
+        assert isinstance(results[0], LabeledCapture)
+        assert results[0].is_cursor_screen is True
+        assert "primary focus" in results[0].label
+        assert "1280x800" in results[0].label or "1024x768" in results[0].label or "1366x768" in results[0].label
+
+    def test_two_monitors_sorted_cursor_first(self, mocker):
+        from PIL import Image
+        from capture import capture_all_screens
+
+        mocker.patch("capture.set_dpi_awareness")
+        mocker.patch("capture.get_cursor_position", return_value=(3500, 500))
+        mocker.patch("capture.list_monitors", return_value=[
+            {"left": 0, "top": 0, "width": 2880, "height": 1800},
+            {"left": 2880, "top": 0, "width": 1920, "height": 1080},
+        ])
+        fake_img_primary = Image.new("RGB", (2880, 1800))
+        fake_img_secondary = Image.new("RGB", (1920, 1080))
+        mocker.patch("capture._capture_monitor", side_effect=[
+            fake_img_primary, fake_img_secondary,
+        ])
+
+        results = capture_all_screens()
+        assert len(results) == 2
+        assert results[0].is_cursor_screen is True
+        assert results[1].is_cursor_screen is False
+        assert "primary focus" in results[0].label
+        assert "secondary screen" in results[1].label
+
+    def test_labels_contain_pixel_dimensions(self, mocker):
+        from PIL import Image
+        from capture import capture_all_screens
+
+        mocker.patch("capture.set_dpi_awareness")
+        mocker.patch("capture.get_cursor_position", return_value=(500, 400))
+        mocker.patch("capture.list_monitors", return_value=[
+            {"left": 0, "top": 0, "width": 2880, "height": 1800},
+        ])
+        fake_img = Image.new("RGB", (2880, 1800))
+        mocker.patch("capture._capture_monitor", return_value=fake_img)
+
+        results = capture_all_screens()
+        assert "image dimensions:" in results[0].label
+        assert "pixels" in results[0].label
+
+    def test_scale_factors_correct(self, mocker):
+        from PIL import Image
+        from capture import capture_all_screens
+
+        mocker.patch("capture.set_dpi_awareness")
+        mocker.patch("capture.get_cursor_position", return_value=(500, 400))
+        mocker.patch("capture.list_monitors", return_value=[
+            {"left": 0, "top": 0, "width": 2880, "height": 1800},
+        ])
+        fake_img = Image.new("RGB", (2880, 1800))
+        mocker.patch("capture._capture_monitor", return_value=fake_img)
+
+        results = capture_all_screens()
+        r = results[0]
+        assert abs(r.scale_x - 2880 / r.target_width) < 0.001
+        assert abs(r.scale_y - 1800 / r.target_height) < 0.001
+
+
 class TestGetCursorPosition:
     """Tests for capture.get_cursor_position. Smoke tests only — real value
     depends on where the mouse is at test time, so we only check shape."""

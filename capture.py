@@ -57,8 +57,8 @@ class CaptureResult:
 
     Attributes:
         image: PIL Image, already resized to exact (target_width, target_height).
-        target_width: width we declared to Claude's Computer Use tool.
-        target_height: height we declared to Claude's Computer Use tool.
+        target_width: width declared to Claude's vision call.
+        target_height: height declared to Claude's vision call.
         monitor: mss-style dict with 'left', 'top', 'width', 'height' in
             physical pixel virtual-desktop coords.
         cursor_physical: (x, y) of the cursor in physical pixels at capture time.
@@ -74,14 +74,42 @@ class CaptureResult:
     scale_y: float
 
 
+@dataclass
+class LabeledCapture:
+    """Extended capture result with a label string for Claude's multi-screen context.
+
+    Mirrors Clicky's CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+    output shape: each captured screen gets a label like
+    "screen 1 of 2 — cursor is on this screen (primary focus) (image dimensions: 1280x800 pixels)".
+
+    Attributes:
+        image: PIL Image, already resized to exact (target_width, target_height).
+        label: human-readable label for Claude's context (includes pixel dims).
+        is_cursor_screen: True if the cursor was on this monitor at capture time.
+        monitor: mss-style dict with 'left', 'top', 'width', 'height'.
+        target_width: width declared to Claude's vision call.
+        target_height: height declared to Claude's vision call.
+        scale_x: physical monitor width / target_width (for unscaling).
+        scale_y: physical monitor height / target_height (for unscaling).
+    """
+    image: Image.Image
+    label: str
+    is_cursor_screen: bool
+    monitor: dict
+    target_width: int
+    target_height: int
+    scale_x: float
+    scale_y: float
+
+
 # --- Pure functions ----------------------------------------------------------
 
 def pick_resolution(width: int, height: int) -> tuple[int, int]:
     """Pick the closest-aspect-ratio resolution from CANDIDATE_RESOLUTIONS.
 
-    Mirrors Clicky's ElementLocationDetector.swift bestComputerUseResolution()
-    logic. The goal is to avoid distortion when resizing a monitor's image
-    down to a Computer Use-supported resolution. Picking a resolution whose
+    Mirrors Clicky's CompanionScreenCaptureUtility.swift resolution logic.
+    The goal is to avoid distortion when resizing a monitor's image
+    down to a Claude-friendly resolution. Picking a resolution whose
     aspect ratio is closest to the source minimizes stretching and preserves
     X/Y coordinate accuracy.
 
@@ -289,6 +317,57 @@ def capture_active_screen() -> CaptureResult:
         scale_x=scale_x,
         scale_y=scale_y,
     )
+
+
+def capture_all_screens() -> list[LabeledCapture]:
+    """Capture all connected monitors, resize each for Claude, return sorted
+    cursor-screen-first with labeled metadata.
+
+    Mirrors Clicky's CompanionScreenCaptureUtility.captureAllScreensAsJPEG():
+    - Captures every physical monitor (not just the cursor screen)
+    - Labels each with "primary focus" marker + pixel dimensions
+    - Sorts so the cursor's screen is always first
+
+    Returns:
+        list[LabeledCapture] sorted with is_cursor_screen=True first.
+        On a single-monitor machine, the list has len==1.
+    """
+    set_dpi_awareness()
+    cursor_x, cursor_y = get_cursor_position()
+    monitors = list_monitors()
+    cursor_monitor = monitor_containing(cursor_x, cursor_y, monitors)
+    total = len(monitors)
+
+    results: list[LabeledCapture] = []
+    for i, mon in enumerate(monitors, start=1):
+        raw_img = _capture_monitor(mon)
+        target_w, target_h = pick_resolution(raw_img.width, raw_img.height)
+        resized, scale_x, scale_y = resize_for_claude(raw_img, target_w, target_h)
+
+        is_cursor = (mon == cursor_monitor)
+        if is_cursor:
+            focus = "cursor is on this screen (primary focus)"
+        else:
+            focus = "secondary screen"
+
+        label = (
+            f"screen {i} of {total} — {focus} "
+            f"(image dimensions: {target_w}x{target_h} pixels)"
+        )
+
+        results.append(LabeledCapture(
+            image=resized,
+            label=label,
+            is_cursor_screen=is_cursor,
+            monitor=mon,
+            target_width=target_w,
+            target_height=target_h,
+            scale_x=scale_x,
+            scale_y=scale_y,
+        ))
+
+    results.sort(key=lambda c: (not c.is_cursor_screen,))
+    return results
 
 
 # --- Manual verification entry point ----------------------------------------

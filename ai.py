@@ -1,11 +1,10 @@
 """Clicky Windows vision+LLM layer.
 
 AIClient abstract base + AnthropicClient concrete implementation using
-Claude Computer Use API beta. Mirrors Clicky's ElementLocationDetector.swift
-verbatim -- same system prompt, same tool JSON, same anthropic-beta header.
-
-See docs/superpowers/specs/2026-04-11-ai-design.md for the design spec.
-See docs/superpowers/plans/2026-04-11-ai.md for the implementation plan.
+plain vision streaming with a [POINT:x,y:label] coordinate tag regex parser.
+Matches Clicky's actual shipping path: ClaudeAPI.analyzeImageStreaming +
+CompanionManager.parsePointingCoordinates (verified line-by-line via gh api
+on 2026-04-12). See DECISIONS.md 2026-04-12 (evening 3) for the research pass.
 
 Responsibility boundary:
 - THIS MODULE lives in Space C (Claude's declared resolution). It returns
@@ -16,70 +15,129 @@ Responsibility boundary:
 Top-to-bottom order (so `python -m ai` works):
     1. Module docstring
     2. Imports
-    3. Helper functions (build_user_prompt, image_to_base64_jpeg,
-       parse_tool_use_coordinates, parse_response_text)
-    4. AIClient abstract base class
-    5. AnthropicClient concrete class
-    6. __main__ block for manual live-API verification
+    3. Constants (_CLICKY_SYSTEM_PROMPT, _POINT_TAG_RE, _CLICKY_MAX_TOKENS)
+    4. PointParseResult dataclass
+    5. Pure functions (parse_point_tag, image_to_base64_jpeg, _get,
+       parse_response_text)
+    6. AIClient abstract base class
+    7. AnthropicClient concrete class
+    8. __main__ block for manual live-API verification
 """
 from __future__ import annotations
 
 import base64
+import re
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from io import BytesIO
+from typing import Iterator
 
 from anthropic import Anthropic
 from PIL import Image
 
 
-# --- Constants (mirror Clicky's ElementLocationDetector.swift verbatim) ------
+# --- Constants ----------------------------------------------------------------
 
-_CLICKY_MAX_TOKENS = 256
-"""Matches Clicky's max_tokens budget. Room for the click action + a 2-3
-sentence natural-language explanation that fits our TTS latency budget."""
+_CLICKY_SYSTEM_PROMPT = """\
+you're clicky, a friendly always-on companion that lives in the user's menu bar. the user just spoke to you via push-to-talk and you can see their screen(s). your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
 
-_CLICKY_TIMEOUT_SECONDS = 15.0
-"""Mirrors Clicky's timeoutIntervalForRequest: 15. If Claude doesn't respond
-in 15s, the user has already given up -- fail fast, don't hang the UI."""
+rules:
+- default to one or two sentences. be direct and dense. BUT if the user asks you to explain more, go deeper, or elaborate, then go all out — give a thorough, detailed explanation with no length limit.
+- all lowercase, casual, warm. no emojis.
+- write for the ear, not the eye. short sentences. no lists, bullet points, markdown, or formatting — just natural speech.
+- don't use abbreviations or symbols that sound weird read aloud. write "for example" not "e.g.", spell out small numbers.
+- if the user's question relates to what's on their screen, reference specific things you see.
+- if the screenshot doesn't seem relevant to their question, just answer the question directly.
+- you can help with anything — coding, writing, general knowledge, brainstorming.
+- never say "simply" or "just".
+- don't read out code verbatim. describe what the code does or what needs to change conversationally.
+- focus on giving a thorough, useful explanation. don't end with simple yes/no questions like "want me to explain more?" or "should i show you?" — those are dead ends that force the user to just say yes.
+- instead, when it fits naturally, end by planting a seed — mention something bigger or more ambitious they could try, a related concept that goes deeper, or a next-level technique that builds on what you just explained. make it something worth coming back for, not a question they'd just nod to. it's okay to not end with anything extra if the answer is complete on its own.
+- if you receive multiple screen images, the one labeled "primary focus" is where the cursor is — prioritize that one but reference others if relevant.
+
+element pointing:
+you have a small blue cursor that can fly to and point at things on screen. use it whenever pointing would genuinely help the user — if they're asking how to do something, looking for a menu, trying to find a button, or need help navigating an app, point at the relevant element. err on the side of pointing rather than not pointing, because it makes your help way more useful and concrete.
+
+don't point at things when it would be pointless — like if the user asks a general knowledge question, or the conversation has nothing to do with what's on screen, or you'd just be pointing at something obvious they're already looking at. but if there's a specific UI element, menu, button, or area on screen that's relevant to what you're helping with, point at it.
+
+when you point, append a coordinate tag at the very end of your response, AFTER your spoken text. the screenshot images are labeled with their pixel dimensions. use those dimensions as the coordinate space. the origin (0,0) is the top-left corner of the image. x increases rightward, y increases downward.
+
+format: [POINT:x,y:label] where x,y are integer pixel coordinates in the screenshot's coordinate space, and label is a short 1-3 word description of the element (like "search bar" or "save button"). if the element is on the cursor's screen you can omit the screen number. if the element is on a DIFFERENT screen, append :screenN where N is the screen number from the image label (e.g. :screen2). this is important — without the screen number, the cursor will point at the wrong place.
+
+if pointing wouldn't help, append [POINT:none].
+
+examples:
+- user asks how to color grade in final cut: "you'll want to open the color inspector — it's right up in the top right area of the toolbar. click that and you'll get all the color wheels and curves. [POINT:1100,42:color inspector]"
+- user asks what html is: "html stands for hypertext markup language, it's basically the skeleton of every web page. curious how it connects to the css you're looking at? [POINT:none]"
+- user asks how to commit in xcode: "see that source control menu up top? click that and hit commit, or you can use command option c as a shortcut. [POINT:285,11:source control]"
+- element is on screen 2 (not where cursor is): "that's over on your other monitor — see the terminal window? [POINT:400,300:terminal:screen2]"\
+"""
+
+_POINT_TAG_RE = re.compile(
+    r"\[POINT:(?:none|(\d+)\s*,\s*(\d+)(?::(?!screen\d)([^\]:\s][^\]:]*?))?(?::screen(\d+))?)\]\s*$"
+)
+"""Regex for Clicky's [POINT:x,y:label(:screenN)?] coordinate tag.
+
+Python port of CompanionManager.parsePointingCoordinates
+(leanring-buddy/CompanionManager.swift:784-828).
+"""
+
+_CLICKY_MAX_TOKENS = 1024
+"""Token budget matching Clicky's analyzeImageStreaming call."""
 
 
-# --- Helper functions --------------------------------------------------------
+# --- PointParseResult ---------------------------------------------------------
 
-def build_user_prompt(transcript: str) -> str:
-    """Inject transcript into Clicky's verbatim 3-line system-prompt template.
+@dataclass
+class PointParseResult:
+    """Result of parsing the [POINT:...] tag from Claude's response text."""
+    spoken_text: str
+    coordinate: tuple[int, int] | None
+    element_label: str | None
+    screen_number: int | None
 
-    The template and wording are byte-for-byte from
-    farzaa/clicky/leanring-buddy/ElementLocationDetector.swift (verified via
-    gh api on 2026-04-11). Do not reword -- tests assert three anchor phrases
-    verbatim and Computer Use training was done against this exact wording.
+
+# --- Pure functions -----------------------------------------------------------
+
+def parse_point_tag(text: str) -> PointParseResult:
+    """Extract coordinate from a trailing [POINT:x,y:label] tag and strip it.
+
+    Returns PointParseResult with coordinate=None on [POINT:none] or no match.
+    The spoken_text field has the tag removed so TTS never reads it aloud.
     """
-    return (
-        f'The user asked this question while looking at their screen: "{transcript}"\n'
-        "\n"
-        "Look at the screenshot. If there is a specific UI element (button, link, "
-        "menu item, text field, icon, etc.) that the user should interact with or "
-        "is asking about, click on that element.\n"
-        "\n"
-        'If the question is purely conceptual (e.g., "what does HTML mean?") and '
-        "there's no specific element to point to, just respond with text saying "
-        '"no specific element".'
+    match = _POINT_TAG_RE.search(text)
+    if not match:
+        return PointParseResult(
+            spoken_text=text.strip(),
+            coordinate=None,
+            element_label=None,
+            screen_number=None,
+        )
+
+    spoken = _POINT_TAG_RE.sub("", text).strip()
+
+    if match.group(1) is None:
+        return PointParseResult(
+            spoken_text=spoken,
+            coordinate=None,
+            element_label=None,
+            screen_number=None,
+        )
+
+    x, y = int(match.group(1)), int(match.group(2))
+    label = match.group(3)
+    screen = int(match.group(4)) if match.group(4) else None
+
+    return PointParseResult(
+        spoken_text=spoken,
+        coordinate=(x, y),
+        element_label=label,
+        screen_number=screen,
     )
 
 
 def image_to_base64_jpeg(img: Image.Image, quality: int = 85) -> str:
-    """Encode a PIL image to a base64-ASCII JPEG string for the Claude API.
-
-    Pattern matches Clicky's approach: encode as JPEG (~150 KB at 1280x800)
-    to keep the payload small, then base64-encode for JSON transport.
-
-    Args:
-        img: source PIL Image in any mode.
-        quality: JPEG quality 1-100 (default 85 matches Clicky).
-
-    Returns:
-        str -- ASCII base64-encoded JPEG bytes, ready to plug into the
-        Anthropic image content block's `source.data` field.
-    """
+    """Encode a PIL image to a base64-ASCII JPEG string for the Claude API."""
     buf = BytesIO()
     img.save(buf, "JPEG", quality=quality)
     return base64.b64encode(buf.getvalue()).decode("ascii")
@@ -87,50 +145,17 @@ def image_to_base64_jpeg(img: Image.Image, quality: int = 85) -> str:
 
 def _get(obj, key, default=None):
     """Dual-access helper: works on both dict-shaped test mocks and
-    anthropic SDK objects (via attribute access).
-
-    The Anthropic Python SDK returns Message objects with .content as a list
-    of TextBlock/ToolUseBlock objects, accessed via attributes (block.type).
-    Test mocks use plain dicts (block["type"]). This helper lets parser
-    functions accept either shape without duplicating the code.
-    """
+    anthropic SDK objects (via attribute access)."""
     if isinstance(obj, dict):
         return obj.get(key, default)
     return getattr(obj, key, default)
 
 
-def parse_tool_use_coordinates(response) -> list[tuple[int, int]]:
-    """Extract (x, y) pairs from Claude's tool_use content blocks.
-
-    Iterates response.content (or response["content"]), filters for
-    type == "tool_use" + input.action == "left_click", extracts
-    input.coordinate as (int, int). Returns [] if no matching block exists
-    (conceptual question -- Claude returned text-only).
-
-    Coordinates are in Claude's declared-resolution space (Space C).
-    Caller uses capture.unscale_claude_coords() to map to physical pixels.
-    """
-    coords: list[tuple[int, int]] = []
-    content = _get(response, "content", []) or []
-    for block in content:
-        if _get(block, "type") != "tool_use":
-            continue
-        input_data = _get(block, "input", {}) or {}
-        if _get(input_data, "action") != "left_click":
-            continue
-        coordinate = _get(input_data, "coordinate", []) or []
-        if len(coordinate) == 2:
-            coords.append((int(coordinate[0]), int(coordinate[1])))
-    return coords
-
-
 def parse_response_text(response) -> str:
-    """Concatenate all text-type content blocks into a single string for TTS.
+    """Concatenate all text-type content blocks into a single string.
 
-    Dual-access compatible (dict mocks or SDK objects). Used by the caller
-    to feed Claude's natural-language response to pyttsx3. Joins multiple
-    text blocks with a single space, strips leading/trailing whitespace.
-    Returns empty string if no text blocks exist.
+    Dual-access compatible (dict mocks or SDK objects). Used by the batch
+    ask() wrapper to extract the full text from a non-streaming response.
     """
     content = _get(response, "content", []) or []
     texts: list[str] = []
@@ -143,15 +168,13 @@ def parse_response_text(response) -> str:
     return " ".join(texts).strip()
 
 
-# --- AIClient abstract base --------------------------------------------------
+# --- AIClient abstract base ---------------------------------------------------
 
 class AIClient(ABC):
     """Abstract base for vision+LLM providers.
 
-    Phase 1: AnthropicClient (Computer Use API beta, Anthropic-direct).
-    Phase 2: OpenRouterClient (vision-tag regex fallback -- OpenRouter can't
-    proxy Computer Use beta). See DECISIONS.md entry "Provider abstraction
-    from day 1" for the rationale.
+    Phase 1: AnthropicClient (vision-tag streaming).
+    Phase 2: OpenRouterClient, GeminiClient, etc. as subclass drops.
     """
 
     @abstractmethod
@@ -168,51 +191,79 @@ class AIClient(ABC):
         Coordinates are in Claude's declared-resolution space (Space C),
         unclamped. Caller uses capture.unscale_claude_coords() to map to
         physical pixels (Space A).
-
-        Args:
-            image: PIL image already resized to (declared_w, declared_h).
-            transcript: user's voice question (Whisper output).
-            history: prior turns in Anthropic SDK message format
-                (list of dicts with 'role' and 'content' keys).
-            declared_w: image width in pixels, passed to Computer Use tool.
-            declared_h: image height in pixels, passed to Computer Use tool.
-
-        Returns:
-            dict with keys:
-              - 'text': str (for TTS)
-              - 'points': list of {'x': int, 'y': int, 'label': str}
-                (label is empty in Phase 1; Computer Use tool doesn't emit labels)
         """
         ...
 
 
-# --- Concrete Anthropic implementation ---------------------------------------
+# --- Concrete Anthropic implementation ----------------------------------------
 
 class AnthropicClient(AIClient):
-    """Phase 1 implementation using the Anthropic Python SDK + Computer Use API beta.
+    """Phase 1 implementation using plain vision streaming + [POINT:x,y:label].
 
-    Mirrors farzaa/clicky/leanring-buddy/ElementLocationDetector.swift verbatim:
-    - Same `computer_20251124` tool type
-    - Same `anthropic-beta: computer-use-2025-11-24` header
-    - Same 3-line system prompt (via build_user_prompt)
-    - Same max_tokens=256 budget
-    - Same 15s timeout
-
-    Do not deviate. Clicky has thousands of real users hitting these exact
-    parameters; we inherit that validation for free. See
-    docs/superpowers/specs/2026-04-11-ai-design.md for the 10 locked design
-    decisions behind this implementation.
+    Matches Clicky's actual shipping path: ClaudeAPI.analyzeImageStreaming +
+    CompanionManager.parsePointingCoordinates. NOT Computer Use API beta
+    (that was dead code in Clicky — ElementLocationDetector.swift, 0 refs).
+    See DECISIONS.md 2026-04-12 (evening 3).
     """
 
     def __init__(self, api_key: str, model_id: str) -> None:
-        """Construct an Anthropic SDK client.
+        self.client = Anthropic(api_key=api_key, timeout=60.0)
+        self.model_id = model_id
+
+    def ask_stream(
+        self,
+        images: list[tuple[Image.Image, str]],
+        transcript: str,
+        history: list[dict],
+        system_prompt: str = _CLICKY_SYSTEM_PROMPT,
+        max_tokens: int = _CLICKY_MAX_TOKENS,
+    ):
+        """Open a streaming Claude call, return a context manager.
 
         Args:
-            api_key: Anthropic API key (from .env via config.ANTHROPIC_API_KEY).
-            model_id: Claude model id (e.g. "claude-sonnet-4-6" from config.MODEL_ID).
+            images: list of (PIL Image, label string) tuples — one per screen.
+                Sorted cursor-screen-first by capture_all_screens(). Each
+                becomes an image content block + a text label block in the
+                user message. Matches Clicky's analyzeImageStreaming(images:
+                [(Data, String)], ...) shape.
+            transcript: user's voice question (raw STT output).
+            history: prior turns in Anthropic SDK message format.
+            system_prompt: persona + pointing instructions.
+            max_tokens: token budget (1024 default, matches Clicky).
+
+        Usage:
+            with client.ask_stream(images, transcript, history) as stream:
+                for delta in stream.text_deltas():
+                    # progressive text for sentence-level TTS chunking
+                    pass
+                result = stream.final_result()
+                # result.spoken_text, result.coordinate, etc.
         """
-        self.client = Anthropic(api_key=api_key, timeout=_CLICKY_TIMEOUT_SECONDS)
-        self.model_id = model_id
+        content_blocks: list[dict] = []
+        for img, label in images:
+            base64_jpeg = image_to_base64_jpeg(img)
+            content_blocks.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": base64_jpeg,
+                },
+            })
+            content_blocks.append({"type": "text", "text": label})
+
+        content_blocks.append({"type": "text", "text": transcript})
+
+        new_user_turn = {"role": "user", "content": content_blocks}
+
+        sdk_stream_mgr = self.client.messages.stream(
+            model=self.model_id,
+            max_tokens=max_tokens,
+            system=system_prompt,
+            messages=[*history, new_user_turn],
+        )
+
+        return _StreamingResponse(sdk_stream_mgr)
 
     def ask(
         self,
@@ -222,61 +273,70 @@ class AnthropicClient(AIClient):
         declared_w: int,
         declared_h: int,
     ) -> dict:
-        """Call Claude Computer Use API beta, return parsed text + points.
+        """Batch wrapper: consumes the full stream, returns parsed dict.
 
-        Coordinates in the returned points are in Claude's declared-resolution
-        space (Space C), unclamped. Caller uses capture.unscale_claude_coords()
-        to map to physical pixels (Space A).
+        Wraps a single image into the list format ask_stream() expects.
+        Backwards-compatible with the __main__ gate and test shapes.
         """
-        base64_jpeg = image_to_base64_jpeg(image)
-        user_prompt = build_user_prompt(transcript)
+        label = f"primary focus (image dimensions: {declared_w}x{declared_h} pixels)"
+        with self.ask_stream(
+            [(image, label)], transcript, history
+        ) as stream:
+            for _ in stream.text_deltas():
+                pass
+            result = stream.final_result()
 
-        new_user_turn = {
-            "role": "user",
-            "content": [
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "image/jpeg",
-                        "data": base64_jpeg,
-                    },
-                },
-                {"type": "text", "text": user_prompt},
-            ],
-        }
+        points = []
+        if result.coordinate:
+            x, y = result.coordinate
+            points.append({"x": x, "y": y, "label": result.element_label or ""})
 
-        response = self.client.messages.create(
-            model=self.model_id,
-            max_tokens=_CLICKY_MAX_TOKENS,
-            tools=[
-                {
-                    "type": "computer_20251124",
-                    "name": "computer",
-                    "display_width_px": declared_w,
-                    "display_height_px": declared_h,
-                }
-            ],
-            extra_headers={"anthropic-beta": "computer-use-2025-11-24"},
-            messages=[*history, new_user_turn],
-        )
-
-        text = parse_response_text(response)
-        coords = parse_tool_use_coordinates(response)
-        points = [{"x": x, "y": y, "label": ""} for (x, y) in coords]
-
-        return {"text": text, "points": points}
+        return {"text": result.spoken_text, "points": points}
 
 
-# --- Manual live-API verification entry point -------------------------------
+class _StreamingResponse:
+    """Wraps the SDK's MessageStreamManager for Clicky's streaming pattern."""
+
+    def __init__(self, sdk_stream_mgr):
+        self._sdk_mgr = sdk_stream_mgr
+        self._sdk_stream = None
+        self._accumulated = ""
+        self._deltas_exhausted = False
+
+    def __enter__(self):
+        self._sdk_stream = self._sdk_mgr.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return self._sdk_mgr.__exit__(exc_type, exc_val, exc_tb)
+
+    def text_deltas(self) -> Iterator[str]:
+        """Yield progressive text deltas for sentence-level TTS chunking."""
+        for delta in self._sdk_stream.text_stream:
+            self._accumulated += delta
+            yield delta
+        self._deltas_exhausted = True
+
+    def final_result(self) -> PointParseResult:
+        """Parse the accumulated text for a [POINT:x,y:label] tag.
+
+        If text_deltas() was fully exhausted, uses the accumulated text.
+        Otherwise falls back to get_final_text() which blocks until the
+        stream completes.
+        """
+        if not self._deltas_exhausted:
+            self._accumulated = self._sdk_stream.get_final_text()
+        return parse_point_tag(self._accumulated)
+
+
+# --- Manual live-API verification entry point ---------------------------------
 
 if __name__ == "__main__":
-    # Manual live-API acceptance gate. Run: py -3.13 -m ai
-    # Requires ANTHROPIC_API_KEY in .env and debug_capture.jpg in cwd.
     from config import ANTHROPIC_API_KEY, MODEL_ID
 
     print("=" * 70)
     print("Clicky Windows -- ai.py manual live-API verification")
+    print("  Pattern: vision-tag [POINT:x,y:label] with streaming")
     print("=" * 70)
 
     if not ANTHROPIC_API_KEY:
@@ -299,29 +359,35 @@ if __name__ == "__main__":
     print(f"\nSending to Claude ({MODEL_ID})...")
     print(f"  image:      {test_image.size}")
     print(f"  transcript: {transcript!r}")
+    print(f"  max_tokens: {_CLICKY_MAX_TOKENS}")
 
-    result = client.ask(
-        image=test_image,
+    label = f"primary focus (image dimensions: {test_image.width}x{test_image.height} pixels)"
+    print("\nStreaming response:")
+    with client.ask_stream(
+        images=[(test_image, label)],
         transcript=transcript,
         history=[],
-        declared_w=test_image.width,
-        declared_h=test_image.height,
-    )
+    ) as stream:
+        for delta in stream.text_deltas():
+            print(delta, end="", flush=True)
+        result = stream.final_result()
 
-    print("\nResponse text:")
-    print(f"  {result['text']!r}")
-    print(f"\nPoints ({len(result['points'])}):")
-    for p in result["points"]:
-        in_bounds = (
-            0 <= p["x"] < test_image.width and 0 <= p["y"] < test_image.height
-        )
-        print(f"  ({p['x']}, {p['y']}) in-bounds={in_bounds}")
+    print(f"\n\nSpoken text (tag stripped):")
+    print(f"  {result.spoken_text!r}")
+    print(f"\nCoordinate: {result.coordinate}")
+    print(f"Label:      {result.element_label}")
+    print(f"Screen:     {result.screen_number}")
+
+    if result.coordinate:
+        x, y = result.coordinate
+        in_bounds = 0 <= x < test_image.width and 0 <= y < test_image.height
+        print(f"In bounds:  {in_bounds}")
 
     print("\n" + "=" * 70)
     print("Manual verification checklist:")
-    print("  1. Response text is non-empty and references something visible")
-    print("     in debug_capture.jpg")
-    print("  2. >= 1 point returned (unless Claude says 'no specific element')")
-    print("  3. All points are in-bounds of the image dimensions")
-    print("  4. The returned coordinate lands on a plausible UI element")
+    print("  1. Response text is non-empty, lowercase, casual tone")
+    print("  2. References specific things visible in debug_capture.jpg")
+    print("  3. [POINT:x,y:label] tag present at end of response")
+    print("  4. Coordinate is in-bounds and lands on a plausible UI element")
+    print("  5. Spoken text has the tag stripped (safe for TTS)")
     print("=" * 70)

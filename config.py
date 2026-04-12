@@ -17,7 +17,7 @@ load_dotenv()
 # ── API keys ─────────────────────────────────────────────────────────────────
 
 ANTHROPIC_API_KEY: str | None = os.getenv("ANTHROPIC_API_KEY")
-"""Required. Computer Use API beta is Anthropic-direct only. Sonnet 4.6 default."""
+"""Required. Plain vision streaming via messages.stream(). Sonnet 4.6 default."""
 
 ASSEMBLYAI_API_KEY: str | None = os.getenv("ASSEMBLYAI_API_KEY")
 """Required for Phase 1. Streaming STT via AssemblyAI u3-rt-pro WebSocket +
@@ -33,16 +33,9 @@ https://play.cartesia.ai/sign-in, no credit card required."""
 # ── Claude model ─────────────────────────────────────────────────────────────
 
 MODEL_ID: str = os.getenv("MODEL_ID", "claude-sonnet-4-6")
-"""Claude model used for vision + Computer Use tool calls. Default Sonnet 4.6
-because Haiku 4.5 doesn't support the computer-use-2025-11-24 beta header
-(only the older computer-use-2025-01-24). Phase 2 may add benchmark-driven
-switching. See DECISIONS.md 'Priority inversion: latency > local-first'."""
-
-COMPUTER_USE_BETA: str = "computer-use-2025-11-24"
-"""anthropic-beta header value that activates Computer Use API + pixel-counting training."""
-
-COMPUTER_USE_TOOL_TYPE: str = "computer_20251124"
-"""Tool type declared when registering the Computer Use tool with Claude."""
+"""Claude model for vision streaming + [POINT:x,y:label] coordinate tags.
+Default Sonnet 4.6. Phase 2 may add benchmark-driven switching.
+See DECISIONS.md 'Priority inversion: latency > local-first'."""
 
 
 # ── Screen capture ───────────────────────────────────────────────────────────
@@ -52,9 +45,9 @@ CANDIDATE_RESOLUTIONS: list[tuple[int, int]] = [
     (1280, 800),   # 16:10 = 1.600 (most laptops)
     (1366, 768),   # ~16:9 = 1.779 (external monitors, ultrawide fallback)
 ]
-"""Anthropic-recommended resolutions for Computer Use. capture.py picks the
+"""Anthropic-recommended screenshot resolutions. capture.py picks the
 closest-aspect-ratio pair to the actual monitor to avoid distortion. Mirrors
-Clicky's ElementLocationDetector.swift."""
+Clicky's CompanionScreenCaptureUtility.swift (max dimension 1280)."""
 
 
 # ── Hotkey ───────────────────────────────────────────────────────────────────
