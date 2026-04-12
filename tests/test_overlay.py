@@ -212,6 +212,25 @@ class _MockOverlayWindow:
         pass
 
 
+# --- Cursor polygon geometry --------------------------------------------------
+
+class TestCursorPolygonGeometry:
+    """Tests for the _CURSOR_VERTICES constant used by OverlayWindow.paintEvent."""
+
+    def test_tip_is_at_origin(self):
+        """First vertex (the tip) must be (0, 0) so the tip anchors at pointer_pos."""
+        from overlay import _CURSOR_VERTICES
+        assert _CURSOR_VERTICES[0] == (0, 0)
+
+    def test_all_vertices_within_bounding_box(self):
+        """All vertices must be non-negative (tip is top-left anchor)
+        and within a reasonable bounding box (~30x30 pixels)."""
+        from overlay import _CURSOR_VERTICES
+        for dx, dy in _CURSOR_VERTICES:
+            assert 0 <= dx <= 30, f"dx={dx} out of bounds"
+            assert 0 <= dy <= 30, f"dy={dy} out of bounds"
+
+
 class TestOverlayControllerLookup:
     """Tests for OverlayController._overlay_for_screen (name-based lookup).
 

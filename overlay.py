@@ -39,12 +39,32 @@ from itertools import cycle
 from PyQt6.QtCore import (
     QEasingCurve,
     QPoint,
+    QPointF,
     QPropertyAnimation,
     Qt,
     pyqtProperty,
 )
-from PyQt6.QtGui import QColor, QGuiApplication, QPainter, QPen, QScreen
+from PyQt6.QtGui import QColor, QGuiApplication, QPainter, QPen, QPolygonF, QScreen
 from PyQt6.QtWidgets import QWidget
+
+# --- Cursor polygon shape ----------------------------------------------------
+
+_CURSOR_VERTICES = [
+    (0, 0),       # tip (anchor point — lands on the target coordinate)
+    (0, 24),      # left edge down
+    (5, 19),      # notch inward (where the diagonal bar meets the arrow body)
+    (10, 28),     # lower-right barb tip
+    (13, 26),     # barb right edge
+    (8, 17),      # barb back up to body
+    (16, 17),     # body right edge (widest point)
+]
+"""Classic arrow cursor shape as (dx, dy) offsets from the tip.
+
+The tip vertex (0,0) is anchored at pointer_pos so point_at(x,y) puts the
+tip exactly on the target UI element. Dodger-blue fill, 2px white stroke.
+~16x28 pixels bounding box — similar visual footprint to the old 20px-radius ball
+but semantically correct (tip on target instead of center on target).
+"""
 
 
 # --- Win32 constants ---------------------------------------------------------
@@ -277,11 +297,10 @@ class OverlayWindow(QWidget):
         self._animation.setEasingCurve(QEasingCurve.Type.Linear)
 
     def paintEvent(self, _event) -> None:
-        """Draw a blue circle at the current pointer position.
+        """Draw a blue arrow cursor polygon at the current pointer position.
 
-        Qt requires the `event` parameter in the method signature even
-        though we don't use it; the underscore prefix signals "intentionally
-        unused" (PEP 8 convention) without needing a linter suppression.
+        The tip vertex (0,0 in _CURSOR_VERTICES) is anchored at pointer_pos
+        so point_at(x,y) puts the tip exactly on the target UI element.
         """
         if not self._pointer_visible:
             return
@@ -289,8 +308,11 @@ class OverlayWindow(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setBrush(QColor(30, 144, 255))  # dodger blue
         painter.setPen(QPen(QColor(255, 255, 255), 2))
-        radius = 20
-        painter.drawEllipse(self._pointer_pos, radius, radius)
+        px, py = self._pointer_pos.x(), self._pointer_pos.y()
+        poly = QPolygonF([
+            QPointF(px + dx, py + dy) for dx, dy in _CURSOR_VERTICES
+        ])
+        painter.drawPolygon(poly)
 
     def animate_pointer_to(self, local_logical_x: int, local_logical_y: int) -> None:
         """Start a 400ms linear animation from current pointer position to target.
@@ -483,7 +505,7 @@ if __name__ == "__main__":
     _animate_next()  # first position immediately
 
     print("\nManual verification checklist (confirm each):")
-    print("  1. Blue circle pointer visible, animates smoothly through 5 positions")
+    print("  1. Blue arrow cursor visible, animates smoothly through 5 positions")
     print("  2. Clicks PASS THROUGH to apps underneath (try clicking desktop icons)")
     print("  3. No taskbar entry for overlay")
     print("  4. Overlay doesn't steal focus from the active app")
