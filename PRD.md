@@ -1,7 +1,7 @@
 # Clicky Windows — Product Requirements Document
 
-**Status:** Phase 1 in progress (pre-Step-7 `ai.py` refactor underway)
-**Last updated:** 2026-04-12 (evening 3)
+**Status:** Phase 1 in progress (Step 7 app.py shipped, Step 7.5 lint_memory + Step 8 polish remaining)
+**Last updated:** 2026-04-13
 **Owner:** Abhishek Vulla ([Building 0](file:///C:/Users/Abhis/OneDrive/Documents/2nd%20Brain/wiki/building0.md))
 
 This doc answers **what** and **why** + the full **Codebase Architecture** + **User Journeys** + **Invariants** (the single source of truth against post-compact drift). For **how** see [CLAUDE.md](CLAUDE.md). For **where are we now** see [ROADMAP.md](ROADMAP.md). For **why we chose X over Y** see [DECISIONS.md](DECISIONS.md).

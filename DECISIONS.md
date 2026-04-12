@@ -684,4 +684,32 @@ User caught this during review on 2026-04-12 evening. Rather than assume the fix
 
 ---
 
+## 2026-04-13: Step 7 app.py architecture decisions (bundled from manual testing session)
+
+**Context.** Step 7 app.py built and manually tested across Excel, Clipchamp, Granta EduPack, Photoshop Online, Pixlr, Fusion360. Multiple architecture decisions made based on debug log data, not assumptions.
+
+**Decisions (all verified by debug logs at `~/.clicky-windows/debug/`):**
+
+1. **STT pre-open mic + WebSocket at startup.** Debug logs showed `sounddevice.RawInputStream` creation takes 360-1065ms and WebSocket connect takes 800-1200ms. Total 1.2-2.3s of dead air per press. Fix: `connect()` at startup, `start_recording()`/`stop_recording()` on press/release. Result: 0-1ms on press.
+
+2. **AssemblyAI `format_turns=False`.** Debug logs showed ForceEndpoint returns partial transcript ("So—") while full transcript arrives 1-2s later. AssemblyAI docs confirm: "Avoid using format_turns as it will significantly increase latency." Switched to False. Result: full transcript arrives within 300ms of ForceEndpoint.
+
+3. **TTS three-pronged instant kill.** `tts.stop()` sets cancel event + calls `audio_stream.abort()` (Pa_AbortStream, immediate) + calls `response.close()` (interrupts HTTP iter_bytes). Verified via sounddevice source: `stop()` waits for buffer drain, `abort()` stops immediately.
+
+4. **OpenRouter support via env var.** Anthropic SDK reads `ANTHROPIC_BASE_URL` from environment (SDK line 100-101). Set `ANTHROPIC_BASE_URL=https://openrouter.ai/api` in `.env`. Zero code changes. OpenRouter adds 25-40ms overhead (verified via web search, not assumption).
+
+5. **Haiku 4.5 NOT faster than Sonnet 4.6 for vision.** Tested via OpenRouter. Haiku took 4.7s (same as Sonnet). Haiku also generates more verbose responses, ignoring "one or two sentences" system prompt rule. Switched back to Sonnet 4.6.
+
+6. **Memory recall reduced 3000→1500 chars.** Debug logs showed verbose responses correlated with large memory context. Clicky macOS sends ZERO persistent memory. Reducing to 1500 chars = last 5-6 interactions. Memory injection instruction changed to "use silently, don't summarize or reference it."
+
+7. **System prompt reverted to Clicky's verbatim.** Added "don't narrate" rule conflicted with "reference specific things you see." Clicky's proven prompt works as-is — the verbosity was caused by memory context, not the prompt.
+
+8. **Cartesia Sonic-3 over ElevenLabs.** Benchmarks: Cartesia 40ms TTFA vs ElevenLabs 75ms. Cartesia is faster. Voice: switched from "Brooke - Big Sister" to "Katie - Friendly Fixer" (Cartesia-recommended for voice agents).
+
+9. **Phase 2 differentiator: multi-step guided workflows.** Timer-based auto-advance where Clicky watches the screen and gives next-step instructions without hotkey press. Nobody does this. Validated by danpeg/clicky proactive fork (79 stars in 3 days). Deferred to Phase 2.
+
+**References:** Debug logs at `~/.clicky-windows/debug/`, AssemblyAI docs, sounddevice source, OpenRouter docs, Cartesia benchmarks, Clicky GitHub issues #26/#30/#38.
+
+---
+
 <!-- Append new decisions below this line. NEVER delete old entries. Format: ## YYYY-MM-DD: Short title → Context → Decision → Alternatives → Why → Consequences → References -->
