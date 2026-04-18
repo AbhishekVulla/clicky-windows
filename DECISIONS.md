@@ -712,4 +712,43 @@ User caught this during review on 2026-04-12 evening. Rather than assume the fix
 
 ---
 
+## 2026-04-19: Gemini 3 Flash Preview via OpenRouter — dual-SDK routing for BYOK model-agnosticism
+
+**Context.** Step 7 orchestrator shipped at `942a905`. Manual testing + debug logs show Claude Sonnet 4.6 vision inference is 5-9s = 85-90% of total PTT latency (e.g. session 03:24:32: stop_recording=301ms, capture=228ms, Claude=8035ms, TTS=instant). Target was sub-2s end-to-end. Aaron (senior engineer, met at SUTD InspireCon 2026-04-18) explicit feedback: *"Gemini Flash is actually good enough."* He validated OpenRouter as the BYOK abstraction: users shouldn't be forced onto one provider (Clicky macOS is locked into ElevenLabs → top-3 upstream complaint per issues #22/#27/#32/#33).
+
+**Decision.** Swap LLM from Claude Sonnet 4.6 → Gemini 3 Flash Preview via OpenRouter. Keep OpenRouter as the dual-SDK BYOK routing layer:
+- `anthropic/claude-sonnet-4-6` → `AnthropicClient` (anthropic SDK, OpenRouter Anthropic-compat endpoint via `ANTHROPIC_BASE_URL`)
+- `google/gemini-3-flash-preview` → `GeminiClient` (openai SDK, OpenRouter OpenAI-compat endpoint `https://openrouter.ai/api/v1`)
+
+Router is `ai.create_ai_client(model_id, api_key)` — prefix-based dispatch. app.py reads `MODEL_ID` from .env, factory routes. Zero app.py threading change, zero STT/TTS change, zero overlay change.
+
+**Alternatives considered:**
+1. **Gemini Live API (WebSocket speech-to-speech).** ✓ Fastest claimed (~960ms voice-to-voice). ✗ Google-only, not proxiable through OpenRouter, violates BYOK — hard no.
+2. **Stay on Claude, do Path A parallelism first.** ✓ No new dep. ✗ Complex orchestration (capture-at-press, prefix caching, speculative inference). Saves ~2-3s at best. Gemini swap alone saves ~3-5s at half the engineering cost.
+3. **Grok / Cerebras.** ✗ Aaron mentioned Cerebras for fast inference but vision support is limited per Grok research. Not suitable for `[POINT:x,y]` coordinate extraction on screenshots.
+4. **Direct Google Gemini SDK.** ✓ Native, no proxy. ✗ Locks us into Google, breaks the OpenRouter abstraction, requires re-work if we add more providers.
+
+**Why this won:**
+- Gemini 3 Flash Preview shows +57 points on UI navigation benchmarks vs Gemini 2.5 Pro (the critical metric for our `[POINT:x,y]` coordinate extraction).
+- Vision TTFT: ~0.5-0.6s vs Claude Sonnet 4.6's ~1.0-1.8s. **50%+ reduction on the dominant pipeline stage.**
+- Same price as Google direct — OpenRouter adds no markup on Google models.
+- Preserves model-agnostic BYOK differentiator. Future: `grok/grok-4-fast`, `meta-llama/...`, etc. as subclass drops.
+- Aaron's explicit validation at InspireCon 2026-04-18.
+
+**Consequences:**
+- New dependency: `openai>=1.60.0` (for OpenAI-compat endpoint via OpenRouter).
+- New test classes `TestGeminiClient` (6 tests) + `TestCreateAIClient` (5 tests) + `test_default_ai_client_comes_from_factory` (1 test). 130/130 total tests green.
+- `ai.py` grows ~150 LOC. Architecture still clean: abstract base + two concrete subclasses + factory.
+- Users can swap MODEL_ID in .env and pick any OpenRouter model with the `google/` or `anthropic/` prefix. Zero code change.
+- Phase 2 providers (Grok, Gemini, Llama, OpenAI) become subclass drops — the dual-SDK pattern generalizes.
+- Step 2 "Path A" parallelism is a separate, additive win — tracked in ROADMAP.md Phase 1.5.
+
+**References:**
+- Aaron InspireCon transcript: `C:\Users\Abhis\Downloads\Aaron InspireCon Clicky feedback.txt` (00:00:01-00:02:20)
+- Research: "Gemini 3 Flash vs Claude Sonnet 4.6 vision TTFT" (2026-04-19 Agent research pass)
+- OpenRouter docs: https://openrouter.ai/google/gemini-3-flash-preview
+- Debug logs: `~/.clicky-windows/debug/2026-04-13_*` show Claude 5-9s inference
+
+---
+
 <!-- Append new decisions below this line. NEVER delete old entries. Format: ## YYYY-MM-DD: Short title → Context → Decision → Alternatives → Why → Consequences → References -->

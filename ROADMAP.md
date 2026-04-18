@@ -124,6 +124,49 @@ From [PRD.md § Phase 1 Scope + Acceptance Criteria](PRD.md#phase-1-scope--accep
 
 ---
 
+## Phase 1.5: Latency optimization (the senior's advice track)
+
+**Goal:** Drop end-to-end PTT latency from 5-9s → ~1-2s so Clicky Windows matches Vapi's 465ms and Clicky macOS's sub-2s feel. Based on Aaron's feedback at SUTD InspireCon 2026-04-18 + independent research.
+
+Two steps, each standalone-shippable. Ship Step 1 first, measure, then decide if Step 2 is still needed.
+
+| Step | Goal | Expected latency win | Status |
+|---|---|---|---|
+| **1** | Swap Claude Sonnet 4.6 → Gemini 3 Flash Preview via OpenRouter | 5-9s → 3-4s (~50% reduction on dominant stage) | 🟡 In progress (see plan `C:\Users\Abhis\.claude\plans\streamed-tumbling-sunbeam.md`) |
+| **2** | Path A parallelism — capture at hotkey PRESS (not release), prefix caching for system prompt, speculative LLM on partial STT transcripts, clear `_final_event` before `force_endpoint()`, 200ms audio grace period after `tts.stop()` | 3-4s → 1.5-2s (cumulative with Step 1) | ⏳ Pending (after Step 1 measurement) |
+
+### Step 1 (Gemini 3 Flash swap) — this sprint
+
+- Dual-SDK routing via `ai.create_ai_client(MODEL_ID, ...)` factory
+- `AnthropicClient` (anthropic SDK) for `anthropic/*` or `claude*` IDs
+- `GeminiClient` (openai SDK via OpenRouter OpenAI-compat endpoint) for `google/*` or `gemini*` IDs
+- Same .env key, same OpenRouter BYOK abstraction, user-swappable via MODEL_ID
+- **Acceptance:** Gemini 3 Flash coordinate accuracy within ±20px of ground truth on `debug_capture.jpg` (Step 1 verification). If passes → set as Phase 1.5 default. If fails → keep Claude as default, code stays as opt-in alternative.
+- See DECISIONS.md 2026-04-19 "Gemini 3 Flash Preview via OpenRouter" for rationale + alternatives considered.
+
+### Step 2 (Path A parallelism) — next sprint, contingent on Step 1 not hitting <2s alone
+
+- **Fix STT cutoff (highest impact):** `stop_recording()` currently reads stale `_final_event` set by during-recording Turns — returns partial transcript like "How do I—" before the post-force_endpoint Turn arrives. Fix: clear `_final_event` before `force_endpoint()`. Verified root cause via `~/.clicky-windows/debug/2026-04-13_03-24-32_chrome.exe/` logs.
+- **Fix TTS-to-mic feedback loop:** Laptop mic hears TTS playing from speakers → transcribed as next turn's input. Verified in debug logs (e.g. transcript "one thing to watch—" when no one said that — matches previous TTS response). Fix: 200ms audio grace period after `tts.stop()` in `start_recording()` — discard mic chunks during decay window.
+- **Capture-at-press:** Start `capture_all_screens()` on hotkey PRESS (currently on RELEASE). Saves 200-400ms because screen capture overlaps with user speaking. Trade-off: screen might change mid-utterance, but in practice UI is static during 2-3s PTT hold. Re-capture at release only if cursor position changed >50px.
+- **Prefix caching:** Cache the 35-line `_CLICKY_SYSTEM_PROMPT` via OpenRouter's prompt caching. Per-turn savings: 100-200ms on Gemini/Claude (system prompt KV tensors reused).
+- **Speculative LLM on partial STT transcripts:** Send partial transcript to LLM as it arrives from AssemblyAI's during-recording Turns. Cancel + restart with final on ForceEndpoint. Saves 300-500ms by overlapping Claude/Gemini with user's last ~500ms of speech. HIGH COMPLEXITY — only do this if Steps 1 + 2a-d combined still miss <2s target.
+- **Memory recall reduction:** Debug logs show yapping correlates with 1500-char memory injection. Reduce to 500-800 chars (last 2-3 interactions).
+
+### Not doing in Phase 1.5
+
+- Gemini Live API (WebSocket speech-to-speech): locks us into Google, violates BYOK. Hard no.
+- WebSocket TTS sentence chunking via Cartesia's `websocket_connect()`: potential +300-500ms win, but complex refactor of `tts.py`. Defer until Phase 2 unless Steps 1+2 miss target.
+- Grok / Cerebras / local models: subclass drops in Phase 2, not latency-critical for Phase 1.5.
+
+### Phase 1.5 acceptance (run all three before declaring done)
+
+1. `py -3.13 -m app` PTT interaction in Excel: hotkey release → first audible word within 2.0 seconds, measured from `~/.clicky-windows/debug/*/interaction.log`.
+2. 3 successful runs in a row without crashing, regression on any Phase 1 acceptance criterion.
+3. All existing 118+ tests still green. New tests for any new code.
+
+---
+
 ## Phase 2: Harden (2-4 weeks, only if Phase 1 validates)
 
 **Not started.** Will be planned in detail when Phase 1 is done.
