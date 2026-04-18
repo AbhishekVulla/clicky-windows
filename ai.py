@@ -207,8 +207,16 @@ class AnthropicClient(AIClient):
     See DECISIONS.md 2026-04-12 (evening 3).
     """
 
-    def __init__(self, api_key: str, model_id: str) -> None:
-        self.client = Anthropic(api_key=api_key, timeout=60.0)
+    def __init__(
+        self,
+        api_key: str,
+        model_id: str,
+        base_url: str | None = None,
+    ) -> None:
+        kwargs: dict = {"api_key": api_key, "timeout": 60.0}
+        if base_url is not None:
+            kwargs["base_url"] = base_url
+        self.client = Anthropic(**kwargs)
         self.model_id = model_id
 
     def ask_stream(
@@ -403,18 +411,35 @@ class GeminiClient(AIClient):
             for block in turn.get("content", []):
                 if isinstance(block, dict) and block.get("type") == "text":
                     text_parts.append(block.get("text", ""))
+            # Skip turns with no text content (e.g., image-only turns from
+            # Phase 2, or malformed turns) — OpenRouter rejects empty content.
+            if not any(p.strip() for p in text_parts):
+                continue
             openai_messages.append({
                 "role": turn["role"],
                 "content": " ".join(text_parts),
             })
         openai_messages.append({"role": "user", "content": user_content})
 
-        sdk_iterator = self.client.chat.completions.create(
-            model=self.model_id,
-            messages=openai_messages,
-            max_tokens=max_tokens,
-            stream=True,
-        )
+        try:
+            sdk_iterator = self.client.chat.completions.create(
+                model=self.model_id,
+                messages=openai_messages,
+                max_tokens=max_tokens,
+                stream=True,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Gemini request failed (model={self.model_id!r}). "
+                "Diagnostic checklist:\n"
+                "  1. Is the OpenRouter key (ANTHROPIC_API_KEY in .env) valid + funded?\n"
+                "  2. Is the model available on your account? Preview models like "
+                "'google/gemini-3-flash-preview' require opt-in at "
+                "https://openrouter.ai/settings/privacy. Fallback: set "
+                "MODEL_ID=google/gemini-2.5-flash in .env.\n"
+                "  3. Is your internet connection up?\n"
+                f"Underlying error: {type(exc).__name__}: {exc}"
+            ) from exc
         return _GeminiStreamingResponse(sdk_iterator)
 
     def ask(
@@ -512,7 +537,9 @@ def create_ai_client(
     """
     mid = model_id.lower()
     if mid.startswith("anthropic/") or mid.startswith("claude"):
-        return AnthropicClient(api_key=api_key, model_id=model_id)
+        return AnthropicClient(
+            api_key=api_key, model_id=model_id, base_url=base_url,
+        )
     if mid.startswith("google/") or mid.startswith("gemini"):
         from config import OPENROUTER_BASE_URL
         return GeminiClient(

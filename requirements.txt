@@ -2,7 +2,7 @@
 # See DECISIONS.md for why each was chosen (especially faster-whisper over openai-whisper).
 
 # Core
-anthropic>=0.40.0          # Claude SDK with Computer Use API beta + response streaming
+anthropic>=0.40.0          # Claude SDK — plain vision messages.stream() (NOT Computer Use; see DECISIONS.md 2026-04-12 evening 3)
 openai>=1.60.0             # OpenRouter OpenAI-compat endpoint for Gemini + future providers (model-agnostic BYOK routing via ai.create_ai_client)
 mss>=9.0.1                 # Multi-monitor screen capture, DPI-aware
 PyQt6>=6.7.0               # Transparent overlay + QPropertyAnimation

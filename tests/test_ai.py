@@ -589,3 +589,195 @@ class TestCreateAIClient:
         assert "openai/gpt-4o" in msg
         assert "anthropic/" in msg
         assert "google/" in msg
+
+    def test_base_url_override_forwarded_to_anthropic_client(self, mocker):
+        """Tier 2.2 fix: base_url override must reach AnthropicClient, not be silently dropped."""
+        mock_anthropic = mocker.patch("ai.Anthropic")
+        from ai import create_ai_client
+        create_ai_client(
+            model_id="anthropic/claude-sonnet-4-6",
+            api_key="test-key",
+            base_url="https://staging.openrouter.ai/api",
+        )
+        # Anthropic SDK must receive the custom base_url (not silently drop it).
+        call_kwargs = mock_anthropic.call_args.kwargs
+        assert call_kwargs.get("base_url") == "https://staging.openrouter.ai/api"
+
+
+# --- GeminiClient additional coverage (post-review gaps) --------------------
+
+class TestGeminiClientExtraCoverage:
+    """Coverage for review-flagged gaps: ask() batch wrapper, empty images,
+    image-block history turns, empty history content, split-chunk POINT tags,
+    error wrapping with diagnostic message."""
+
+    def _make_client_with_stream(self, mocker, stream_text_list):
+        """Helper: build GeminiClient whose streaming iterator yields given texts."""
+        from ai import GeminiClient
+        mock_openai_instance = mocker.MagicMock(name="openai_client")
+        mocker.patch("ai.OpenAI", return_value=mock_openai_instance)
+
+        def gen():
+            for t in stream_text_list:
+                chunk = mocker.MagicMock()
+                chunk.choices = [mocker.MagicMock()]
+                chunk.choices[0].delta.content = t
+                yield chunk
+
+        mock_openai_instance.chat.completions.create.return_value = gen()
+        client = GeminiClient(
+            api_key="test-key",
+            model_id="google/gemini-3-flash-preview",
+            base_url="https://openrouter.ai/api/v1",
+        )
+        return client, mock_openai_instance
+
+    def test_ask_batch_wrapper_returns_dict_with_coordinate(self, mocker):
+        from PIL import Image
+        client, _ = self._make_client_with_stream(
+            mocker, ["click save. ", "[POINT:640,400:save button]"]
+        )
+        img = Image.new("RGB", (1280, 800))
+        result = client.ask(
+            image=img,
+            transcript="where is save",
+            history=[],
+            declared_w=1280,
+            declared_h=800,
+        )
+        assert result["text"] == "click save."
+        assert result["points"] == [{"x": 640, "y": 400, "label": "save button"}]
+
+    def test_ask_batch_wrapper_text_only_response(self, mocker):
+        from PIL import Image
+        client, _ = self._make_client_with_stream(
+            mocker, ["html is the skeleton. [POINT:none]"]
+        )
+        img = Image.new("RGB", (1280, 800))
+        result = client.ask(
+            image=img,
+            transcript="what is html",
+            history=[],
+            declared_w=1280,
+            declared_h=800,
+        )
+        assert result["text"] == "html is the skeleton."
+        assert result["points"] == []
+
+    def test_ask_stream_with_empty_images_list(self, mocker):
+        """Defensive: empty images list must produce a valid OpenAI request
+        with only a text block for the transcript. OpenRouter would 400 on
+        empty content, but a transcript-only request is valid."""
+        client, mock_instance = self._make_client_with_stream(mocker, [])
+        client.ask_stream(
+            images=[],
+            transcript="what time is it",
+            history=[],
+        )
+        kwargs = mock_instance.chat.completions.create.call_args.kwargs
+        user_msg = kwargs["messages"][1]
+        assert user_msg["role"] == "user"
+        # Should contain exactly one text block for the transcript.
+        assert user_msg["content"] == [{"type": "text", "text": "what time is it"}]
+
+    def test_history_with_non_text_blocks_drops_them(self, mocker):
+        """Phase 2 edge case: history turn contains image blocks alongside text.
+        GeminiClient must extract only text blocks, drop non-text blocks."""
+        from PIL import Image
+        client, mock_instance = self._make_client_with_stream(mocker, [])
+        history = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "data": "..."}},
+                    {"type": "text", "text": "what is this"},
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "it's a cat."},
+                ],
+            },
+        ]
+        img = Image.new("RGB", (100, 60))
+        client.ask_stream(
+            images=[(img, "screen 1")],
+            transcript="and what else",
+            history=history,
+        )
+        messages = mock_instance.chat.completions.create.call_args.kwargs["messages"]
+        # [system, history_user_text_only, history_assistant, new_user]
+        assert messages[1] == {"role": "user", "content": "what is this"}
+        assert messages[2] == {"role": "assistant", "content": "it's a cat."}
+
+    def test_history_with_empty_content_is_skipped(self, mocker):
+        """Tier 2.3 fix: history turns with no text content must be dropped,
+        not sent as content:"" (which OpenRouter rejects)."""
+        from PIL import Image
+        client, mock_instance = self._make_client_with_stream(mocker, [])
+        history = [
+            {"role": "user", "content": []},  # empty content list
+            {"role": "assistant", "content": [{"type": "text", "text": ""}]},  # only empty strings
+            {"role": "user", "content": [{"type": "text", "text": "real question"}]},
+        ]
+        img = Image.new("RGB", (100, 60))
+        client.ask_stream(
+            images=[(img, "s")],
+            transcript="follow-up",
+            history=history,
+        )
+        messages = mock_instance.chat.completions.create.call_args.kwargs["messages"]
+        # Empty turns dropped; only the real one should appear.
+        # [system, real_user_turn, new_user]
+        assert len(messages) == 3
+        assert messages[1] == {"role": "user", "content": "real question"}
+
+    def test_split_point_tag_across_chunks_still_parses(self, mocker):
+        """OpenRouter chunk boundaries are arbitrary. [POINT:640,400:save] might
+        arrive as ["[POI", "NT:640,", "400:save]"]. parse_point_tag operates on
+        the accumulated string so this should still work."""
+        client, _ = self._make_client_with_stream(
+            mocker,
+            ["click save. [POI", "NT:640,", "400:save button]"],
+        )
+        from PIL import Image
+        img = Image.new("RGB", (1280, 800))
+        result = client.ask(
+            image=img,
+            transcript="where is save",
+            history=[],
+            declared_w=1280,
+            declared_h=800,
+        )
+        assert result["text"] == "click save."
+        assert result["points"] == [{"x": 640, "y": 400, "label": "save button"}]
+
+    def test_request_failure_raises_runtime_error_with_diagnostic(self, mocker):
+        """Tier 2.1 fix: OpenRouter errors (401, 402, 404) must be wrapped with
+        a diagnostic RuntimeError that points at the likely causes."""
+        from ai import GeminiClient
+        mock_openai_instance = mocker.MagicMock(name="openai_client")
+        mocker.patch("ai.OpenAI", return_value=mock_openai_instance)
+        mock_openai_instance.chat.completions.create.side_effect = (
+            ConnectionError("404: model gemini-3-flash-preview not available")
+        )
+        client = GeminiClient(
+            api_key="test-key",
+            model_id="google/gemini-3-flash-preview",
+            base_url="https://openrouter.ai/api/v1",
+        )
+        from PIL import Image
+        img = Image.new("RGB", (100, 60))
+        with pytest.raises(RuntimeError) as exc_info:
+            client.ask_stream(
+                images=[(img, "s")],
+                transcript="anything",
+                history=[],
+            )
+        msg = str(exc_info.value)
+        assert "gemini-3-flash-preview" in msg
+        assert "OpenRouter" in msg
+        assert "preview" in msg.lower() or "gemini-2.5-flash" in msg.lower()
+        # Original should be chained for debugging.
+        assert isinstance(exc_info.value.__cause__, ConnectionError)
