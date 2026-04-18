@@ -326,3 +326,213 @@ class TestAnthropicClientAsk:
 
         assert result["text"] == "no element."
         assert result["points"] == []
+
+
+# --- GeminiClient -------------------------------------------------------------
+
+class TestGeminiClient:
+    """Tests for ai.GeminiClient using DI-mocked openai factory.
+
+    Mirrors the DI-mock pattern from TestAnthropicClient. Zero real network.
+    """
+
+    def _make_client(self, mocker):
+        """Build GeminiClient with a mock openai.OpenAI instance.
+
+        Returns (client, mock_openai_instance, mock_openai_cls) so tests can
+        assert on both the constructor call and the chat.completions mock.
+        """
+        from ai import GeminiClient
+        mock_openai_instance = mocker.MagicMock(name="openai_client")
+        mock_openai_cls = mocker.patch("ai.OpenAI", return_value=mock_openai_instance)
+        client = GeminiClient(
+            api_key="test-key",
+            model_id="google/gemini-3-flash-preview",
+            base_url="https://openrouter.ai/api/v1",
+        )
+        return client, mock_openai_instance, mock_openai_cls
+
+    def test_construction_uses_openai_sdk(self, mocker):
+        client, mock_instance, mock_cls = self._make_client(mocker)
+        mock_cls.assert_called_once_with(
+            api_key="test-key",
+            base_url="https://openrouter.ai/api/v1",
+            timeout=60.0,
+        )
+        assert client.model_id == "google/gemini-3-flash-preview"
+
+    def test_ask_stream_builds_openai_messages_with_image_url(self, mocker):
+        from PIL import Image
+        client, mock_instance, _ = self._make_client(mocker)
+
+        # Mock the streaming iterator — ask_stream must not consume it here,
+        # just build the request.
+        fake_stream = mocker.MagicMock(name="openai_stream")
+        mock_instance.chat.completions.create.return_value = fake_stream
+
+        img = Image.new("RGB", (100, 60), color="white")
+        label = "primary focus (image dimensions: 100x60 pixels)"
+
+        client.ask_stream(
+            images=[(img, label)],
+            transcript="where is the save button",
+            history=[],
+        )
+
+        # Assert create() called with OpenAI-shaped messages.
+        mock_instance.chat.completions.create.assert_called_once()
+        kwargs = mock_instance.chat.completions.create.call_args.kwargs
+        assert kwargs["model"] == "google/gemini-3-flash-preview"
+        assert kwargs["stream"] is True
+        assert kwargs["max_tokens"] == 1024
+
+        messages = kwargs["messages"]
+        # First message: system prompt.
+        assert messages[0]["role"] == "system"
+        assert "clicky" in messages[0]["content"].lower()
+        # Second message: user with image_url + text blocks.
+        user_msg = messages[1]
+        assert user_msg["role"] == "user"
+        assert isinstance(user_msg["content"], list)
+        blocks = user_msg["content"]
+        assert blocks[0]["type"] == "image_url"
+        assert blocks[0]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+        assert blocks[1]["type"] == "text"
+        assert blocks[1]["text"] == label
+        assert blocks[2]["type"] == "text"
+        assert blocks[2]["text"] == "where is the save button"
+
+    def test_ask_stream_converts_history_content_blocks_to_plain_strings(self, mocker):
+        """History is stored in Anthropic format (list of content blocks).
+        OpenAI API expects plain string content for assistant/user turns.
+        GeminiClient must convert — concatenate all text blocks."""
+        from PIL import Image
+        client, mock_instance, _ = self._make_client(mocker)
+        fake_stream = mocker.MagicMock()
+        mock_instance.chat.completions.create.return_value = fake_stream
+
+        history = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "what is html"},
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "html is the skeleton of a web page."},
+                ],
+            },
+        ]
+        img = Image.new("RGB", (100, 60))
+        client.ask_stream(
+            images=[(img, "screen 1")],
+            transcript="what about css",
+            history=history,
+        )
+
+        kwargs = mock_instance.chat.completions.create.call_args.kwargs
+        messages = kwargs["messages"]
+        # Expected shape: [system, history_user, history_assistant, new_user]
+        assert len(messages) == 4
+        assert messages[0]["role"] == "system"
+        assert messages[1] == {"role": "user", "content": "what is html"}
+        assert messages[2] == {
+            "role": "assistant",
+            "content": "html is the skeleton of a web page.",
+        }
+        assert messages[3]["role"] == "user"
+        # New user turn is still list-of-blocks (has image).
+        assert isinstance(messages[3]["content"], list)
+
+    def test_streaming_yields_deltas_and_parses_point_tag(self, mocker):
+        from ai import _GeminiStreamingResponse, PointParseResult
+
+        def make_chunk(text):
+            chunk = mocker.MagicMock()
+            chunk.choices = [mocker.MagicMock()]
+            chunk.choices[0].delta.content = text
+            return chunk
+
+        fake_chunks = [
+            make_chunk("click the save button. "),
+            make_chunk("[POINT:640,400:save button]"),
+        ]
+        def fake_iterator_gen():
+            for c in fake_chunks:
+                yield c
+        fake_iterator = fake_iterator_gen()
+
+        wrapper = _GeminiStreamingResponse(fake_iterator)
+        with wrapper as stream:
+            deltas = list(stream.text_deltas())
+            result = stream.final_result()
+
+        assert deltas == ["click the save button. ", "[POINT:640,400:save button]"]
+        assert isinstance(result, PointParseResult)
+        assert result.spoken_text == "click the save button."
+        assert result.coordinate == (640, 400)
+        assert result.element_label == "save button"
+
+    def test_streaming_empty_delta_chunks_are_skipped(self, mocker):
+        """Some OpenAI streaming chunks have delta.content=None (e.g. role-only
+        chunk at start, finish_reason chunk at end). Must not crash."""
+        from ai import _GeminiStreamingResponse
+
+        def make_chunk(text):
+            chunk = mocker.MagicMock()
+            chunk.choices = [mocker.MagicMock()]
+            chunk.choices[0].delta.content = text
+            return chunk
+
+        fake_chunks = [
+            make_chunk(None),       # role-only start chunk
+            make_chunk("hello. "),
+            make_chunk(None),       # finish chunk
+            make_chunk("[POINT:none]"),
+        ]
+        def fake_iterator_gen():
+            for c in fake_chunks:
+                yield c
+        fake_iterator = fake_iterator_gen()
+
+        wrapper = _GeminiStreamingResponse(fake_iterator)
+        with wrapper as stream:
+            deltas = list(stream.text_deltas())
+            result = stream.final_result()
+
+        assert deltas == ["hello. ", "[POINT:none]"]
+        assert result.coordinate is None
+        assert result.spoken_text == "hello."
+
+    def test_streaming_no_choices_chunk_is_tolerated(self, mocker):
+        """OpenRouter occasionally sends keepalive chunks with choices=[].
+        Iterator must skip, not crash."""
+        from ai import _GeminiStreamingResponse
+
+        def make_chunk_with_choices(text):
+            chunk = mocker.MagicMock()
+            chunk.choices = [mocker.MagicMock()]
+            chunk.choices[0].delta.content = text
+            return chunk
+
+        def make_chunk_empty():
+            chunk = mocker.MagicMock()
+            chunk.choices = []
+            return chunk
+
+        fake_chunks = [
+            make_chunk_empty(),
+            make_chunk_with_choices("ok."),
+        ]
+        def fake_iterator_gen():
+            for c in fake_chunks:
+                yield c
+        fake_iterator = fake_iterator_gen()
+
+        wrapper = _GeminiStreamingResponse(fake_iterator)
+        with wrapper as stream:
+            deltas = list(stream.text_deltas())
+
+        assert deltas == ["ok."]
