@@ -477,6 +477,57 @@ class _GeminiStreamingResponse:
         return parse_point_tag(self._accumulated)
 
 
+# --- Factory: route model_id prefix to right AIClient subclass ---------------
+
+def create_ai_client(
+    model_id: str,
+    api_key: str,
+    base_url: str | None = None,
+) -> AIClient:
+    """Route to AnthropicClient or GeminiClient based on model_id prefix.
+
+    This is THE BYOK abstraction. Users change MODEL_ID in .env, app.py calls
+    this factory, and the right SDK routes the request. No app.py logic
+    depends on which model family is active.
+
+    Args:
+        model_id: OpenRouter-style model ID. Prefix determines client:
+            'anthropic/...' or 'claude...'  → AnthropicClient (anthropic SDK)
+            'google/...' or 'gemini...'     → GeminiClient (openai SDK)
+            Other prefixes raise ValueError with an actionable message.
+        api_key: API key. Same value for both — it's the OpenRouter key when
+            OpenRouter is configured via ANTHROPIC_BASE_URL, or the direct
+            provider key otherwise.
+        base_url: Optional override. Testing hook; production leaves it None
+            so each client uses its SDK's default endpoint (env var
+            ANTHROPIC_BASE_URL for AnthropicClient, OPENROUTER_BASE_URL
+            constant for GeminiClient).
+
+    Returns:
+        A concrete AIClient subclass ready for .ask_stream() calls.
+
+    Raises:
+        ValueError: if model_id prefix is not recognized. Error message lists
+            the supported prefixes and hints how to add a new provider.
+    """
+    mid = model_id.lower()
+    if mid.startswith("anthropic/") or mid.startswith("claude"):
+        return AnthropicClient(api_key=api_key, model_id=model_id)
+    if mid.startswith("google/") or mid.startswith("gemini"):
+        from config import OPENROUTER_BASE_URL
+        return GeminiClient(
+            api_key=api_key,
+            model_id=model_id,
+            base_url=base_url or OPENROUTER_BASE_URL,
+        )
+    raise ValueError(
+        f"Unsupported MODEL_ID prefix: {model_id!r}. "
+        f"Supported prefixes: 'anthropic/...' (or 'claude...'), "
+        f"'google/...' (or 'gemini...'). To add a new provider, subclass "
+        f"AIClient in ai.py and extend create_ai_client() with a new branch."
+    )
+
+
 # --- Manual live-API verification entry point ---------------------------------
 
 if __name__ == "__main__":

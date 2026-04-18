@@ -536,3 +536,56 @@ class TestGeminiClient:
             deltas = list(stream.text_deltas())
 
         assert deltas == ["ok."]
+
+
+# --- create_ai_client factory ------------------------------------------------
+
+class TestCreateAIClient:
+    """Tests for ai.create_ai_client — routes model_id prefix to right subclass."""
+
+    def test_routes_anthropic_prefix_to_anthropic_client(self, mocker):
+        from ai import create_ai_client, AnthropicClient
+        mocker.patch("ai.Anthropic")  # don't construct real SDK
+        client = create_ai_client(
+            model_id="anthropic/claude-sonnet-4-6",
+            api_key="test-key",
+        )
+        assert isinstance(client, AnthropicClient)
+        assert client.model_id == "anthropic/claude-sonnet-4-6"
+
+    def test_routes_claude_prefix_to_anthropic_client(self, mocker):
+        from ai import create_ai_client, AnthropicClient
+        mocker.patch("ai.Anthropic")
+        client = create_ai_client(
+            model_id="claude-sonnet-4-6",  # bare Anthropic ID (non-OpenRouter)
+            api_key="test-key",
+        )
+        assert isinstance(client, AnthropicClient)
+
+    def test_routes_google_prefix_to_gemini_client(self, mocker):
+        from ai import create_ai_client, GeminiClient
+        mocker.patch("ai.OpenAI")
+        client = create_ai_client(
+            model_id="google/gemini-3-flash-preview",
+            api_key="test-key",
+        )
+        assert isinstance(client, GeminiClient)
+        assert client.model_id == "google/gemini-3-flash-preview"
+
+    def test_routes_gemini_prefix_to_gemini_client(self, mocker):
+        from ai import create_ai_client, GeminiClient
+        mocker.patch("ai.OpenAI")
+        client = create_ai_client(
+            model_id="gemini-3-flash-preview",  # bare Google ID
+            api_key="test-key",
+        )
+        assert isinstance(client, GeminiClient)
+
+    def test_unknown_prefix_raises_value_error(self):
+        from ai import create_ai_client
+        with pytest.raises(ValueError) as excinfo:
+            create_ai_client(model_id="openai/gpt-4o", api_key="test-key")
+        msg = str(excinfo.value)
+        assert "openai/gpt-4o" in msg
+        assert "anthropic/" in msg
+        assert "google/" in msg
