@@ -30,12 +30,36 @@ CARTESIA_API_KEY: str | None = os.getenv("CARTESIA_API_KEY")
 https://play.cartesia.ai/sign-in, no credit card required."""
 
 
-# ── Claude model ─────────────────────────────────────────────────────────────
+# ── OpenRouter dual-SDK routing (BYOK, model-agnostic) ──────────────────────
 
-MODEL_ID: str = os.getenv("MODEL_ID", "claude-sonnet-4-6")
-"""Claude model for vision streaming + [POINT:x,y:label] coordinate tags.
-Default Sonnet 4.6. Phase 2 may add benchmark-driven switching.
-See DECISIONS.md 'Priority inversion: latency > local-first'."""
+OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
+"""OpenRouter's OpenAI-compatible endpoint for Gemini / Grok / Llama / etc.
+
+The existing ANTHROPIC_BASE_URL env var (read natively by the Anthropic SDK)
+points at 'https://openrouter.ai/api' for Claude models. This constant is the
+sibling endpoint for the OpenAI SDK used by GeminiClient (ai.py). Same API
+key (ANTHROPIC_API_KEY from .env — which is actually the OpenRouter
+sk-or-v1-... key when ANTHROPIC_BASE_URL is set to OpenRouter).
+
+See DECISIONS.md 2026-04-19 'Gemini 3 Flash via OpenRouter' for the full
+dual-SDK routing rationale."""
+
+
+# ── LLM model ID (routed by prefix via ai.create_ai_client) ─────────────────
+
+MODEL_ID: str = os.getenv("MODEL_ID", "anthropic/claude-sonnet-4-6")
+"""OpenRouter-style model ID. Prefix routes to the right SDK via
+ai.create_ai_client():
+    'anthropic/...'  → AnthropicClient (via anthropic SDK, OpenRouter
+                        Anthropic-compat endpoint)
+    'google/...'     → GeminiClient (via openai SDK, OpenRouter OpenAI-compat
+                        endpoint)
+
+Phase 1.5 default is 'google/gemini-3-flash-preview' for ~50% latency
+reduction on vision tasks. Set in .env to override.
+
+See DECISIONS.md 2026-04-19 for the model swap rationale + latency
+benchmarks."""
 
 
 # ── Screen capture ───────────────────────────────────────────────────────────
