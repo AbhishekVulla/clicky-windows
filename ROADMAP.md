@@ -132,8 +132,8 @@ Two steps, each standalone-shippable. Ship Step 1 first, measure, then decide if
 
 | Step | Goal | Expected latency win | Status |
 |---|---|---|---|
-| **1** | Swap Claude Sonnet 4.6 → Gemini 3 Flash Preview via OpenRouter | 5-9s → 3-4s (~50% reduction on dominant stage) | 🟡 In progress (see plan `C:\Users\Abhis\.claude\plans\streamed-tumbling-sunbeam.md`) |
-| **2** | Path A parallelism — capture at hotkey PRESS (not release), prefix caching for system prompt, speculative LLM on partial STT transcripts, clear `_final_event` before `force_endpoint()`, 200ms audio grace period after `tts.stop()` | 3-4s → 1.5-2s (cumulative with Step 1) | ⏳ Pending (after Step 1 measurement) |
+| **1** | Swap Claude Sonnet 4.6 → Gemini 3 Flash Preview via OpenRouter | 5-9s → 3-4s (~50% reduction on dominant stage) | 🔄 **Partially done: infrastructure landed, default reverted.** GeminiClient + factory + dual-SDK routing shipped (138/138 tests). Real-world measurement showed ~1s latency savings but ~200px coordinate accuracy loss — not worth the trade-off. Default reverted to Claude. Gemini kept as opt-in alternative via `.env` MODEL_ID. See DECISIONS.md 2026-04-19 (evening) "Gemini 2.5/3 Flash rejected as default". |
+| **2** | Path A parallelism — capture at hotkey PRESS (not release), prefix caching for system prompt, speculative LLM on partial STT transcripts, clear `_final_event` before `force_endpoint()`, 200ms audio grace period after `tts.stop()` | 5-9s → ~2s (primary latency vector now that Step 1 is rejected) | 🟡 **Next sprint — primary latency win.** Step 1 didn't deliver; Path A's fixes are user-visible (capture-at-press saves 200-400ms, STT cutoff fix eliminates rework loops, TTS-to-mic feedback elimination eliminates re-prompts). |
 
 ### Step 1 (Gemini 3 Flash swap) — this sprint
 

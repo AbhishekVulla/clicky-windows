@@ -751,4 +751,56 @@ Router is `ai.create_ai_client(model_id, api_key)` — prefix-based dispatch. ap
 
 ---
 
+## 2026-04-19 (evening): Gemini 2.5/3 Flash rejected as default — measurement-driven reversal
+
+**Context.** Earlier 2026-04-19 decision above shipped GeminiClient + factory + dual-SDK routing. Landed at commits `6ee8f3f` through `3a76962`, 138/138 tests green. Set `.env` MODEL_ID to `google/gemini-3-flash-preview` for manual verification. Then tested against both Gemini models on fresh + stale screenshots, measured real latency from Step 7 orchestrator debug logs.
+
+**Empirical results (measured, not estimated):**
+
+| Metric | Claude Sonnet 4.6 via OpenRouter | Gemini 3 Flash Preview | Gemini 2.5 Flash |
+|---|---|---|---|
+| Total pipeline latency (debug log) | 5-9s baseline | N/A — tested via ai.py only | 4.7s (measured on "how do I make my repo public" 06:08:32 session) |
+| Gemini/Claude streaming stage | 4-8s | ~3s | **3.8s** (debug log 2026-04-19_06-08-32) |
+| Actual pipeline savings vs Claude | — | — | **~1.0-1.5s** (NOT the 50% research predicted) |
+| Coordinate accuracy (pixel-precision for UI pointing) | ±5px Step 1 verified | **Broken — returns [0,1000] normalized, not pixel space** | **±~200px miss** on Settings tab test |
+| Coordinate return rate | ~100% | — | ~67% (returned None on 1 of 3 test prompts) |
+
+**Ground-truth coordinate miss, Gemini 2.5 Flash (from debug log 2026-04-19_06-08-32 `screenshot_with_marker.jpg`):**
+- User asked: "how do I make my repo public" on GitHub
+- Gemini said: "see that 'settings' tab up near the top right, between 'insights' and 'security and quality'? click on that"
+- Gemini coordinate: `(721, 215)` labeled "settings tab"
+- Ground truth: Settings tab with gear icon at ~`(950, 138)` in the 1280×800 image
+- **Miss: ~230px horizontal, ~80px vertical.** Marker landed in empty space between Issues and Pull Requests tabs, nowhere near Settings. Completely unusable for precision pointing.
+
+**Gemini 3 Flash Preview (from ai.py live gate):**
+- Returned `(236, 971)` on a 1280×800 image — y=971 is 171 pixels out of bounds.
+- Math check: `236/1000 * 1280 = 302`, `971/1000 * 800 = 777` — (302, 777) would land on start button area. **Gemini 3 is returning coords in Gemini's native [0, 1000] normalized space** regardless of our "use pixel dimensions as coordinate space" instruction. Known Gemini behavior. Would need post-processing (detect-and-normalize, or different prompt).
+
+**Decision.** **Revert .env default to `anthropic/claude-sonnet-4-6`.** Keep GeminiClient + factory + all 138 tests — the code stays as opt-in alternative (commented in `.env` with measurement notes). Phase 2 settings UI will let users opt in if they prioritize latency over precision.
+
+**Why the earlier decision (morning 2026-04-19) was wrong:**
+1. **Relied on third-party benchmarks for TTFT** — the research cited Gemini 2.5 Flash at 0.5-0.6s vision TTFT. Real measurement via OpenRouter: ~2.8s TTFT. OpenRouter overhead + upstream routing eats half of Gemini's theoretical advantage.
+2. **Trusted the +57 UI benchmark without empirical testing** — the +57 point UI navigation benchmark Google published is for GUI Agent-style tasks (probably bounding-box detection), NOT pixel-precise pointing via vision-tag regex. We tested our actual workload and Gemini misses by 200px routinely.
+3. **Didn't test coordinate-space behavior before committing** — should have run `py -3.13 -m ai` as a gate BEFORE writing the plan. Would have caught Gemini 3's [0,1000] space issue immediately and Gemini 2.5's pointing imprecision on the second run.
+
+**Alternatives NOW considered (since Gemini is rejected):**
+1. **Stay on Claude, do Path A parallelism next (chosen for Step 2).** Capture at hotkey PRESS, prefix caching, fix STT cutoff, fix TTS feedback. Real user-visible latency wins WITHOUT sacrificing precision. Tracked in ROADMAP.md Phase 1.5 Step 2.
+2. **Try Gemini 3 Flash with normalized-coord detection.** Add logic to GeminiClient: if max(x, y) < 1000 but either > image bound, rescale. Half-day experiment if we revisit later.
+3. **Prompt engineering for Gemini pixel precision.** Add explicit examples showing pixel coords not normalized. Unclear whether Gemini's [0,1000] behavior can be overridden by prompting.
+4. **Haiku 4.5 for speed.** Earlier tested (per 2026-04-13 DECISIONS entry decision 5): NOT faster than Sonnet for vision, also more verbose.
+
+**Consequences:**
+- Latency stays at 5-9s for Phase 1.5 Step 1 — the swap didn't deliver.
+- All GeminiClient + factory infrastructure stays in the repo. NO code rollback. 138/138 tests still green. Nothing wasted from the Step 1 sprint — the abstraction is still correct and needed for future provider swaps (Grok, Gemini when they improve, Llama, etc.).
+- Phase 1.5 Step 2 (Path A parallelism) becomes THE primary latency vector. Expected wins there are user-visible (capture-at-press 200-400ms, STT cutoff fix eliminates truncation rework, TTS-to-mic feedback elimination eliminates re-prompts).
+- Future providers now plug in as subclass drops via `create_ai_client()` — so this sprint's code is still load-bearing even with Gemini not as default.
+- Lesson logged: **test the ACTUAL workload (debug_capture.jpg + pointing prompts) before shipping model swaps.** Published benchmarks lie by omission — they don't test our exact task.
+
+**References:**
+- Debug logs: `~/.clicky-windows/debug/2026-04-19_06-08-32_chrome.exe/` — real PTT interaction with Gemini 2.5 Flash, shows coordinate miss
+- ai.py live gate runs (2026-04-19 evening): Gemini 3 Flash Preview (236, 971) OOB; Gemini 2.5 Flash (183, 767) in-bounds once, (501, 811) OOB once, none-returned once; Claude Sonnet 4.6 (301, 731) clean
+- Earlier morning entry (above) — stands as the architectural decision (dual-SDK routing), this entry supersedes only the default-MODEL_ID choice
+
+---
+
 <!-- Append new decisions below this line. NEVER delete old entries. Format: ## YYYY-MM-DD: Short title → Context → Decision → Alternatives → Why → Consequences → References -->
