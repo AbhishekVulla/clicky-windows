@@ -27,7 +27,7 @@ from ctypes import wintypes
 from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtWidgets import QApplication
 
-from ai import AnthropicClient
+from ai import create_ai_client
 from debug_log import DebugSession
 from capture import capture_all_screens, set_dpi_awareness, unscale_claude_coords
 from config import (
@@ -131,8 +131,9 @@ class ClickyApp(QObject):
     ) -> None:
         super().__init__()
 
-        self._ai = ai_client or AnthropicClient(
-            api_key=ANTHROPIC_API_KEY, model_id=MODEL_ID
+        self._ai = ai_client or create_ai_client(
+            model_id=MODEL_ID,
+            api_key=ANTHROPIC_API_KEY,
         )
         self._stt = stt_client or AssemblyAIStreamingSTT(
             api_key=ASSEMBLYAI_API_KEY

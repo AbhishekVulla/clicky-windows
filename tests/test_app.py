@@ -125,3 +125,21 @@ class TestClickyApp:
         assert app._cancel_event.is_set()
         app._hotkey.stop.assert_called_once()
         app._tts.stop.assert_called_once()
+
+    def test_default_ai_client_comes_from_factory(self, mocker):
+        """When no ai_client passed, ClickyApp calls create_ai_client(MODEL_ID, ...)."""
+        mock_factory = mocker.patch("app.create_ai_client")
+        mock_factory.return_value = mocker.MagicMock(name="ai_client_returned")
+        from app import ClickyApp
+        clicky = ClickyApp(
+            stt_client=mocker.MagicMock(),
+            tts_client=mocker.MagicMock(),
+            memory_store=mocker.MagicMock(),
+            overlay_controller=mocker.MagicMock(),
+            hotkey_instance=mocker.MagicMock(),
+        )
+        mock_factory.assert_called_once()
+        kwargs = mock_factory.call_args.kwargs
+        assert "model_id" in kwargs
+        assert "api_key" in kwargs
+        assert clicky._ai is mock_factory.return_value
