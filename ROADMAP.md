@@ -270,6 +270,57 @@ Beats Aaron's <2s target. Matches Clicky macOS shipping feel. Precision moat (Cl
 
 ---
 
+## Future visual + TTS refinements (revisit after B1-B3 ship)
+
+Manual testing after Path A shipped (2026-04-19 evening) surfaced a few UX questions that are not urgent but worth revisiting before the demo video:
+
+### F1. IDLE-state buddy visibility
+
+Current behavior: buddy cursor is always visible, follows the OS mouse at ~60fps with a 35×25px offset. User feedback: *"blue halo + actual mouse pointer kinda weird"* — the OS arrow and our buddy polygon both on screen at all times feels cluttered when Clicky isn't in use.
+
+Farza's shipping Clicky does the same (always-visible buddy) — it's a deliberate design choice. Three options to consider:
+
+- **(a) Keep as-is** — match Farza's Clicky pattern. Familiar to anyone who saw his LinkedIn demo.
+- **(b) Hide buddy during IDLE** — only show during LISTENING / THINKING / FLYING / SPEAKING. Reduces visual noise when not in use. Trade-off: buddy "pops into existence" on hotkey press which may feel abrupt.
+- **(c) Fade buddy opacity to ~30% during IDLE**, full opacity when active. Compromise — buddy stays present as a subtle hint without being visually loud.
+
+**Decision gate**: revisit before recording the demo video (Phase B3). If (b) or (c) wins, it's a ~10-20 LOC change in overlay.py `_on_follow_tick` setting `_pointer_visible` / painter opacity based on state.
+
+### F2. WebSocket TTS for gap-free sentence streaming
+
+Path A's sentence-level TTS via HTTP has a ~150-250ms TTFB gap between sentences (each `speak_sentence` call opens a new Cartesia HTTP connection). Observed in manual testing as audible silence between sentences.
+
+Options ranked by fix quality:
+
+1. **Cartesia WebSocket** (`client.tts.websocket()`) — one persistent connection, multiple transcript messages, no per-sentence TTFB. Gap drops from ~200ms to ~10ms. Effort: 4-8 hours (SDK surface verification + reconnection logic + thread-safety + tests rewrite).
+2. **HTTP double-buffering** — worker pops sentence N+1 from queue + starts its HTTP request WHILE sentence N's audio is still draining. By the time N ends, N+1 is ready. Gap ≈ 0. Effort: 1-2 hours in `tts.py` `_queue_worker`.
+3. **Prompt Claude for period-terminated sentences** — avoids em-dashes-as-connectors so our flush triggers hit more often. Doesn't fix the gap, but makes sentence streaming fire in the first place. (Ships in current sprint.)
+
+**Decision gate**: revisit if manual testing after the current spinner/waveform sprint still shows sentence-streaming gaps feel bad. Otherwise defer to post-demo.
+
+### F3. Adaptive sentence splitter
+
+Current: `flush_sentences` matches `[.!?]\s`. Claude's response style uses em-dashes + colons as connectors, so the splitter rarely fires mid-stream. Options:
+
+- **Broaden splitter** to treat `—\s`, `:\s`, long `,\s` (after >60 chars) as boundaries — makes sentence streaming fire more often BUT creates more sentences, which makes the WebSocket / double-buffer fix (F2) more urgent.
+- **Combine with F2** — only broaden once gap problem is solved.
+
+**Decision gate**: pair with F2.
+
+### F4. STT stutter dedup (multi-turn concatenation)
+
+Observed 2026-04-19 evening: AssemblyAI's Universal Streaming can emit multiple `formatted=True` / `end_of_turn=True` Turn events within a single PTT hold when the user pauses mid-sentence or self-corrects (e.g. *"That's kind of—" [pause] "That's kind of weird."*). Our `stt.py` `_on_turn` handler concatenates both into `_final_transcript` → Claude receives the stuttered text + sometimes reacts to the stutter itself ("ha yeah, the STT caught itself stuttering").
+
+This behavior is **correct** for genuine multi-utterance sessions (user says "hello" → pause → "world" as two separate thoughts) but **wrong** for self-corrections.
+
+**Proposed fix (heuristic)**: if a new formatted turn's text shares the first N=3+ words with the PRIOR formatted turn's text, treat as a revision and REPLACE rather than concatenate. Otherwise concatenate as today.
+
+**Effort**: ~15 LOC change to `_on_turn`, ~2 new tests. Small.
+
+**Decision gate**: revisit if the Claude-reacts-to-stutter behavior keeps surfacing in manual testing. Currently deferred to reduce scope of the spinner-sprint.
+
+---
+
 ## Competitive landscape snapshot (2026-04-19 research pass)
 
 **12+ Clicky clones shipped in 12 days since Farza open-sourced macOS Clicky.** Space is saturating fast. Full findings in DECISIONS.md 2026-04-19 (late evening) "Competitive landscape + don't-fork decision."
