@@ -177,6 +177,122 @@ class TestClickyApp:
         app._hotkey.stop.assert_called_once()
         app._tts.stop.assert_called_once()
 
+    def test_press_handler_kicks_off_capture_in_background(self, mocker):
+        """_handle_press starts capture_all_screens + memory.recall on a
+        background thread so the work overlaps with the user speaking.
+
+        Saves ~250ms post-release wall-clock (the full capture stage — hide
+        overlay + 50ms wait + mss.grab + PIL resize + show overlay).
+        """
+        app = self._make_app(mocker)
+        mocker.patch("app.get_foreground_app", return_value=("EXCEL.EXE", "Sheet1"))
+        mocker.patch("app.get_cursor_position", return_value=(100, 200))
+
+        fake_capture = mocker.MagicMock()
+        mocker.patch("app.capture_all_screens", return_value=[fake_capture])
+        app._memory.recall.return_value = "prior interaction"
+
+        app._handle_press()
+
+        # Background thread should have been spawned.
+        assert app._capture_thread is not None, (
+            "_handle_press should spawn a background capture thread"
+        )
+        app._capture_thread.join(timeout=2.0)
+
+        assert app._press_captures == [fake_capture]
+        assert app._press_memory == "prior interaction"
+        assert app._press_cursor_pos == (100, 200)
+        app._memory.recall.assert_called_once_with("EXCEL.EXE")
+
+    def test_pipeline_worker_reuses_press_time_captures_when_cursor_still(self, mocker):
+        """If cursor moved <=50px between press and release, reuse the
+        press-time captures (no re-grab on release path)."""
+        import threading
+        app = self._make_app(mocker)
+
+        fake_capture = mocker.MagicMock()
+        fake_capture.image = mocker.MagicMock()
+        fake_capture.label = "screen 1 of 1"
+        fake_capture.scale_x = 1.0
+        fake_capture.scale_y = 1.0
+        fake_capture.monitor = {"left": 0, "top": 0, "width": 1920, "height": 1080}
+        fake_capture.target_width = 1280
+        fake_capture.target_height = 800
+        fake_capture.is_cursor_screen = True
+
+        app._press_captures = [fake_capture]
+        app._press_memory = "prior memory"
+        app._press_cursor_pos = (100, 100)
+
+        # Cursor moved only 20px (well within 50px threshold)
+        mocker.patch("app.get_cursor_position", return_value=(115, 105))
+        capture_fn = mocker.patch("app.capture_all_screens")
+
+        app._stt.stop_recording.return_value = "test transcript"
+        # Short-circuit the Claude call by making ask_stream a no-op
+        fake_stream = mocker.MagicMock()
+        fake_stream.text_deltas.return_value = iter([])
+        fake_stream.final_result.return_value = mocker.MagicMock(
+            spoken_text="ok", coordinate=None, element_label=None, screen_number=None,
+        )
+        app._ai.ask_stream.return_value.__enter__ = mocker.MagicMock(return_value=fake_stream)
+        app._ai.ask_stream.return_value.__exit__ = mocker.MagicMock(return_value=False)
+
+        cancel = threading.Event()
+        app._pipeline_worker("EXCEL.EXE", "Sheet1", cancel)
+
+        assert not capture_fn.called, (
+            "Expected pipeline to reuse press-time captures when cursor is still"
+        )
+
+    def test_pipeline_worker_recaptures_on_large_cursor_move(self, mocker):
+        """If cursor moved >50px, pipeline re-captures on release (safeguard
+        against stale screenshots when user actively repositioned mid-utterance)."""
+        import threading
+        from PIL import Image
+        app = self._make_app(mocker)
+
+        stale_capture = mocker.MagicMock()
+        stale_capture.image = Image.new("RGB", (1280, 800))
+        stale_capture.label = "stale"
+        stale_capture.scale_x = 1.0; stale_capture.scale_y = 1.0
+        stale_capture.monitor = {"left": 0, "top": 0, "width": 1920, "height": 1080}
+        stale_capture.target_width = 1280; stale_capture.target_height = 800
+        stale_capture.is_cursor_screen = True
+
+        fresh_capture = mocker.MagicMock()
+        fresh_capture.image = Image.new("RGB", (1280, 800))
+        fresh_capture.label = "fresh"
+        fresh_capture.scale_x = 1.0; fresh_capture.scale_y = 1.0
+        fresh_capture.monitor = {"left": 0, "top": 0, "width": 1920, "height": 1080}
+        fresh_capture.target_width = 1280; fresh_capture.target_height = 800
+        fresh_capture.is_cursor_screen = True
+
+        app._press_captures = [stale_capture]
+        app._press_memory = "prior"
+        app._press_cursor_pos = (100, 100)
+
+        # Cursor moved 141px (sqrt(100²+100²)) — well past 50px threshold
+        mocker.patch("app.get_cursor_position", return_value=(200, 200))
+        capture_fn = mocker.patch("app.capture_all_screens", return_value=[fresh_capture])
+
+        app._stt.stop_recording.return_value = "test transcript"
+        fake_stream = mocker.MagicMock()
+        fake_stream.text_deltas.return_value = iter([])
+        fake_stream.final_result.return_value = mocker.MagicMock(
+            spoken_text="ok", coordinate=None, element_label=None, screen_number=None,
+        )
+        app._ai.ask_stream.return_value.__enter__ = mocker.MagicMock(return_value=fake_stream)
+        app._ai.ask_stream.return_value.__exit__ = mocker.MagicMock(return_value=False)
+
+        cancel = threading.Event()
+        app._pipeline_worker("EXCEL.EXE", "Sheet1", cancel)
+
+        assert capture_fn.called, (
+            "Expected re-capture when cursor moved >50px between press and release"
+        )
+
     def test_default_ai_client_comes_from_factory(self, mocker):
         """When no ai_client passed, ClickyApp calls create_ai_client(MODEL_ID, ...)."""
         mock_factory = mocker.patch("app.create_ai_client")

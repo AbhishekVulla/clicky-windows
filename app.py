@@ -29,7 +29,12 @@ from PyQt6.QtWidgets import QApplication
 
 from ai import create_ai_client
 from debug_log import DebugSession
-from capture import capture_all_screens, set_dpi_awareness, unscale_claude_coords
+from capture import (
+    capture_all_screens,
+    get_cursor_position,
+    set_dpi_awareness,
+    unscale_claude_coords,
+)
 from config import (
     ANTHROPIC_API_KEY,
     ASSEMBLYAI_API_KEY,
@@ -149,6 +154,15 @@ class ClickyApp(QObject):
         self._current_app: str = "unknown"
         self._current_title: str = ""
 
+        # Press-time capture state (Path A Task 4). Shifts capture + memory
+        # recall off the release-time critical path — saves ~250ms wall-clock.
+        # Release-time pipeline re-captures only if cursor moved >50px
+        # (user intentionally repositioned mid-utterance).
+        self._press_captures: list | None = None
+        self._press_memory: str = ""
+        self._press_cursor_pos: tuple[int, int] | None = None
+        self._capture_thread: threading.Thread | None = None
+
         self.sig_pressed.connect(self._handle_press)
         self.sig_released.connect(self._handle_release)
         self.sig_hide_overlay.connect(self._on_hide_overlay)
@@ -206,6 +220,38 @@ class ClickyApp(QObject):
             _log(f"ERROR: STT start failed — {exc}")
             return
 
+        # Kick off capture + memory recall in the background so they overlap
+        # with the user speaking. Release-time pipeline uses cached result.
+        self._press_captures = None
+        self._press_memory = ""
+        self._press_cursor_pos = get_cursor_position()
+        self._capture_thread = threading.Thread(
+            target=self._press_time_capture,
+            args=(self._current_app,),
+            daemon=True,
+            name="clicky-press-capture",
+        )
+        self._capture_thread.start()
+
+    def _press_time_capture(self, app_name: str) -> None:
+        """Background thread launched at press time. Captures screens + recalls
+        memory while the user is still speaking. Result stored on self for
+        the release-time pipeline worker to consume.
+
+        Invariant #3 preserved: overlay.hide_for_capture() fires BEFORE the
+        mss.grab() call via sig_hide_overlay (Qt signal to main thread).
+        """
+        try:
+            self.sig_hide_overlay.emit()
+            threading.Event().wait(0.05)
+            captures = capture_all_screens()
+            self.sig_show_overlay.emit()
+            self._press_captures = captures
+            self._press_memory = self._memory.recall(app_name)
+        except Exception as exc:
+            _log(f"ERROR: press-time capture failed — {type(exc).__name__}: {exc}")
+            self._press_captures = None  # Release-time path falls back to re-capture
+
     def _handle_release(self) -> None:
         """Hotkey released: cancel previous worker, spawn new pipeline."""
         import time
@@ -260,23 +306,43 @@ class ClickyApp(QObject):
             if cancel.is_set():
                 return
 
-            dbg.log("CAPTURE: hiding overlay + capturing screens...")
-            self.sig_hide_overlay.emit()
-            threading.Event().wait(0.05)
-            captures = capture_all_screens()
-            self.sig_show_overlay.emit()
+            # Decide: reuse press-time captures (if cursor is still) or re-grab.
+            cursor_now = get_cursor_position()
+            cursor_moved_px = 9999
+            if self._press_cursor_pos is not None:
+                dx = cursor_now[0] - self._press_cursor_pos[0]
+                dy = cursor_now[1] - self._press_cursor_pos[1]
+                cursor_moved_px = int((dx * dx + dy * dy) ** 0.5)
+
+            if self._press_captures is not None and cursor_moved_px <= 50:
+                dbg.log(
+                    f"CAPTURE: reusing press-time captures "
+                    f"(cursor moved {cursor_moved_px}px, threshold 50px)"
+                )
+                captures = self._press_captures
+                memory_context = self._press_memory
+            else:
+                if self._press_captures is None:
+                    reason = "no press-time capture available"
+                else:
+                    reason = f"cursor moved {cursor_moved_px}px > 50px threshold"
+                dbg.log(f"CAPTURE: re-capturing on release ({reason})")
+                self.sig_hide_overlay.emit()
+                threading.Event().wait(0.05)
+                captures = capture_all_screens()
+                self.sig_show_overlay.emit()
+                memory_context = self._memory.recall(app_name)
+
             dbg.log(f"CAPTURE: {len(captures)} screen(s)")
             for i, c in enumerate(captures):
                 dbg.log(f"  screen[{i}]: {c.target_width}x{c.target_height}, "
                         f"scale=({c.scale_x:.2f}, {c.scale_y:.2f}), "
                         f"monitor={c.monitor}, cursor={c.is_cursor_screen}")
                 dbg.save_screenshot(c.image, f"screenshot_{i}.jpg")
+            dbg.log(f"MEMORY: recalled {len(memory_context)} chars for {app_name}")
 
             if cancel.is_set():
                 return
-
-            memory_context = self._memory.recall(app_name)
-            dbg.log(f"MEMORY: recalled {len(memory_context)} chars for {app_name}")
 
             user_text = transcript
             if memory_context:
