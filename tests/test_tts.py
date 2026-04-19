@@ -182,3 +182,97 @@ class TestCartesiaSonicTTSSpeak:
         cancel.set()
         # Should NOT raise because cancel is set
         tts_obj._do_speak("should be silent", cancel)
+
+    def test_speak_sentence_queues_and_plays_sequentially(self):
+        """Path A Task 5: multiple speak_sentence calls play sequentially via
+        a queue worker, NOT cancelling each other (as the old speak-delegation
+        behavior did). Unblocks sentence-level TTS streaming in app.py pipeline.
+        """
+        import time as _t
+        from unittest.mock import MagicMock
+        from tts import CartesiaSonicTTS
+
+        played_count = [0]
+
+        def fake_play(samples):
+            played_count[0] += 1
+
+        def client_factory(*, api_key):
+            client = MagicMock(name="multi-sentence-client")
+
+            def gen_response(**kwargs):
+                # Each generate() call must return a response with a FRESH iter_bytes
+                resp = MagicMock()
+                resp.iter_bytes.return_value = iter([b"\x00" * 16])
+                return resp
+
+            client.tts.generate.side_effect = gen_response
+            return client
+
+        def player_factory(*, sample_rate):
+            return fake_play, None
+
+        tts_obj = CartesiaSonicTTS(
+            api_key="test-key",
+            client_factory=client_factory,
+            player_factory=player_factory,
+        )
+
+        tts_obj.speak_sentence("first sentence.")
+        tts_obj.speak_sentence("second sentence.")
+        tts_obj.speak_sentence("third sentence.")
+
+        # Wait (up to 2s) for worker to drain the queue.
+        for _ in range(100):
+            if played_count[0] >= 3:
+                break
+            _t.sleep(0.02)
+
+        assert played_count[0] >= 3, (
+            f"Expected >=3 sentences played, got {played_count[0]} — "
+            "worker may not be consuming queue sequentially"
+        )
+
+    def test_stop_drains_pending_sentences(self):
+        """stop() must clear queued sentences so they don't play after abort."""
+        import time as _t
+        from unittest.mock import MagicMock
+        from tts import CartesiaSonicTTS
+
+        def client_factory(*, api_key):
+            client = MagicMock()
+
+            def slow_gen(**kwargs):
+                resp = MagicMock()
+                # Slow iter so the worker is blocked inside _do_speak when we call stop()
+                def slow_iter():
+                    for _ in range(10):
+                        _t.sleep(0.05)
+                        yield b"\x00" * 16
+
+                resp.iter_bytes.return_value = slow_iter()
+                return resp
+
+            client.tts.generate.side_effect = slow_gen
+            return client
+
+        def player_factory(*, sample_rate):
+            return MagicMock(), None
+
+        tts_obj = CartesiaSonicTTS(
+            api_key="test-key",
+            client_factory=client_factory,
+            player_factory=player_factory,
+        )
+
+        tts_obj.speak_sentence("pending-1.")
+        tts_obj.speak_sentence("pending-2.")
+        tts_obj.speak_sentence("pending-3.")
+
+        # Give worker a moment to pick up first item (but not finish — it's slow)
+        _t.sleep(0.02)
+
+        tts_obj.stop()
+        assert tts_obj._sentence_queue.empty(), (
+            "stop() must drain queued sentences — none should remain pending"
+        )

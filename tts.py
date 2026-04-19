@@ -29,6 +29,7 @@ Top-to-bottom order (so `py -3.13 -m tts` works):
 """
 from __future__ import annotations
 
+import queue
 import threading
 from abc import ABC, abstractmethod
 from typing import Callable
@@ -142,6 +143,18 @@ class CartesiaSonicTTS(TTS):
         self._active_response = None  # Cartesia HTTP response, closed by stop()
         self._active_audio_stream = None  # sounddevice stream, aborted by stop()
 
+        # Sentence-level sequential queue (Path A Task 5). Unblocks sentence-
+        # streaming TTS in app.py: each .!? boundary in Claude's stream calls
+        # speak_sentence() which puts to this queue; the worker plays sentences
+        # back-to-back without cancelling each other.
+        self._sentence_queue: queue.Queue = queue.Queue()
+        self._queue_worker_thread = threading.Thread(
+            target=self._queue_worker,
+            name="CartesiaSonicTTS-queue-worker",
+            daemon=True,
+        )
+        self._queue_worker_thread.start()
+
     def speak(self, text: str) -> None:
         """Stream TTS for the full response text non-blocking. See base class.
 
@@ -166,21 +179,59 @@ class CartesiaSonicTTS(TTS):
         self._current_thread.start()
 
     def speak_sentence(self, sentence: str) -> None:
-        """Phase 1 delegates to speak() — each sentence cancels the previous.
+        """Queue a sentence for sequential TTS playback.
 
-        Phase 2 will add a sequential queue so sentences play back-to-back
-        without cancelling. For now app.py calls speak() once with full text.
+        Unlike ``speak()``, this does NOT cancel previous playback. Sentences
+        play back-to-back via the internal queue worker. Used by app.py to
+        stream Claude's response sentence-by-sentence while later sentences
+        are still being generated.
+
+        Empty/whitespace text is a no-op. Thread-safe (``queue.Queue`` is MT-safe).
         """
-        self.speak(sentence)
+        if not sentence or not sentence.strip():
+            return
+        self._sentence_queue.put(sentence)
+
+    def _queue_worker(self) -> None:
+        """Daemon thread that pulls sentences from ``_sentence_queue`` and plays
+        each one to completion via ``_do_speak``.
+
+        Runs for the lifetime of the process (daemon=True, no explicit
+        shutdown sentinel needed). Each sentence gets a fresh
+        ``threading.Event`` assigned to ``self._cancel_event`` so ``stop()``
+        can abort only the currently-playing sentence.
+        """
+        while True:
+            sentence = self._sentence_queue.get()
+            try:
+                cancel = threading.Event()
+                self._cancel_event = cancel
+                self._do_speak(sentence, cancel)
+            except Exception as exc:
+                # Swallow — queue worker must not die on a single bad sentence.
+                print(f"[tts] queue worker: sentence failed — {exc}", flush=True)
+            finally:
+                self._sentence_queue.task_done()
 
     def stop(self) -> None:
-        """Kill audio playback INSTANTLY. Returns immediately.
+        """Kill audio playback INSTANTLY + drain any pending queued sentences.
 
-        Three-pronged kill:
-        1. Set cancel event — daemon thread checks on next iteration
-        2. Abort sounddevice stream — stops audio output mid-sample
-        3. Close HTTP response — interrupts iter_bytes() network read
+        Four-pronged kill (Path A Task 5 adds the queue drain on top of the
+        existing three-pronged abort):
+        1. Drain ``_sentence_queue`` — pending sentences never start
+        2. Set cancel event — currently-playing sentence's loop checks + returns
+        3. Abort sounddevice stream — stops audio output mid-sample
+        4. Close HTTP response — interrupts iter_bytes() network read
         """
+        # Drain queue FIRST so the worker doesn't pull a new sentence right
+        # after we set the cancel event.
+        while not self._sentence_queue.empty():
+            try:
+                self._sentence_queue.get_nowait()
+                self._sentence_queue.task_done()
+            except queue.Empty:
+                break
+
         self._cancel_event.set()
         stream = self._active_audio_stream
         if stream is not None:
