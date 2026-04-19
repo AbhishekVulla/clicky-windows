@@ -86,6 +86,12 @@ Python port of CompanionManager.parsePointingCoordinates
 _CLICKY_MAX_TOKENS = 1024
 """Token budget matching Clicky's analyzeImageStreaming call."""
 
+_MEMORY_PREFIX_MARKER = "[context from past sessions"
+"""Sentinel that app.py prepends to the user transcript when memory is
+injected. Used by AnthropicClient.ask_stream to split the transcript into a
+cached memory-prefix block + an uncached current-turn block. Must match
+app.py ClickyApp._pipeline_worker's f-string exactly."""
+
 
 # --- PointParseResult ---------------------------------------------------------
 
@@ -261,14 +267,46 @@ class AnthropicClient(AIClient):
             })
             content_blocks.append({"type": "text", "text": label})
 
-        content_blocks.append({"type": "text", "text": transcript})
+        # Split the user transcript into a cached memory-prefix block + an
+        # uncached current-transcript block when the memory marker is present.
+        # app.py (Step 7 pipeline worker) prepends memory context as:
+        #     "[context from past sessions ...]\n<memory>\n\n<actual transcript>"
+        # Caching the prefix saves ~50-100ms TTFT after the first hit (5-min
+        # TTL). NEVER cache the current transcript — per-turn content is what
+        # makes the full-context-caching latency paradox bite (arxiv 2601.06007
+        # "Don't Break the Cache" — only stable prefixes help).
+        if _MEMORY_PREFIX_MARKER in transcript:
+            parts = transcript.split("\n\n", 1)
+            if len(parts) == 2:
+                memory_text, actual_transcript = parts
+                content_blocks.append({
+                    "type": "text",
+                    "text": memory_text + "\n\n",
+                    "cache_control": {"type": "ephemeral"},
+                })
+                content_blocks.append({"type": "text", "text": actual_transcript})
+            else:
+                content_blocks.append({"type": "text", "text": transcript})
+        else:
+            content_blocks.append({"type": "text", "text": transcript})
 
         new_user_turn = {"role": "user", "content": content_blocks}
+
+        # Cache the system prompt (largest stable text block, ~1500 chars).
+        # OpenRouter passes Anthropic-native cache_control through for
+        # anthropic/* routes per openrouter.ai/docs/guides/best-practices/prompt-caching.
+        system_blocks = [
+            {
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
 
         sdk_stream_mgr = self.client.messages.stream(
             model=self.model_id,
             max_tokens=max_tokens,
-            system=system_prompt,
+            system=system_blocks,
             messages=[*history, new_user_turn],
         )
 

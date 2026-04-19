@@ -192,7 +192,14 @@ class TestAnthropicClientAskStream:
         call_kwargs = fake_client.messages.stream.call_args.kwargs
         assert call_kwargs["model"] == "claude-test"
         assert call_kwargs["max_tokens"] == 1024
-        assert call_kwargs["system"] == _CLICKY_SYSTEM_PROMPT
+        # system= is now a list-of-blocks carrying cache_control (Path A Task 3).
+        assert call_kwargs["system"] == [
+            {
+                "type": "text",
+                "text": _CLICKY_SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
         assert "tools" not in call_kwargs
         assert "extra_headers" not in call_kwargs
 
@@ -266,7 +273,106 @@ class TestAnthropicClientAskStream:
         ) as stream:
             list(stream.text_deltas())
 
-        assert fake_client.messages.stream.call_args.kwargs["system"] == "custom prompt"
+        assert fake_client.messages.stream.call_args.kwargs["system"] == [
+            {
+                "type": "text",
+                "text": "custom prompt",
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+
+    def test_ask_stream_system_prompt_uses_cache_control(self, mocker):
+        """System prompt must be a list-of-blocks with cache_control: ephemeral.
+
+        Saves ~50-100ms TTFT per turn after first cache hit (OpenRouter passes
+        Anthropic-native cache_control through for anthropic/* routes).
+        """
+        from PIL import Image
+        from ai import AnthropicClient, _CLICKY_SYSTEM_PROMPT
+
+        fake_anthropic_class = mocker.patch("ai.Anthropic")
+        fake_client = fake_anthropic_class.return_value
+        fake_stream = mocker.MagicMock()
+        fake_stream.text_stream = iter([])
+        fake_stream.get_final_text.return_value = "ok [POINT:none]"
+        fake_stream_mgr = mocker.MagicMock()
+        fake_stream_mgr.__enter__ = mocker.MagicMock(return_value=fake_stream)
+        fake_stream_mgr.__exit__ = mocker.MagicMock(return_value=False)
+        fake_client.messages.stream.return_value = fake_stream_mgr
+
+        client = AnthropicClient(api_key="test-key", model_id="anthropic/claude-sonnet-4-6")
+        img = Image.new("RGB", (1280, 800))
+        with client.ask_stream(
+            images=[(img, "label")], transcript="what's this", history=[],
+        ) as stream:
+            list(stream.text_deltas())
+
+        system_arg = fake_client.messages.stream.call_args.kwargs["system"]
+        assert isinstance(system_arg, list), (
+            "Expected system= to be a list of content blocks (required for "
+            f"cache_control), got {type(system_arg)}"
+        )
+        assert len(system_arg) == 1
+        assert system_arg[0]["type"] == "text"
+        assert system_arg[0]["text"] == _CLICKY_SYSTEM_PROMPT
+        assert system_arg[0]["cache_control"] == {"type": "ephemeral"}
+
+    def test_ask_stream_memory_prefix_gets_cache_control(self, mocker):
+        """Memory-context prefix of user transcript must be split into its own
+        cached text block; the current transcript stays uncached.
+
+        Avoids the full-context-caching latency paradox (arxiv 2601.06007) —
+        we only cache the stable prefix, never per-turn dynamic content.
+        """
+        from PIL import Image
+        from ai import AnthropicClient
+
+        fake_anthropic_class = mocker.patch("ai.Anthropic")
+        fake_client = fake_anthropic_class.return_value
+        fake_stream = mocker.MagicMock()
+        fake_stream.text_stream = iter([])
+        fake_stream.get_final_text.return_value = "ok [POINT:none]"
+        fake_stream_mgr = mocker.MagicMock()
+        fake_stream_mgr.__enter__ = mocker.MagicMock(return_value=fake_stream)
+        fake_stream_mgr.__exit__ = mocker.MagicMock(return_value=False)
+        fake_client.messages.stream.return_value = fake_stream_mgr
+
+        transcript_with_memory = (
+            "[context from past sessions — use silently, don't summarize or reference it:]\n"
+            "User asked about freeze panes in Excel yesterday.\n\n"
+            "how do I hide gridlines"
+        )
+
+        client = AnthropicClient(api_key="test-key", model_id="anthropic/claude-sonnet-4-6")
+        img = Image.new("RGB", (1280, 800))
+        with client.ask_stream(
+            images=[(img, "label")], transcript=transcript_with_memory, history=[],
+        ) as stream:
+            list(stream.text_deltas())
+
+        content = fake_client.messages.stream.call_args.kwargs["messages"][-1]["content"]
+        # Find the memory-context text block
+        memory_block = next(
+            (b for b in content
+             if b.get("type") == "text" and "context from past sessions" in b.get("text", "")),
+            None,
+        )
+        assert memory_block is not None, (
+            "Memory-context block not found in user message content"
+        )
+        assert memory_block.get("cache_control") == {"type": "ephemeral"}, (
+            "Memory-context block must have cache_control: ephemeral"
+        )
+        # And the current transcript must be a SEPARATE block without cache_control
+        current_block = next(
+            (b for b in content
+             if b.get("type") == "text" and "hide gridlines" in b.get("text", "")),
+            None,
+        )
+        assert current_block is not None
+        assert "cache_control" not in current_block, (
+            "Current-turn transcript must NOT be cached (dynamic per turn)"
+        )
 
 
 # --- AnthropicClient.ask (batch wrapper) --------------------------------------
