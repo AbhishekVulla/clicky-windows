@@ -10,6 +10,81 @@ For **how** → [CLAUDE.md](CLAUDE.md)
 
 ---
 
+## 2026-04-20 (early morning): stop_recording wait-loop fix — remove premature `else: break`
+
+**Context:** After 51ff788 correctly restricted the STT handler to `end_of_turn=True`, manual user-testing surfaced a cutoff regression: all 3 PTT interactions returned stale `_latest_partial` text ("How do I add—", "Where is the—", "Wer ist—") instead of real finals. Debug logs showed the real `end_of_turn=True` event arriving ~500-700ms AFTER `force_endpoint()`; `stop_recording`'s wait loop had `else: break` that exited after the FIRST 300ms with no event → returned `_latest_partial`.
+
+**Decision:** Remove the `else: break` from the wait loop. Keep iterating 300ms waits until the 2s deadline OR a final event arrives. After first event, still do 300ms grace wait for any trailing end_of_turn (multi-utterance PTT hold).
+
+**Root-cause layer-1 — latent bug masked by 51ff788:** Before the stutter fix, the old `or is_formatted` branch set `_final_event` prematurely on interim partial events (which had `turn_is_formatted=True` from AssemblyAI's formatted-revision emissions). The wait loop ALWAYS saw the event set on the first iteration and proceeded. `else: break` never fired. The latent bug was invisible because `or is_formatted` kept masking it.
+
+When 51ff788 correctly dropped `or is_formatted`, interim partials stopped setting `_final_event`. The wait loop now had to wait for the REAL `end_of_turn=True`. And the `else: break` gave up after 300ms.
+
+**Regression test:** `tests/test_stt.py::test_stop_recording_waits_for_delayed_end_of_turn` simulates the exact real-session timing via `threading.Thread` + `time.sleep(0.5)` — partial arrives immediately, real final arrives 500ms later. Prior code would have returned the partial; new code returns the final.
+
+**Consequences:**
+- stop_recording SLA: still bounded at 2s (`_FINAL_TRANSCRIPT_TIMEOUT_S`); steady-state typically 500-700ms
+- If AssemblyAI ever fails to emit end_of_turn post-force_endpoint, falls back to `_latest_partial` after 2s
+- Pre-commit test suite missed this because mocks fired turn events synchronously inside `force_endpoint.side_effect` (zero latency) — real server has latency. New regression test uses realistic timing.
+
+**References:** Commit `ecc5d0a`. Live debug session 2026-04-19 23:05-23:07 (terminal log in user conversation).
+
+---
+
+## 2026-04-19 (late-evening): Visual state machine completion + STT stutter root-cause
+
+**Context:** After Path A shipped 12 commits, manual testing surfaced 3 UX defects:
+1. STT stutter artifact: user said ONE clean sentence "That's kind of weird", AssemblyAI emitted TWO Turn events during the hold, our handler concatenated → "That's kind of— That's kind of weird." Claude reacted to the stutter in its response.
+2. LISTENING-state double render: waveform bars + cursor polygon both visible during PTT hold.
+3. THINKING-state dead air: ~4-7s between release and Claude coord with no visual feedback.
+
+**Decisions (all in commit 51ff788):**
+
+### A. STT stutter root-cause fix
+
+Previously hypothesized as a "dedup heuristic needed" problem. ACTUAL root cause (verified from AssemblyAI SDK source + docs):
+
+1. **VAD too aggressive**: default `end_of_turn_confidence_threshold=0.4` + `min_turn_silence=400ms` fires `end_of_turn=true` on natural mid-sentence pauses, splitting one utterance into multiple Turn events.
+2. **Handler fallback misfired**: our `_on_turn` fired on `end_of_turn=True OR is_formatted`. AssemblyAI emits a separate formatted-revision event after each end_of_turn (with `end_of_turn=false, turn_is_formatted=true`); that second event passed the `or` branch → handler fired twice → concatenation.
+
+**Fix (two complementary changes):**
+- `stt.py _on_turn`: drop `or is_formatted`. Per AssemblyAI docs: *"The only reliable way to detect turn completion is end_of_turn: true."*
+- `stt.py StreamingParameters`: Conservative preset (`end_of_turn_confidence_threshold=0.7`, `min_turn_silence=800`, `max_turn_silence=3600`). For PTT, we want end_of_turn to fire ONLY from `force_endpoint()` on release, not from mid-hold VAD.
+
+Regression test: `tests/test_stt.py::test_on_turn_ignores_formatted_revision_without_end_of_turn`.
+
+### B. Visual state machine completion — port Clicky verbatim
+
+Verified from `farzaa/clicky leanring-buddy/OverlayWindow.swift` (3× `gh api` reads):
+
+- **LISTENING**: `BlueCursorWaveformView` (lines 705-743) — 5-bar waveform REPLACES triangle (triangle opacity 0 during `.listening`). Position bound to `.position(cursorPosition)` updated at 60Hz by `startTrackingCursor()` (lines 411-438). **Our bug**: `OverlayWindow.show_waveform(x, y)` pinned widget at press-time position — fixed to follow cursor at 60Hz.
+- **THINKING**: `BlueCursorSpinnerView` (lines 749-774) — 14×14pt arc, trimmed 15%-85% (70% visible), 2.5px stroke, 0.8s rotation period, 6px glow at 60% opacity. Shown at line 333 when `voiceState == .processing`. Ported verbatim as `SpinnerWidget` in `overlay.py`.
+- **Exclusivity**: triangle / waveform / spinner NEVER coexist. Fix: `show_waveform()` + `show_spinner()` both set `_pointer_visible = False`. `_on_follow_tick` gates cursor-visibility against widget-visible flags.
+
+### C. Cloudflare Worker is NOT a latency optimization
+
+Prior claim corrected: Farza's CompanionManager.swift:73-76 uses `workerBaseURL` that proxies to api.anthropic.com. It's a **key-hiding proxy** (hides ANTHROPIC_API_KEY from the client). Cloudflare Workers do route at edge locations which CAN reduce latency marginally, but they do NOT make Anthropic's TTFT faster. Our BYOK `.env` approach has ~same Claude latency as Clicky's shipping code.
+
+### D. lint_memory.py skipped
+
+User verdict 2026-04-20: *"bruh does any1 actually want this? linty_memory is just for b0 newsletter is it? bruh that is so dumb?"*
+
+Reframed: `lint_memory.py` was overscoped in the original PRD as a "Phase 1 acceptance" requirement, but its output (`insights.md`) is a dev-facing / essay-writing artifact, not user-facing value. Real users experience memory via Claude's "you asked this Monday" moments mid-conversation, not by opening insights.md. Skipping unless B0 writeup specifically needs the generated patterns.
+
+### E. Sentence-streaming TTS verdict (empirical)
+
+From 4 debug logs on 2026-04-19/20:
+- **Multi-sentence responses** (2/4): mid-stream flushes fired, first audible word ~1500ms post-release (vs ~5000ms batch). ~3500ms net perceived-latency win even with 150-250ms inter-sentence gaps.
+- **Single-sentence responses** (2/4): no flush boundaries hit → falls back to batch tail-flush → neutral (same as pre-Path-A).
+
+Net positive on average. Gap between sentences (150-250ms) is audible and annoying but doesn't outweigh the first-word savings on longer responses. Fix tracked as ROADMAP.md F2.
+
+**Rejected: prompt-engineer Claude for period-terminated short sentences.** Would TRIGGER more mid-stream flushes → MORE 150-250ms gaps. Gap problem is per-TTFB, not per-sentence-count. Splitting more ≠ better without WebSocket underneath.
+
+**References:** Commits `ed34b58` (ROADMAP future section), `51ff788` (all-in-one fix), `ecc5d0a` (wait-loop regression). ROADMAP.md F4 marked fixed with verification test cited.
+
+---
+
 ## 2026-04-11: Python through Phase 2, no pre-committed Tauri rewrite
 
 **Context:** The original CLAUDE.md committed to "Phase 1 Python prototype → Phase 2 Tauri rewrite" as a two-phase strategy. Grafyn (Bryan's project) is Tauri+Rust+Vue3 at ~30K LOC with 123 tests and 4-platform CI — it was the reference "B0 bar" project. My initial instinct was: Python can't clear that bar, so rewrite.

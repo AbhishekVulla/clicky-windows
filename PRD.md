@@ -86,7 +86,23 @@ This doc answers **what** and **why** + the full **Codebase Architecture** + **U
     stripped response, [(x, y)]) to ~/.clicky-windows/memory/<app>.md + SQLite index
 ```
 
-**End-to-end perceived latency budget: ~800-1200ms** from hotkey release to first audible word. Breakdown: ~150ms AssemblyAI `ForceEndpoint` + ~500-800ms Claude Sonnet 4.6 TTFT + ~200ms Cartesia Sonic-3 TTFB, minus ~300ms sentence-streaming overlap (Claude still generates while TTS plays the first sentence). See [DECISIONS.md 2026-04-11 session 3 "Priority inversion: latency > local-first"](DECISIONS.md) for budget derivation.
+**End-to-end perceived latency budget: ~800-1200ms** from hotkey release to first audible word (aspirational target).
+
+**Measured post-Path-A latency** (2026-04-19/20 debug logs, N=4 sessions across Antigravity + Chrome):
+- **Multi-sentence Claude responses** (sentence streaming fires mid-stream): ~1500ms first-audible-word, 150-250ms gaps between sentences. **Net-positive ~3500ms perceived-latency win vs batch.**
+- **Single-sentence Claude responses** (no flush boundary hit): ~4000-5000ms first-audible-word (same as batch — sentence streaming fallback to tail-flush).
+- **Stage breakdown**: 300-700ms STT finalize (post-force_endpoint wait) + ~0ms capture+memory (reused from press-time thread) + 700-1200ms Claude TTFT (with prompt caching) + 150-250ms Cartesia TTFB per sentence.
+
+See DECISIONS.md entries for [2026-04-11 session 3 (budget derivation)](DECISIONS.md) and [2026-04-19/20 late-evening (measured results + state-machine completion)](DECISIONS.md). Gap-between-sentences is tracked as ROADMAP.md F2 (Cartesia WebSocket TTS, 1-2 days of work) — will drop inter-sentence gap to ~0ms.
+
+**Visual state machine** (verbatim port of Farza's shipping Clicky, 2026-04-19/20):
+- IDLE → cursor polygon only
+- LISTENING (PTT held) → WaveformWidget (5-bar RMS meter, replaces cursor)
+- THINKING (release → Claude coord) → SpinnerWidget (rotating blue arc, replaces cursor)
+- FLYING (coord → arrival) → cursor polygon on quadratic bezier arc
+- SPEAKING (TTS playing) → cursor polygon at rest
+
+Exactly one visual per state; waveform + spinner follow cursor at 60Hz via `OverlayController._on_follow_tick`.
 
 **Note on the Claude call:** `ai.py` was originally a verbatim port of Clicky's `ElementLocationDetector.swift` using Computer Use API beta (`computer_20251124` tool, `anthropic-beta: computer-use-2025-11-24` header). During Step 7 brainstorming (2026-04-12 evening 3), research-pass verification discovered that file is **dead code** — zero references across all 11 non-test Clicky Swift files (grep-verified via `gh api`). Clicky's actual shipping path is `ClaudeAPI.analyzeImageStreaming` + `CompanionManager.parsePointingCoordinates` (vision-tag regex). Pre-Step-7 refactor in progress to correct `ai.py`. See [DECISIONS.md 2026-04-12 (evening 3) "ai.py refactor"](DECISIONS.md).
 
@@ -107,7 +123,8 @@ This doc answers **what** and **why** + the full **Codebase Architecture** + **U
 | **`hotkey.py`** | Push-to-talk state machine | `PushToTalkHotkey(on_press, on_release, listener_class=...)`, `.start()`, `.stop()` | Win32 low-level keyboard events (via `pynput.Listener(suppress=False)` low-level hook) | `on_press()` / `on_release()` callbacks fired on state transitions (Ctrl+Alt+Space ALL held → RECORDING; any released → IDLE) | pynput listener thread; callbacks marshaled to Qt main via `pyqtSignal` in `app.py` | `pynput` |
 | **`memory.py`** | Karpathy markdown + SQLite WAL index | `MemoryStore()`, `.recall(app_name, max_chars) → str`, `.record(app_name, window_title, user_question, claude_response, pointer_targets)`, `.list_known_apps() → list[dict]` | App name (for routing), interaction data | Markdown file at `~/.clicky-windows/memory/<app>.md` + SQLite row at `~/.clicky-windows/index.db` | Any thread (SQLite WAL + fresh connection per call; Phase 1 has ONE writer which is the Qt main thread via `app.py`) | `sqlite3`, `pathlib` |
 | **`app.py`** (Step 7, pending) | Qt main orchestrator + thread coordination | `py -3.13 -m app` entry point | Qt main loop wires all the above via `pyqtSignal` | Full PTT loop end-to-end | Main Qt thread + 5+ worker threads (pynput listener + sounddevice input + AssemblyAI WebSocket + Anthropic HTTP streaming + Cartesia HTTP streaming) | All the above + PyQt6 + `pyqtSignal` |
-| **`tools/lint_memory.py`** (Step 7.5, pending) | Karpathy-style weekly health check | `py -3.13 -m tools.lint_memory` | Reads all `.md` files in `~/.clicky-windows/memory/` | Writes `~/.clicky-windows/insights.md` with patterns and non-obvious observations | Main thread (standalone CLI, no Qt) | `memory.py` (imports `MemoryStore`) |
+| **`tools/lint_memory.py`** (Step 7.5, **SKIPPED 2026-04-20**) | ~~Karpathy-style weekly health check~~ | N/A | N/A | N/A | N/A | N/A | Skipped per user verdict ("B0-only, not user-facing value"). Real users experience memory via Claude's "you asked this Monday" mid-conversation moments, not by opening insights.md. See DECISIONS.md 2026-04-19 (late-evening) entry D. |
+| **`tools/bench_path_a.py`** (Phase 1.5 Step 2 Task 12) | Mann-Whitney U + bootstrap CI latency benchmark harness | `py -3.13 -m tools.bench_path_a record/compare` | Scrapes `~/.clicky-windows/debug/*/interaction.log` | Prints before/after P50 + p-value + 95% CI | Main thread (CLI) | `scipy>=1.11` |
 
 **Thread model rule:** only `pyqtSignal` crosses thread boundaries. No UI calls from worker threads, ever. PyQt6 is not thread-safe. STT/AI/TTS workers emit Qt signals; Qt main thread slot handlers call overlay + memory methods. `app.py` (Step 7) enforces this.
 
@@ -194,7 +211,7 @@ Every rule below is "load-bearing" — it encodes a lesson learned the hard way.
 3. **Memory persists across sessions.** Close the app, reopen it, ask a follow-up about the same Windows app. Clicky references the previous interaction.
 4. **Memory is human-readable.** `~/.clicky-windows/memory/EXCEL.EXE.md` opens as a plain markdown file with clear per-interaction sections. No encoded binary, no opaque schema.
 5. **5+ real user sessions on a real task.** Not test sessions — actual usage on a real task (learning Blender, debugging in VS Code, using an unfamiliar app, etc.).
-6. **`lint_memory.py` produces meaningful insights.** Writes `~/.clicky-windows/insights.md` with patterns + at least one non-obvious observation — the **unexpected finding** candidate for the B0 case study.
+6. ~~**`lint_memory.py` produces meaningful insights.**~~ **SKIPPED 2026-04-20** per user verdict. Acceptance gate item dropped — not a real-user-facing feature. If B0 case-study essay specifically needs `insights.md`, revisit then.
 7. **~100 pytest unit tests pass** in <3s. Coverage: coordinate math, API response parsing, memory CRUD, hotkey state machine, capture DPI/resize, overlay geometry, STT/TTS DI mocks, vision-tag regex parser. Manual verification for overlay click-through, STT audio loop, TTS playback, full E2E loop (no headless mode).
 8. **Demo video recorded.** 30-90 second screen recording showing the full loop on a real task. MUST show 2+ sessions of the same app so the memory differentiator lands.
 9. **All 5 docs up to date.** CLAUDE.md, PRD.md (this file), ROADMAP.md, DECISIONS.md, README.md.

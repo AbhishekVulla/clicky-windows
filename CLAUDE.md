@@ -45,7 +45,14 @@ Clicky is macOS-only. Windows has 76% of desktop users and zero polished screen-
     stripped response, [(x, y)]) to ~/.clicky-windows/memory/<app>.md + SQLite index
 ```
 
-Target end-to-end latency: **~800-1200ms** from hotkey release to first audible word (~150ms STT + ~500-800ms Claude TTFT + ~200ms TTS TTFB, minus ~300ms sentence-streaming overlap).
+Target end-to-end latency: **~800-1200ms** perceived first-audible-word (aspirational). **Measured post-Path-A** (2026-04-19 debug logs): ~1.5s first-audible-word for multi-sentence Claude responses (sentence streaming fires mid-stream), ~4-5s for single-sentence responses (falls back to batch tail-flush). Sentence streaming has 150-250ms gaps between sentences from per-sentence Cartesia HTTP TTFB — planned fix tracked as ROADMAP.md F2 (WebSocket TTS).
+
+**Visual state machine** (verbatim port of Farza's shipping Clicky — see DECISIONS.md 2026-04-19/20 entries). Exactly one visual element per state, all follow the cursor at 60Hz via `OverlayController._on_follow_tick`:
+- IDLE: blue cursor polygon only
+- LISTENING (PTT held): WaveformWidget (5-bar RMS-driven meter replacing cursor)
+- THINKING (release → Claude coord): SpinnerWidget (rotating blue arc replacing cursor)
+- FLYING (coord → arrival): cursor polygon + quadratic bezier arc
+- SPEAKING (TTS playing): cursor polygon at rest, zero animation
 
 ## Build Phases
 
@@ -61,7 +68,7 @@ Target end-to-end latency: **~800-1200ms** from hotkey release to first audible 
 - **Sentence-level TTS chunking** (Step 7 `app.py` requirement): progressive `content_block_delta` text events → sentence splitter → `tts.speak_sentence()` flush on `.`/`!`/`?` boundaries while Claude still generates. Legitimate improvement over Clicky's production (which streams but discards progressive chunks).
 - **Memory:** Karpathy-style per-app markdown at `~/.clicky-windows/memory/<app>.md` + SQLite WAL index at `~/.clicky-windows/index.db`. THE DIFFERENTIATOR — Phase 1 not Phase 2.
 - **Provider abstraction** (`AIClient`, `STT`, `TTS` abstract bases) from day 1 so Phase 2 OpenRouter / Gemini / ElevenLabs / FasterWhisper are subclass drops.
-- **Phase 1 done when:** 5+ real sessions on a real task where memory recall noticeably improves experience, demo video recorded, `lint_memory.py` surfaces one unexpected finding.
+- **Phase 1 done when:** 5+ real sessions on a real task where memory recall noticeably improves experience, demo video recorded. (Originally also required `lint_memory.py` output — **skipped** per user verdict 2026-04-20 as "B0-essay-only, not user-facing value". Unblocked; not shipping unless B0 writeup specifically needs the generated `insights.md`.)
 
 ### Phase 2: Harden in Python (2-4 weeks, only if Phase 1 validates)
 Source: every user-demand issue/PR in Clicky upstream (see `PRD.md` § Upstream Snapshot).
@@ -128,7 +135,7 @@ Clicky Windows/
 ├── debug_log.py        ← Per-interaction debug folders (screenshots + timing + coords)
 ├── capture.py          ← screen capture + cursor + DPI + aspect-ratio resize + multi-screen
 ├── ai.py               ← AIClient abstract + AnthropicClient + GeminiClient + create_ai_client() factory (dual-SDK routing by MODEL_ID prefix — anthropic/* via anthropic SDK, google/* via openai SDK + OpenRouter OpenAI-compat endpoint)
-├── overlay.py          ← per-monitor PyQt6 + Win32 click-through + blue cursor polygon
+├── overlay.py          ← per-monitor PyQt6 + Win32 click-through + cursor polygon + WaveformWidget (LISTENING) + SpinnerWidget (THINKING) + bezier flight arc (FLYING). All widgets follow cursor at 60Hz via _on_follow_tick. State machine: IDLE / LISTENING / THINKING / FLYING / SPEAKING — exactly one visual per state (verbatim port of farzaa/clicky OverlayWindow.swift).
 ├── stt.py              ← STT abstract + AssemblyAIStreamingSTT (u3-rt-pro + ForceEndpoint)
 ├── tts.py              ← TTS abstract + CartesiaSonicTTS (Sonic-3 streaming via iter_bytes())
 ├── hotkey.py           ← pynput Ctrl+Alt+Space PTT (suppress=False observe-only)
@@ -138,7 +145,8 @@ Clicky Windows/
 ├── .env.example        ← key placeholders
 ├── .gitignore          ← .env, API key files, debug_*.jpg, __pycache__, .superpowers/
 ├── tools/
-│   └── lint_memory.py  ← (Step 7.5, pending)
+│   ├── bench_path_a.py ← Mann-Whitney U + bootstrap CI latency benchmark (Phase 1.5 Step 2 Task 12)
+│   └── lint_memory.py  ← Step 7.5. **SKIPPED 2026-04-20** per user verdict ("B0-only, dumb"). Not shipping unless B0 writeup specifically needs it.
 ├── tests/              ← ~100 tests target, mock-based, <3s full suite
 │   ├── test_capture.py
 │   ├── test_ai.py
