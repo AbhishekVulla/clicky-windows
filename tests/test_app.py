@@ -246,6 +246,81 @@ class TestClickyApp:
             "Expected pipeline to reuse press-time captures when cursor is still"
         )
 
+    def test_pipeline_streams_sentences_during_claude_generation(self, mocker):
+        """Pipeline must call tts.speak_sentence for each .!? boundary in the
+        Claude stream (not batch tts.speak() at the end). The tag-start character
+        '[' must freeze flushing so the POINT tag is never spoken aloud.
+
+        Biggest latency win in Path A: first audible word happens when sentence-1
+        is ready (~1200ms after Claude TTFT) instead of when sentence-N is done
+        (~3700ms).
+        """
+        import threading
+        from PIL import Image
+        app = self._make_app(mocker)
+
+        # Prime press-time captures so the pipeline takes the fast path.
+        fake_cap = mocker.MagicMock()
+        fake_cap.image = Image.new("RGB", (1280, 800))
+        fake_cap.label = "screen 1 of 1"
+        fake_cap.scale_x = 1.0; fake_cap.scale_y = 1.0
+        fake_cap.monitor = {"left": 0, "top": 0, "width": 1920, "height": 1080}
+        fake_cap.target_width = 1280; fake_cap.target_height = 800
+        fake_cap.is_cursor_screen = True
+
+        app._press_captures = [fake_cap]
+        app._press_memory = ""
+        app._press_cursor_pos = (100, 100)
+        mocker.patch("app.get_cursor_position", return_value=(100, 100))
+        app._stt.stop_recording.return_value = "how do I make my repo public"
+
+        # Stream that yields sentences one delta at a time + a [POINT:...] tag at the end.
+        def fake_deltas():
+            yield "you "; yield "want "; yield "the settings tab. "
+            yield "scroll "; yield "down to the bottom. "
+            yield "click 'change visibility'. "
+            yield "[POINT:721,215:settings tab]"
+
+        fake_stream = mocker.MagicMock()
+        fake_stream.text_deltas.return_value = iter(fake_deltas())
+        fake_stream.final_result.return_value = mocker.MagicMock(
+            spoken_text=(
+                "you want the settings tab. "
+                "scroll down to the bottom. "
+                "click 'change visibility'."
+            ),
+            coordinate=(721, 215),
+            element_label="settings tab",
+            screen_number=None,
+        )
+        app._ai.ask_stream.return_value.__enter__ = mocker.MagicMock(return_value=fake_stream)
+        app._ai.ask_stream.return_value.__exit__ = mocker.MagicMock(return_value=False)
+
+        cancel = threading.Event()
+        app._pipeline_worker("TEST.EXE", "TestWindow", cancel)
+
+        sentence_calls = [c.args[0] for c in app._tts.speak_sentence.call_args_list]
+
+        # Sentence-level streaming during the Claude generation.
+        assert any("settings tab." in s for s in sentence_calls), (
+            "First sentence should have been flushed during streaming, "
+            f"got speak_sentence calls: {sentence_calls}"
+        )
+        assert any("to the bottom." in s for s in sentence_calls), (
+            "Second sentence should have been flushed during streaming"
+        )
+
+        # POINT tag must NEVER appear in anything sent to TTS.
+        for s in sentence_calls:
+            assert "[POINT" not in s, (
+                f"POINT tag must not be spoken aloud, but got: {s!r}"
+            )
+
+        # The batch speak() path must be gone (replaced by sentence-level).
+        assert not app._tts.speak.called, (
+            "Batch tts.speak() should be replaced with sentence-level streaming"
+        )
+
     def test_pipeline_worker_recaptures_on_large_cursor_move(self, mocker):
         """If cursor moved >50px, pipeline re-captures on release (safeguard
         against stale screenshots when user actively repositioned mid-utterance)."""

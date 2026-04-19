@@ -360,6 +360,19 @@ class ClickyApp(QObject):
 
             dbg.log("CLAUDE: streaming started...")
             _log("Asking Claude...")
+
+            # Sentence-level TTS streaming (Path A Task 6). Flush complete
+            # sentences from the buffer as each .!? boundary arrives, so TTS
+            # starts on sentence 1 (~1200ms into Claude stream) instead of
+            # after the full response (~3700ms). Saves ~2s perceived latency.
+            #
+            # Tag-safety: stop flushing the moment '[' appears in the buffer
+            # (start of [POINT:x,y:label] tag). On stream close, use
+            # result.spoken_text (tag-stripped) to compute + flush the tail.
+            sentence_buffer = ""
+            tag_started = False
+            already_flushed_chars = 0
+
             with self._ai.ask_stream(
                 images=images,
                 transcript=user_text,
@@ -368,6 +381,17 @@ class ClickyApp(QObject):
                 for delta in stream.text_deltas():
                     if cancel.is_set():
                         return
+                    sentence_buffer += delta
+                    if "[" in sentence_buffer:
+                        tag_started = True
+                    if not tag_started:
+                        sentences, sentence_buffer = flush_sentences(sentence_buffer)
+                        for s in sentences:
+                            if cancel.is_set():
+                                return
+                            self._tts.speak_sentence(s)
+                            # +1 for the separator space matched by [.!?]\s
+                            already_flushed_chars += len(s) + 1
 
                 result = stream.final_result()
 
@@ -378,9 +402,14 @@ class ClickyApp(QObject):
             dbg.log(f"CLAUDE: spoken_text: {result.spoken_text!r}")
             dbg.log(f"CLAUDE: coordinate={result.coordinate}, label={result.element_label!r}, screen={result.screen_number}")
 
+            # Flush the tail (everything in spoken_text that hasn't yet been
+            # sent to TTS). Uses result.spoken_text because it's tag-stripped —
+            # avoids ever speaking the [POINT:x,y:label] aloud.
             if result.spoken_text:
-                dbg.log("TTS: calling speak()...")
-                self._tts.speak(result.spoken_text)
+                tail = result.spoken_text[already_flushed_chars:].strip()
+                if tail:
+                    dbg.log(f"TTS: flushing tail ({len(tail)} chars)")
+                    self._tts.speak_sentence(tail)
 
             if cancel.is_set():
                 return
