@@ -177,6 +177,45 @@ class TestClickyApp:
         app._hotkey.stop.assert_called_once()
         app._tts.stop.assert_called_once()
 
+    def test_press_handler_shows_waveform_at_cursor(self, mocker):
+        """Path A Task 10: _handle_press emits sig_show_waveform with the cursor
+        position + the containing monitor → OverlayController routes to the
+        right screen + hides cursor polygon + shows the 5-bar waveform."""
+        app = self._make_app(mocker)
+        mocker.patch("app.get_foreground_app", return_value=("EXCEL.EXE", "Sheet1"))
+        mocker.patch("app.get_cursor_position", return_value=(500, 600))
+        mocker.patch("app.capture_all_screens", return_value=[mocker.MagicMock()])
+        # Ensure list_monitors + monitor_containing return a usable mon dict.
+        mon = {"left": 0, "top": 0, "width": 1920, "height": 1080}
+        mocker.patch("app.list_monitors", return_value=[mon])
+        mocker.patch("app.monitor_containing", return_value=mon)
+
+        app._handle_press()
+        if app._capture_thread is not None:
+            app._capture_thread.join(timeout=2.0)
+
+        app._overlay.show_waveform.assert_called_once()
+        call_args = app._overlay.show_waveform.call_args
+        assert call_args.args[0] == 500, "x coordinate should be cursor x"
+        assert call_args.args[1] == 600, "y coordinate should be cursor y"
+        assert call_args.args[2] == mon, "monitor dict should be the containing monitor"
+
+    def test_release_handler_hides_waveform(self, mocker):
+        """_handle_release must fire hide_waveform so the bars disappear once
+        the user lets go of the hotkey."""
+        app = self._make_app(mocker)
+        app._stt.stop_recording.return_value = ""  # empty transcript → fast exit
+        app._handle_release()
+        app._overlay.hide_waveform.assert_called()
+
+    def test_audio_level_slot_forwards_to_overlay(self, mocker):
+        """RMS level from stt → pyqtSignal → Qt main thread slot →
+        overlay.set_audio_level. Test the slot directly since pytest has no
+        Qt event loop to marshal the signal.emit() → slot_handler hop."""
+        app = self._make_app(mocker)
+        app._on_audio_level(0.42)
+        app._overlay.set_audio_level.assert_called_once_with(0.42)
+
     def test_press_handler_kicks_off_capture_in_background(self, mocker):
         """_handle_press starts capture_all_screens + memory.recall on a
         background thread so the work overlaps with the user speaking.

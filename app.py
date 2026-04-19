@@ -32,6 +32,8 @@ from debug_log import DebugSession
 from capture import (
     capture_all_screens,
     get_cursor_position,
+    list_monitors,
+    monitor_containing,
     set_dpi_awareness,
     unscale_claude_coords,
 )
@@ -124,6 +126,10 @@ class ClickyApp(QObject):
     sig_show_overlay = pyqtSignal()
     sig_point_at = pyqtSignal(int, int, dict)
     sig_record_memory = pyqtSignal(str, str, str, str, list)
+    # Path A Task 10 — LISTENING-state signals + audio-level forwarding.
+    sig_show_waveform = pyqtSignal(int, int, dict)
+    sig_hide_waveform = pyqtSignal()
+    sig_audio_level = pyqtSignal(float)
 
     def __init__(
         self,
@@ -169,6 +175,9 @@ class ClickyApp(QObject):
         self.sig_show_overlay.connect(self._on_show_overlay)
         self.sig_point_at.connect(self._on_point_at)
         self.sig_record_memory.connect(self._on_record_memory)
+        self.sig_show_waveform.connect(self._on_show_waveform)
+        self.sig_hide_waveform.connect(self._on_hide_waveform)
+        self.sig_audio_level.connect(self._on_audio_level)
 
     def start(self) -> None:
         """Initialize overlay + hotkey and begin listening.
@@ -184,6 +193,11 @@ class ClickyApp(QObject):
                 on_press=lambda: self.sig_pressed.emit(),
                 on_release=lambda: self.sig_released.emit(),
             )
+        # Wire RMS audio-level → Qt-thread-safe signal → overlay waveform.
+        # stt's callback runs on the portaudio thread; pyqtSignal marshals
+        # to the Qt main thread where _on_audio_level calls overlay.set_audio_level.
+        self._stt.on_audio_level(lambda lvl: self.sig_audio_level.emit(lvl))
+
         self._hotkey.start()
         _log("Listening for Ctrl+Alt+Space...")
 
@@ -233,6 +247,16 @@ class ClickyApp(QObject):
         )
         self._capture_thread.start()
 
+        # Show the LISTENING-state waveform at the cursor position (Path A Task 10).
+        # cursor polygon hides; bars replace it for the duration of the utterance.
+        cursor_x, cursor_y = self._press_cursor_pos
+        try:
+            mon = monitor_containing(cursor_x, cursor_y, list_monitors())
+            if mon is not None:
+                self.sig_show_waveform.emit(cursor_x, cursor_y, mon)
+        except Exception as exc:
+            _log(f"WARN: show_waveform dispatch failed — {exc}")
+
     def _press_time_capture(self, app_name: str) -> None:
         """Background thread launched at press time. Captures screens + recalls
         memory while the user is still speaking. Result stored on self for
@@ -256,6 +280,9 @@ class ClickyApp(QObject):
         """Hotkey released: cancel previous worker, spawn new pipeline."""
         import time
         _log(f"RELEASE handler START (Qt main thread)")
+        # Kill the LISTENING-state waveform immediately on release — cursor
+        # polygon returns + bars fade for the THINKING gap until flight fires.
+        self.sig_hide_waveform.emit()
         if self._worker_thread and self._worker_thread.is_alive():
             _log("  cancelling previous worker + stopping TTS")
             self._cancel_event.set()
@@ -517,6 +544,20 @@ class ClickyApp(QObject):
             )
         except Exception as exc:
             _log(f"ERROR: Memory record failed — {exc}")
+
+    # Path A Task 10 — LISTENING-state slot handlers (run on Qt main thread)
+
+    def _on_show_waveform(self, physical_x: int, physical_y: int, monitor: dict) -> None:
+        if self._overlay:
+            self._overlay.show_waveform(physical_x, physical_y, monitor)
+
+    def _on_hide_waveform(self) -> None:
+        if self._overlay:
+            self._overlay.hide_waveform()
+
+    def _on_audio_level(self, level: float) -> None:
+        if self._overlay:
+            self._overlay.set_audio_level(level)
 
 
 _T0 = __import__("time").time()
