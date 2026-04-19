@@ -220,7 +220,15 @@ class ClickyApp(QObject):
         self._tts.stop()
         # Prevent TTS speaker decay from leaking into this PTT's transcript
         # (acoustic feedback loop). 200ms window tuned to real laptop-mic decay.
+        # MUST be set before the chime — on cold-start the chime triggers a
+        # 400-500ms numpy/sounddevice cold-path init we don't want to count
+        # against the grace window start time.
         self._stt.set_tts_grace_until(time.time() + 0.200)
+        # Play listening chime (async / non-blocking) so user hears instant
+        # "mic is hot" feedback. First call triggers sample generation
+        # (~5ms CPU) + sounddevice cold-path init (~400ms on fresh portaudio).
+        # Both are one-time costs amortized across the session.
+        _play_chime_async()
         # Check if TTS thread actually died
         tts_thread = self._tts._current_thread
         tts_alive = tts_thread.is_alive() if tts_thread else False
@@ -561,6 +569,41 @@ class ClickyApp(QObject):
 
 
 _T0 = __import__("time").time()
+
+
+# --- Path A Task 11: listening chime (lazy-built + async playback) ----------
+
+_CHIME_SAMPLE_RATE = 44100
+_CHIME_SAMPLES = None  # float32 numpy array, built on first play
+
+
+def _play_chime_async() -> None:
+    """Play a short 'mic is hot' chime on hotkey PRESS. Non-blocking.
+
+    Generated in-memory the first time it's called (no asset file to manage,
+    no soundfile dep). 60ms, 880Hz (A5), exponential decay envelope.
+    ``sounddevice.play()`` returns immediately — audio plays through the
+    portaudio output buffer while the rest of the press handler proceeds.
+
+    Errors are swallowed — the chime is UX-only; if sounddevice / the audio
+    device is unavailable, we silently skip rather than break the PTT flow.
+    """
+    global _CHIME_SAMPLES
+    try:
+        import sounddevice as _sd
+        if _CHIME_SAMPLES is None:
+            import numpy as _np
+            duration_s = 0.060
+            freq_hz = 880.0
+            t = _np.linspace(0.0, duration_s,
+                             int(_CHIME_SAMPLE_RATE * duration_s), endpoint=False)
+            envelope = _np.exp(-t * 40.0)
+            _CHIME_SAMPLES = (
+                _np.sin(2.0 * _np.pi * freq_hz * t) * envelope * 0.3
+            ).astype(_np.float32)
+        _sd.play(_CHIME_SAMPLES, _CHIME_SAMPLE_RATE)
+    except Exception:
+        pass
 
 
 def _log(msg: str) -> None:

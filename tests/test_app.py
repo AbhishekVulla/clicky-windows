@@ -216,6 +216,23 @@ class TestClickyApp:
         app._on_audio_level(0.42)
         app._overlay.set_audio_level.assert_called_once_with(0.42)
 
+    def test_press_handler_plays_listening_chime(self, mocker):
+        """Path A Task 11: _handle_press plays a short chime the moment the
+        hotkey goes down so the user has immediate feedback 'mic is hot, keep
+        talking'. Must be non-blocking (0ms pipeline latency)."""
+        import app as app_module
+        play_spy = mocker.patch.object(app_module, "_play_chime_async")
+        mocker.patch("app.get_foreground_app", return_value=("EXCEL.EXE", "Sheet1"))
+        mocker.patch("app.get_cursor_position", return_value=(100, 100))
+        mocker.patch("app.capture_all_screens", return_value=[mocker.MagicMock()])
+
+        app = self._make_app(mocker)
+        app._handle_press()
+        if app._capture_thread is not None:
+            app._capture_thread.join(timeout=2.0)
+
+        play_spy.assert_called_once()
+
     def test_press_handler_kicks_off_capture_in_background(self, mocker):
         """_handle_press starts capture_all_screens + memory.recall on a
         background thread so the work overlaps with the user speaking.
