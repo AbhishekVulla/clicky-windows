@@ -714,7 +714,7 @@ User caught this during review on 2026-04-12 evening. Rather than assume the fix
 
 ## 2026-04-19: Gemini 3 Flash Preview via OpenRouter — dual-SDK routing for BYOK model-agnosticism
 
-**Context.** Step 7 orchestrator shipped at `942a905`. Manual testing + debug logs show Claude Sonnet 4.6 vision inference is 5-9s = 85-90% of total PTT latency (e.g. session 03:24:32: stop_recording=301ms, capture=228ms, Claude=8035ms, TTS=instant). Target was sub-2s end-to-end. Aaron (senior engineer, met at SUTD InspireCon 2026-04-18) explicit feedback: *"Gemini Flash is actually good enough."* He validated OpenRouter as the BYOK abstraction: users shouldn't be forced onto one provider (Clicky macOS is locked into ElevenLabs → top-3 upstream complaint per issues #22/#27/#32/#33).
+**Context.** Step 7 orchestrator shipped 2026-04-13. Manual testing + debug logs show Claude Sonnet 4.6 vision inference is 5-9s = 85-90% of total PTT latency (e.g. session 03:24:32: stop_recording=301ms, capture=228ms, Claude=8035ms, TTS=instant). Target was sub-2s end-to-end. Aaron (senior engineer, met at SUTD InspireCon 2026-04-18) explicit feedback: *"Gemini Flash is actually good enough."* He validated OpenRouter as the BYOK abstraction: users shouldn't be forced onto one provider (Clicky macOS is locked into ElevenLabs → top-3 upstream complaint per issues #22/#27/#32/#33).
 
 **Decision.** Swap LLM from Claude Sonnet 4.6 → Gemini 3 Flash Preview via OpenRouter. Keep OpenRouter as the dual-SDK BYOK routing layer:
 - `anthropic/claude-sonnet-4-6` → `AnthropicClient` (anthropic SDK, OpenRouter Anthropic-compat endpoint via `ANTHROPIC_BASE_URL`)
@@ -753,7 +753,7 @@ Router is `ai.create_ai_client(model_id, api_key)` — prefix-based dispatch. ap
 
 ## 2026-04-19 (evening): Gemini 2.5/3 Flash rejected as default — measurement-driven reversal
 
-**Context.** Earlier 2026-04-19 decision above shipped GeminiClient + factory + dual-SDK routing. Landed at commits `6ee8f3f` through `3a76962`, 138/138 tests green. Set `.env` MODEL_ID to `google/gemini-3-flash-preview` for manual verification. Then tested against both Gemini models on fresh + stale screenshots, measured real latency from Step 7 orchestrator debug logs.
+**Context.** Earlier 2026-04-19 decision above shipped GeminiClient + factory + dual-SDK routing — landed in 8 commits 2026-04-19, 138/138 tests green. Set `.env` MODEL_ID to `google/gemini-3-flash-preview` for manual verification. Then tested against both Gemini models on fresh + stale screenshots, measured real latency from Step 7 orchestrator debug logs.
 
 **Empirical results (measured, not estimated):**
 
@@ -830,7 +830,7 @@ Router is `ai.create_ai_client(model_id, api_key)` — prefix-based dispatch. ap
 
 **Consequences:**
 - `.env` MODEL_ID stays `anthropic/claude-sonnet-4-6`
-- 8 commits (`6ee8f3f`..`a4520ec`) pushed to origin/main 2026-04-19 late evening — GeminiClient + factory + dual-SDK routing + 138/138 tests + full docs trail. Infrastructure is load-bearing for future provider drops (Grok, Llama, Gemini-when-fixed).
+- 8 commits pushed to origin/main 2026-04-19 late evening — GeminiClient + factory + dual-SDK routing + 138/138 tests + full docs trail. Infrastructure is load-bearing for future provider drops (Grok, Llama, Gemini-when-fixed).
 - Phase 1.5 Step 2 (Path A parallelism) becomes THE primary latency vector, with Claude preserved (no precision tax). Target: 5-9s → ~2s via capture-at-press, prefix caching, STT cutoff fix, TTS-to-mic feedback fix, memory reduction.
 - Lesson logged: **head-to-head A/B on identical real workload beats isolated live-gate runs.** The ai.py-only tests showed Gemini might work in ideal conditions. The full-orchestrator A/B on the same workload shows Gemini loses on BOTH latency and accuracy. Always test the real pipeline, not isolated components.
 
