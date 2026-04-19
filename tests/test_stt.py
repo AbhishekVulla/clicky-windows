@@ -281,6 +281,42 @@ class TestAssemblyAIStreamingSTT:
             f"expected floor of {received[0] * AUDIO_POWER_DECAY:.3f}"
         )
 
+    def test_on_turn_ignores_formatted_revision_without_end_of_turn(self):
+        """Regression for the "That's kind of—" stutter bug (2026-04-19).
+
+        AssemblyAI may emit a formatted-revision event (end_of_turn=False,
+        turn_is_formatted=True) after an end_of_turn=True event. If our
+        handler fired on is_formatted as a fallback, that extra event would
+        append its text to _final_transcript → produce "That's kind of—
+        That's kind of weird." from a single clean utterance.
+
+        Per AssemblyAI docs: "The only reliable way to detect turn completion
+        is end_of_turn: true." Handler must ignore is_formatted events that
+        don't have end_of_turn=True.
+        """
+        stt_obj, fake_client, _, _, _ = self._make_stt()
+        stt_obj.connect()
+        stt_obj.start_recording()
+
+        # First event: real end_of_turn finalization.
+        final_event = MagicMock()
+        final_event.transcript = "That's kind of weird."
+        final_event.turn_is_formatted = False
+        final_event.end_of_turn = True
+        stt_obj._on_turn(fake_client, final_event)
+
+        # Second event: a formatted revision arriving afterward. Must NOT
+        # append — otherwise we get the stutter artifact.
+        revision_event = MagicMock()
+        revision_event.transcript = "That's kind of—"
+        revision_event.turn_is_formatted = True
+        revision_event.end_of_turn = False
+        stt_obj._on_turn(fake_client, revision_event)
+
+        assert stt_obj._final_transcript == "That's kind of weird.", (
+            f"Expected revision to be ignored, got {stt_obj._final_transcript!r}"
+        )
+
     def test_set_tts_grace_until_blocks_mic_chunks(self):
         """set_tts_grace_until(t) must drop mic chunks until time.time() >= t.
 

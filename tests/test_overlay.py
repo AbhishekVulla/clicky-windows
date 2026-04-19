@@ -436,3 +436,21 @@ class TestWaveformBarHeight:
             f"Louder level should produce taller bar, got quiet={h_quiet:.2f} "
             f"vs loud={h_loud:.2f}"
         )
+
+
+class TestSpinnerWidgetMath:
+    """Tests for SpinnerWidget math helpers — ports Clicky's
+    BlueCursorSpinnerView from OverlayWindow.swift:749-773.
+    """
+
+    def test_spinner_rotation_angle_wraps_at_full_rotation(self):
+        """_spinner_angle_deg is (elapsed_s / period_s * 360) mod 360."""
+        from overlay import _spinner_angle_deg, _SPINNER_PERIOD_S
+        # At t=0, angle is 0
+        assert abs(_spinner_angle_deg(0.0) - 0.0) < 1e-6
+        # At half-period, angle is 180
+        assert abs(_spinner_angle_deg(_SPINNER_PERIOD_S / 2.0) - 180.0) < 1e-6
+        # At full period, angle wraps back to 0
+        assert abs(_spinner_angle_deg(_SPINNER_PERIOD_S) - 0.0) < 1e-6
+        # At 1.5 periods, angle is 180 again
+        assert abs(_spinner_angle_deg(_SPINNER_PERIOD_S * 1.5) - 180.0) < 1e-6

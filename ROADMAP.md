@@ -307,17 +307,21 @@ Current: `flush_sentences` matches `[.!?]\s`. Claude's response style uses em-da
 
 **Decision gate**: pair with F2.
 
-### F4. STT stutter dedup (multi-turn concatenation)
+### F4. STT stutter dedup — ✅ FIXED 2026-04-19 late-evening
 
-Observed 2026-04-19 evening: AssemblyAI's Universal Streaming can emit multiple `formatted=True` / `end_of_turn=True` Turn events within a single PTT hold when the user pauses mid-sentence or self-corrects (e.g. *"That's kind of—" [pause] "That's kind of weird."*). Our `stt.py` `_on_turn` handler concatenates both into `_final_transcript` → Claude receives the stuttered text + sometimes reacts to the stutter itself ("ha yeah, the STT caught itself stuttering").
+**Root cause (verified from source, not dedup-heuristic as first hypothesized):**
 
-This behavior is **correct** for genuine multi-utterance sessions (user says "hello" → pause → "world" as two separate thoughts) but **wrong** for self-corrections.
+1. **VAD too aggressive** — default `end_of_turn_confidence_threshold=0.4` + `min_turn_silence=400ms` (verified from docs.assemblyai.com) fires `end_of_turn=true` on natural mid-sentence pauses, splitting one utterance into multiple Turns.
+2. **Handler fallback misfired** — our `_on_turn` used `if end_of_turn OR is_formatted:`. AssemblyAI emits a separate formatted-revision event after each end_of_turn (with `end_of_turn=false, turn_is_formatted=true`), and that event passed the `or` branch → handler fired twice → concatenation.
 
-**Proposed fix (heuristic)**: if a new formatted turn's text shares the first N=3+ words with the PRIOR formatted turn's text, treat as a revision and REPLACE rather than concatenate. Otherwise concatenate as today.
+**Fix — two complementary changes** (committed as part of the spinner-sprint commit):
 
-**Effort**: ~15 LOC change to `_on_turn`, ~2 new tests. Small.
+- `stt.py _on_turn`: fire ONLY on `end_of_turn=True`. AssemblyAI docs: *"Do not use turn_is_formatted for end-of-turn detection. The only reliable way to detect turn completion is end_of_turn: true."*
+- `stt.py StreamingParameters`: raise to Conservative preset (`end_of_turn_confidence_threshold=0.7`, `min_turn_silence=800`, `max_turn_silence=3600`). VAD won't fire mid-hold; `force_endpoint()` on release remains the authoritative turn-end trigger.
 
-**Decision gate**: revisit if the Claude-reacts-to-stutter behavior keeps surfacing in manual testing. Currently deferred to reduce scope of the spinner-sprint.
+**Verified fix test**: `tests/test_stt.py::test_on_turn_ignores_formatted_revision_without_end_of_turn` — simulates AssemblyAI's two-event pattern (real end_of_turn then formatted revision) and asserts the revision is NOT appended to `_final_transcript`.
+
+**Manual verification**: re-speak "That's kind of weird" in a PTT session; debug log should show ONE final transcript, no concatenation.
 
 ---
 

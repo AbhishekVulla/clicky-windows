@@ -42,7 +42,6 @@ from enum import Enum, auto
 from PyQt6.QtCore import (
     QPoint,
     QPointF,
-    QRectF,
     QTimer,
     QVariantAnimation,
     Qt,
@@ -388,6 +387,14 @@ class OverlayWindow(QWidget):
         self._pointer_pos = QPoint(0, 0)
         self._pointer_visible = False
 
+        # Visual state flags — gates cursor polygon paint + widget positions.
+        # Only one of these can be true at a time (Farza's verbatim state
+        # machine — cursor polygon never coexists with waveform or spinner).
+        self._waveform_visible = False
+        self._spinner_visible = False
+        self._waveform_widget = None  # lazy-created on first show_waveform()
+        self._spinner_widget = None   # lazy-created on first show_spinner()
+
         # Bezier flight animation (Path A Task 8). Replaces the old linear
         # QPropertyAnimation with Farza's quadratic-bezier-arc + smoothstep +
         # scale-pulse. Port of OverlayWindow.swift:491-568 (no tangent rotation
@@ -508,34 +515,166 @@ class OverlayWindow(QWidget):
         hwnd = int(self.winId())
         apply_clickthrough_styles(hwnd)
 
-    # --- Waveform widget integration (Path A Task 9) ---------------------
+    # --- Waveform + Spinner widgets (LISTENING / THINKING states) --------
+    #
+    # Both widgets position themselves at self._pointer_pos every follow-tick
+    # (matches Clicky's .position(cursorPosition) binding — verified from
+    # farzaa/clicky OverlayWindow.swift:326-329 + 411-438, the widgets follow
+    # the OS cursor at 60Hz, they DO NOT stay pinned at press-time position).
+    #
+    # show_waveform / show_spinner just create the widget + flip a visibility
+    # flag. The 60Hz _on_follow_tick drives their positions.
 
-    def show_waveform(self, logical_x: float, logical_y: float) -> None:
-        """Show the 5-bar waveform at the given logical position and hide the
-        cursor polygon (LISTENING state: waveform REPLACES cursor, per
-        Clicky-verbatim behavior — user chose 'Ship A first' via AskUserQuestion)."""
+    def show_waveform(self) -> None:
+        """Enter LISTENING state: show waveform widget, hide cursor polygon.
+        Widget position is driven by _on_follow_tick (tracks mouse at 60Hz).
+        """
         if getattr(self, "_waveform_widget", None) is None:
             self._waveform_widget = WaveformWidget(self)
-        # Position widget centered on the given point.
-        self._waveform_widget.move(
-            int(logical_x - WaveformWidget.WIDGET_WIDTH // 2),
-            int(logical_y - WaveformWidget.WIDGET_HEIGHT // 2),
-        )
         self._waveform_widget.show()
         self._waveform_visible = True
+        self._pointer_visible = False  # cursor polygon hides during LISTENING
         self.update()
 
     def hide_waveform(self) -> None:
-        """Hide waveform + restore cursor polygon."""
+        """Exit LISTENING state. Does NOT restore cursor visibility — caller
+        is expected to transition into THINKING (show_spinner) or IDLE (tick
+        will re-show the cursor when no waveform/spinner is active)."""
         if getattr(self, "_waveform_widget", None) is not None:
             self._waveform_widget.hide()
         self._waveform_visible = False
+        self.update()
+
+    def show_spinner(self) -> None:
+        """Enter THINKING state: show rotating arc, keep cursor hidden.
+        Position tracks cursor via _on_follow_tick, same as waveform."""
+        if getattr(self, "_spinner_widget", None) is None:
+            self._spinner_widget = SpinnerWidget(self)
+        self._spinner_widget.show()
+        self._spinner_visible = True
+        self._pointer_visible = False
+        self.update()
+
+    def hide_spinner(self) -> None:
+        """Exit THINKING state. Cursor will reappear via _on_follow_tick when
+        no widget is active, OR via point_at() setting _pointer_visible=True
+        right before the bezier arc starts."""
+        if getattr(self, "_spinner_widget", None) is not None:
+            self._spinner_widget.hide()
+        self._spinner_visible = False
         self.update()
 
     def set_audio_level(self, level: float) -> None:
         """Forward audio level to the waveform widget (no-op if not shown yet)."""
         if getattr(self, "_waveform_widget", None) is not None:
             self._waveform_widget.set_audio_level(level)
+
+
+# --- Spinner widget (THINKING state) -----------------------------------------
+#
+# Ports farzaa/clicky leanring-buddy/OverlayWindow.swift:749-773 (the
+# BlueCursorSpinnerView). Shown between hotkey RELEASE and Claude returning
+# a coordinate. Same visual vocabulary as Clicky's macOS shipping buddy.
+
+_SPINNER_PERIOD_S = 0.8
+"""Full-rotation period. Matches Clicky's linear(duration: 0.8) forever-repeat."""
+
+_SPINNER_ARC_START_DEG = 54.0   # 0.15 * 360
+_SPINNER_ARC_SPAN_DEG = 252.0   # (0.85 - 0.15) * 360  → 70% of full circle
+
+_SPINNER_WIDGET_SIZE = 28  # px — leaves room around the 14px arc for stroke + glow
+_SPINNER_ARC_DIAMETER = 14.0
+_SPINNER_STROKE_WIDTH = 2.5
+
+
+def _spinner_angle_deg(elapsed_s: float) -> float:
+    """Linear-rotation angle in degrees, wrapping at full period (0.8s).
+
+    Returns angle in [0, 360). Pure function (no Qt), easy to unit test.
+    """
+    return (elapsed_s / _SPINNER_PERIOD_S * 360.0) % 360.0
+
+
+class SpinnerWidget(QWidget):
+    """14×14 rotating arc, shown during THINKING state (release → coord).
+
+    Port of Clicky's BlueCursorSpinnerView. The arc covers 70% of a circle
+    (trimmed 15% at top + 15% at bottom to match Farza's ``.trim(from: 0.15,
+    to: 0.85)``). Rotates continuously, 0.8s per full rotation.
+
+    Rendered via QPainter on a transparent, mouse-transparent QWidget. The
+    widget size is larger than the arc so the stroke + anti-aliasing don't
+    clip at the edges.
+
+    Thread safety: show()/hide() are Qt-main-thread only (called via
+    pyqtSignal slots in app.py). The timer ticks on the main thread too.
+    """
+
+    WIDGET_SIZE = _SPINNER_WIDGET_SIZE
+    UPDATE_INTERVAL_MS = 28  # ~36 fps — same cadence as waveform for consistency
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(self.WIDGET_SIZE, self.WIDGET_SIZE)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+
+        import time as _t
+        self._phase_start = _t.time()
+
+        self._tick_timer = QTimer(self)
+        self._tick_timer.timeout.connect(self._tick)
+        self._tick_timer.start(self.UPDATE_INTERVAL_MS)
+
+    def _tick(self) -> None:
+        self.update()
+
+    def paintEvent(self, _event) -> None:
+        """Draw a rotating 70% arc in dodger blue + subtle outer glow."""
+        import time as _t
+        from PyQt6.QtCore import QRectF as _QRectF
+
+        elapsed = _t.time() - self._phase_start
+        angle = _spinner_angle_deg(elapsed)
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        # Center the arc in the widget + rotate by `angle` around the center.
+        cx = cy = self.WIDGET_SIZE / 2.0
+        painter.translate(cx, cy)
+        painter.rotate(angle)
+        painter.translate(-cx, -cy)
+
+        # Outer glow — a faint circle slightly larger than the arc.
+        glow_pen = QPen(QColor(30, 144, 255, 90))
+        glow_pen.setWidthF(_SPINNER_STROKE_WIDTH + 2.0)
+        glow_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(glow_pen)
+        arc_rect = _QRectF(
+            (self.WIDGET_SIZE - _SPINNER_ARC_DIAMETER) / 2.0,
+            (self.WIDGET_SIZE - _SPINNER_ARC_DIAMETER) / 2.0,
+            _SPINNER_ARC_DIAMETER,
+            _SPINNER_ARC_DIAMETER,
+        )
+        # QPainter.drawArc uses 1/16-degree units.
+        painter.drawArc(
+            arc_rect,
+            int(_SPINNER_ARC_START_DEG * 16),
+            int(_SPINNER_ARC_SPAN_DEG * 16),
+        )
+
+        # Main arc — fully opaque dodger blue.
+        main_pen = QPen(QColor(30, 144, 255, 220))
+        main_pen.setWidthF(_SPINNER_STROKE_WIDTH)
+        main_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(main_pen)
+        painter.drawArc(
+            arc_rect,
+            int(_SPINNER_ARC_START_DEG * 16),
+            int(_SPINNER_ARC_SPAN_DEG * 16),
+        )
 
 
 # --- Waveform widget -----------------------------------------------------------
@@ -701,7 +840,30 @@ class OverlayController:
             new_y = current_y + step_y
 
         target_overlay._pointer_pos = QPoint(new_x, new_y)
-        target_overlay._pointer_visible = True
+
+        # Visibility gating: waveform (LISTENING) and spinner (THINKING) hide
+        # the cursor polygon; otherwise cursor polygon is visible. Widgets are
+        # repositioned to the new cursor position so they track the OS mouse
+        # at 60Hz (matches Clicky's .position(cursorPosition) binding per
+        # OverlayWindow.swift:326-329 + 411-438).
+        wf_widget = getattr(target_overlay, "_waveform_widget", None)
+        sp_widget = getattr(target_overlay, "_spinner_widget", None)
+
+        if getattr(target_overlay, "_waveform_visible", False) and wf_widget is not None:
+            wf_widget.move(
+                int(new_x - wf_widget.width() // 2),
+                int(new_y - wf_widget.height() // 2),
+            )
+            target_overlay._pointer_visible = False
+        elif getattr(target_overlay, "_spinner_visible", False) and sp_widget is not None:
+            sp_widget.move(
+                int(new_x - sp_widget.width() // 2),
+                int(new_y - sp_widget.height() // 2),
+            )
+            target_overlay._pointer_visible = False
+        else:
+            target_overlay._pointer_visible = True
+
         target_overlay.update()
 
     def point_at(
@@ -799,33 +961,63 @@ class OverlayController:
         self._state = _OverlayState.IDLE
         self._follow_timer.start()
 
-    # --- Waveform delegation (Path A Task 9 — called by app.py state machine)
+    # --- Waveform + Spinner delegation (called by app.py state machine) ----
+    #
+    # Position is driven by _on_follow_tick, NOT by show_waveform/show_spinner
+    # args. The monitor arg is retained for multi-monitor routing: the widget
+    # is created on the OverlayWindow whose screen the cursor is on AT PRESS/
+    # RELEASE time. If the cursor crosses monitors mid-hold, the widget stays
+    # on its original monitor (known limitation, deferred as future work —
+    # see ROADMAP.md "Future visual + TTS refinements").
 
     def show_waveform(self, physical_x: int, physical_y: int, monitor: dict) -> None:
-        """Route to the right OverlayWindow and show the waveform at the
-        cursor position. app.py calls this on hotkey PRESS."""
-        screens = QGuiApplication.screens()
-        target_screen = screen_for_monitor(monitor, screens)
-        target_overlay = self._overlay_for_screen(target_screen)
-        if target_overlay is None and self.overlays:
-            target_overlay = self.overlays[0]
-        if target_overlay is None:
-            return
-        local_x, local_y = physical_to_local_logical(physical_x, physical_y, target_screen)
-        target_overlay.show_waveform(local_x, local_y)
+        """Show waveform on the overlay containing (physical_x, physical_y).
+        Called by app.py on hotkey PRESS."""
+        target_overlay = self._pick_overlay_for_point(physical_x, physical_y, monitor)
+        if target_overlay is not None and hasattr(target_overlay, "show_waveform"):
+            target_overlay.show_waveform()
 
     def hide_waveform(self) -> None:
         """Hide waveform on all overlays. app.py calls this on hotkey RELEASE."""
         for overlay in self.overlays:
-            # Real OverlayWindow exposes hide_waveform. Mocks in tests may not.
             if hasattr(overlay, "hide_waveform"):
                 overlay.hide_waveform()
 
+    def show_spinner(self, physical_x: int, physical_y: int, monitor: dict) -> None:
+        """Show spinner (THINKING state) on the overlay containing the cursor.
+        Called by app.py on hotkey RELEASE, immediately after hide_waveform."""
+        target_overlay = self._pick_overlay_for_point(physical_x, physical_y, monitor)
+        if target_overlay is not None and hasattr(target_overlay, "show_spinner"):
+            target_overlay.show_spinner()
+
+    def hide_spinner(self) -> None:
+        """Hide spinner on all overlays. Called by app.py when:
+        - Claude returns a coordinate (just before sig_point_at → bezier fires)
+        - Text-only response path (no coordinate)
+        - Pipeline error / cancel paths (don't leave spinner spinning)
+        - Top of _handle_press (clear stale from prior interaction)"""
+        for overlay in self.overlays:
+            if hasattr(overlay, "hide_spinner"):
+                overlay.hide_spinner()
+
     def set_audio_level(self, level: float) -> None:
-        """Forward audio level to ALL overlays (only the showing one renders)."""
+        """Forward audio level to ALL overlays (only the one with a showing
+        waveform widget renders — others are no-ops)."""
         for overlay in self.overlays:
             if hasattr(overlay, "set_audio_level"):
                 overlay.set_audio_level(level)
+
+    def _pick_overlay_for_point(
+        self, physical_x: int, physical_y: int, monitor: dict,
+    ):
+        """Route a physical-pixel point to the right OverlayWindow.
+        Returns None if no overlay exists (empty screens list)."""
+        screens = QGuiApplication.screens()
+        target_screen = screen_for_monitor(monitor, screens)
+        target = self._overlay_for_screen(target_screen)
+        if target is None and self.overlays:
+            target = self.overlays[0]
+        return target
 
 
 # --- Manual verification entry point ----------------------------------------

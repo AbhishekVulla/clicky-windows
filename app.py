@@ -130,6 +130,11 @@ class ClickyApp(QObject):
     sig_show_waveform = pyqtSignal(int, int, dict)
     sig_hide_waveform = pyqtSignal()
     sig_audio_level = pyqtSignal(float)
+    # THINKING-state spinner (post-Path-A UX fix): shown between release and
+    # Claude returning a coordinate, so the user sees feedback during the
+    # ~4-7s LLM wait (instead of the cursor just sitting there).
+    sig_show_spinner = pyqtSignal(int, int, dict)
+    sig_hide_spinner = pyqtSignal()
 
     def __init__(
         self,
@@ -178,6 +183,8 @@ class ClickyApp(QObject):
         self.sig_show_waveform.connect(self._on_show_waveform)
         self.sig_hide_waveform.connect(self._on_hide_waveform)
         self.sig_audio_level.connect(self._on_audio_level)
+        self.sig_show_spinner.connect(self._on_show_spinner)
+        self.sig_hide_spinner.connect(self._on_hide_spinner)
 
     def start(self) -> None:
         """Initialize overlay + hotkey and begin listening.
@@ -217,6 +224,10 @@ class ClickyApp(QObject):
         import time
         _log("PRESS handler START")
         t0 = time.time()
+        # Clear any stale spinner from a prior interaction (defensive — if the
+        # previous pipeline errored before hide_spinner fired, we don't want
+        # to leave a spinner spinning when a new PTT starts).
+        self.sig_hide_spinner.emit()
         self._tts.stop()
         # Prevent TTS speaker decay from leaking into this PTT's transcript
         # (acoustic feedback loop). 200ms window tuned to real laptop-mic decay.
@@ -288,9 +299,17 @@ class ClickyApp(QObject):
         """Hotkey released: cancel previous worker, spawn new pipeline."""
         import time
         _log(f"RELEASE handler START (Qt main thread)")
-        # Kill the LISTENING-state waveform immediately on release — cursor
-        # polygon returns + bars fade for the THINKING gap until flight fires.
+        # LISTENING → THINKING transition: hide waveform, show spinner at the
+        # current cursor position. Cursor polygon stays hidden while spinner
+        # runs; buddy reappears when pipeline hides spinner + fires bezier.
         self.sig_hide_waveform.emit()
+        try:
+            cursor_x, cursor_y = get_cursor_position()
+            mon = monitor_containing(cursor_x, cursor_y, list_monitors())
+            if mon is not None:
+                self.sig_show_spinner.emit(cursor_x, cursor_y, mon)
+        except Exception as exc:
+            _log(f"WARN: show_spinner dispatch failed — {exc}")
         if self._worker_thread and self._worker_thread.is_alive():
             _log("  cancelling previous worker + stopping TTS")
             self._cancel_event.set()
@@ -482,9 +501,16 @@ class ClickyApp(QObject):
                 dbg.log(f"COORDS: claude=({x_claude},{y_claude}) -> physical=({phys_x},{phys_y})")
                 dbg.log(f"COORDS: scale=({target_capture.scale_x:.2f},{target_capture.scale_y:.2f}), "
                         f"monitor_offset=({target_capture.monitor['left']},{target_capture.monitor['top']})")
+                # THINKING → FLYING: hide spinner BEFORE the point_at signal
+                # so the overlay paints cleanly (no flicker of spinner +
+                # cursor at the same time during the transition).
+                self.sig_hide_spinner.emit()
                 self.sig_point_at.emit(phys_x, phys_y, target_capture.monitor)
             else:
                 dbg.log("COORDS: no coordinate returned (text-only response)")
+                # Text-only path: spinner still needs to go away so the buddy
+                # returns to follow-cursor mode during TTS playback.
+                self.sig_hide_spinner.emit()
 
             pointer_targets = []
             if result.coordinate:
@@ -518,6 +544,10 @@ class ClickyApp(QObject):
                 dbg.log(f"ERROR: {type(exc).__name__}: {exc}")
                 _log(f"ERROR: Pipeline failed — {type(exc).__name__}: {exc}")
         finally:
+            # Always hide spinner on pipeline exit (success, error, cancel).
+            # Prevents a stuck-spinning arc if anything above raises before
+            # the normal hide_spinner emit fires.
+            self.sig_hide_spinner.emit()
             dbg.close()
 
     # --- Signal slot handlers (run on Qt main thread) ---
@@ -566,6 +596,16 @@ class ClickyApp(QObject):
     def _on_audio_level(self, level: float) -> None:
         if self._overlay:
             self._overlay.set_audio_level(level)
+
+    # Post-Path-A UX fix — THINKING-state slot handlers (Qt main thread)
+
+    def _on_show_spinner(self, physical_x: int, physical_y: int, monitor: dict) -> None:
+        if self._overlay:
+            self._overlay.show_spinner(physical_x, physical_y, monitor)
+
+    def _on_hide_spinner(self) -> None:
+        if self._overlay:
+            self._overlay.hide_spinner()
 
 
 _T0 = __import__("time").time()

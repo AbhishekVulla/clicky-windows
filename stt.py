@@ -269,12 +269,24 @@ class AssemblyAIStreamingSTT(STT):
             self._client = self._client_factory(self._api_key)
             self._client.on(StreamingEvents.Turn, self._on_turn)
             self._client.on(StreamingEvents.Error, self._on_error)
+            # VAD tuning — AssemblyAI's "Conservative" preset (verified from
+            # docs.assemblyai.com/docs/streaming/universal-streaming/turn-detection).
+            # Default aggressive values (threshold=0.4, min_silence=400,
+            # max_silence=1280) fire end_of_turn on natural mid-sentence pauses,
+            # splitting one utterance into multiple Turn events (verified in
+            # 2026-04-19 debug log: "That's kind of weird." → "That's kind of—"
+            # + "That's kind of weird."). For PTT, we WANT end_of_turn to only
+            # fire from force_endpoint (on hotkey release). Conservative preset
+            # makes VAD rarely fire mid-hold; force_endpoint is the true trigger.
             self._client.connect(
                 StreamingParameters(
                     sample_rate=self._sample_rate,
                     speech_model=self._speech_model,
                     encoding=Encoding.pcm_s16le,
                     format_turns=False,  # True adds ~1-2s latency for formatting we don't need
+                    end_of_turn_confidence_threshold=0.7,
+                    min_turn_silence=800,
+                    max_turn_silence=3600,
                 )
             )
             print(f"[stt] WebSocket connected in {(_t.time()-_t1)*1000:.0f}ms", flush=True)
@@ -494,15 +506,25 @@ class AssemblyAIStreamingSTT(STT):
         """Handle an incoming :class:`TurnEvent` from the WebSocket."""
         text = getattr(event, "transcript", "") or ""
         is_formatted = bool(getattr(event, "turn_is_formatted", False))
-        print(f"[stt] Turn event: formatted={is_formatted}, recording={self._recording}, text={text[:80]!r}", flush=True)
+        end_of_turn = getattr(event, "end_of_turn", False) is True
+        print(
+            f"[stt] Turn event: end_of_turn={end_of_turn}, formatted={is_formatted}, "
+            f"recording={self._recording}, text={text[:80]!r}",
+            flush=True,
+        )
 
-        if getattr(event, "end_of_turn", False) is True or is_formatted:
-            # End-of-turn is the only reliable completion signal with
-            # format_turns=False (AssemblyAI docs). Keep the is_formatted
-            # branch as a backup for any backend that emits both.
-            # `is True` guards against MagicMock auto-attributes in tests
-            # (MagicMock is truthy but `is True` is False) AND matches the
-            # real SDK contract where end_of_turn is a bool.
+        if end_of_turn:
+            # end_of_turn is the AUTHORITATIVE completion signal per
+            # AssemblyAI's own "Turn Detection" guide:
+            #   "Rely on end_of_turn: true in responses—not turn_is_formatted—
+            #    to reliably detect turn completion."
+            # The `or is_formatted` fallback we used to have caused a real
+            # bug: AssemblyAI fires a SEPARATE formatted-revision event
+            # (end_of_turn=false, turn_is_formatted=true) after each natural
+            # end_of_turn. Our handler was firing twice per turn and
+            # concatenating — so "That's kind of weird." became
+            # "That's kind of— That's kind of weird." (verified from
+            # 2026-04-19 debug log).
             if text:
                 if self._final_transcript:
                     self._final_transcript = f"{self._final_transcript} {text}".strip()

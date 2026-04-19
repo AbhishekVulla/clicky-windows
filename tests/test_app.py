@@ -216,6 +216,41 @@ class TestClickyApp:
         app._on_audio_level(0.42)
         app._overlay.set_audio_level.assert_called_once_with(0.42)
 
+    def test_release_emits_show_spinner(self, mocker):
+        """On RELEASE, the THINKING spinner must appear at the cursor position."""
+        app = self._make_app(mocker)
+        app._stt.stop_recording.return_value = ""  # fast-exit pipeline
+        mocker.patch("app.get_cursor_position", return_value=(500, 600))
+        mon = {"left": 0, "top": 0, "width": 1920, "height": 1080}
+        mocker.patch("app.list_monitors", return_value=[mon])
+        mocker.patch("app.monitor_containing", return_value=mon)
+
+        app._handle_release()
+
+        app._overlay.show_spinner.assert_called_once()
+        args = app._overlay.show_spinner.call_args.args
+        assert args[0] == 500 and args[1] == 600
+
+    def test_press_emits_hide_spinner_to_clear_stale(self, mocker):
+        """PRESS must clear any stale spinner from a prior interaction."""
+        app = self._make_app(mocker)
+        mocker.patch("app.get_foreground_app", return_value=("EXCEL.EXE", "Sheet1"))
+        mocker.patch("app.get_cursor_position", return_value=(100, 100))
+        mocker.patch("app.capture_all_screens", return_value=[mocker.MagicMock()])
+
+        app._handle_press()
+        if app._capture_thread is not None:
+            app._capture_thread.join(timeout=2.0)
+
+        # Any hide_spinner call proves the defensive clear fired.
+        app._overlay.hide_spinner.assert_called()
+
+    def test_hide_spinner_slot_forwards_to_overlay(self, mocker):
+        """sig_hide_spinner slot must delegate to overlay.hide_spinner."""
+        app = self._make_app(mocker)
+        app._on_hide_spinner()
+        app._overlay.hide_spinner.assert_called_once()
+
     def test_press_handler_plays_listening_chime(self, mocker):
         """Path A Task 11: _handle_press plays a short chime the moment the
         hotkey goes down so the user has immediate feedback 'mic is hot, keep
