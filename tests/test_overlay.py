@@ -338,3 +338,54 @@ class TestOverlayControllerLifecycle:
                 f"overlay for {overlay.screen_name} did not re-apply clickthrough "
                 f"after show_after_capture() -- Qt may have reset ex-styles"
             )
+
+
+# --- Path A Task 8: Bezier flight arc math ----------------------------------
+
+class TestBezierFlightMath:
+    """Tests for the pure math helpers driving the quadratic Bezier flight arc.
+
+    Ported from farzaa/clicky leanring-buddy/OverlayWindow.swift:491-568.
+    Deviation: no tangent rotation (our cursor is a tip-anchored polygon,
+    keep the tip pointing at the target throughout flight).
+    """
+
+    def test_bezier_position_at_endpoints(self):
+        """B(0) == P0 and B(1) == P2 regardless of control point P1."""
+        from overlay import _bezier_position
+        start = _bezier_position(0.0, (100, 100), (200, 50), (300, 100))
+        end = _bezier_position(1.0, (100, 100), (200, 50), (300, 100))
+        assert start == (100.0, 100.0)
+        assert end == (300.0, 100.0)
+
+    def test_bezier_position_at_midpoint(self):
+        """B(0.5) = 0.25·P0 + 0.5·P1 + 0.25·P2. With a control point lifted
+        upward, the midpoint lands above the straight line — that's the arc."""
+        from overlay import _bezier_position
+        x, y = _bezier_position(0.5, (0, 0), (100, 50), (200, 0))
+        assert abs(x - 100.0) < 1e-6
+        # 0.25*0 + 0.5*50 + 0.25*0 = 25
+        assert abs(y - 25.0) < 1e-6
+
+    def test_smoothstep_boundaries_and_midpoint(self):
+        """smoothstep: 3t²-2t³. At 0, 0.5, 1 → 0, 0.5, 1."""
+        from overlay import _smoothstep
+        assert _smoothstep(0.0) == 0.0
+        assert _smoothstep(1.0) == 1.0
+        assert abs(_smoothstep(0.5) - 0.5) < 1e-6
+
+    def test_flight_duration_clamped_to_range(self):
+        """Distance-scaled duration: distance/800 s, clamped to [0.6, 1.4]."""
+        from overlay import _flight_duration_s
+        assert _flight_duration_s(0) == 0.6       # min clamp
+        assert _flight_duration_s(400) == 0.6     # 400/800=0.5 → 0.6
+        assert _flight_duration_s(800) == 1.0     # midrange
+        assert _flight_duration_s(1120) == 1.4    # 1120/800=1.4 (at top)
+        assert _flight_duration_s(2000) == 1.4    # max clamp
+
+    def test_scale_pulse_peaks_at_midpoint(self):
+        """Scale pulse: 1.0 → 1.3 at linear_t=0.5 → 1.0 at linear_t=1."""
+        from overlay import _scale_pulse
+        assert abs(_scale_pulse(0.0) - 1.0) < 1e-6
+        assert abs(_scale_pulse(0.5) - 1.3) < 1e-6
+        assert abs(_scale_pulse(1.0) - 1.0) < 1e-6

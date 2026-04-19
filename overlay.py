@@ -34,18 +34,17 @@ Top-to-bottom order (so `python -m overlay` works):
 from __future__ import annotations
 
 import ctypes
+import math
 from itertools import cycle
 
 from enum import Enum, auto
 
 from PyQt6.QtCore import (
-    QEasingCurve,
     QPoint,
     QPointF,
-    QPropertyAnimation,
     QTimer,
+    QVariantAnimation,
     Qt,
-    pyqtProperty,
 )
 from PyQt6.QtGui import QColor, QCursor, QGuiApplication, QPainter, QPen, QPolygonF, QScreen
 from PyQt6.QtWidgets import QWidget
@@ -55,6 +54,45 @@ class _OverlayState(Enum):
     IDLE = auto()
     POINTING = auto()
     HIDDEN = auto()
+
+
+# --- Path A Task 8: Quadratic bezier flight arc math -------------------------
+#
+# Ports farzaa/clicky leanring-buddy/OverlayWindow.swift:491-568 with ONE
+# deliberate deviation: no tangent rotation. Our cursor is a tip-anchored
+# polygon (commit a775c55 replaced ball with cursor polygon) — the tip IS
+# the pointer, so we keep it pointing at the target throughout flight
+# instead of rotating along the tangent like Clicky's isosceles triangle.
+
+def _bezier_position(
+    t: float,
+    p0: tuple[float, float],
+    p1: tuple[float, float],
+    p2: tuple[float, float],
+) -> tuple[float, float]:
+    """Quadratic Bezier: B(t) = (1-t)²·P0 + 2(1-t)t·P1 + t²·P2."""
+    one_minus = 1.0 - t
+    x = one_minus * one_minus * p0[0] + 2.0 * one_minus * t * p1[0] + t * t * p2[0]
+    y = one_minus * one_minus * p0[1] + 2.0 * one_minus * t * p1[1] + t * t * p2[1]
+    return (x, y)
+
+
+def _smoothstep(t: float) -> float:
+    """Hermite smoothstep: 3t² - 2t³. Eases in and out for natural motion."""
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _flight_duration_s(distance_px: float) -> float:
+    """Distance-scaled flight duration, clamped to [0.6s, 1.4s].
+    Ports OverlayWindow.swift:509."""
+    return max(0.6, min(distance_px / 800.0, 1.4))
+
+
+def _scale_pulse(linear_t: float) -> float:
+    """Sine scale pulse: 1.0 at endpoints → 1.3 at midpoint. Not eased —
+    runs on LINEAR progress (not smoothstep'd) so the peak lands dead-center.
+    Ports OverlayWindow.swift:567."""
+    return 1.0 + math.sin(linear_t * math.pi) * 0.3
 
 # --- Cursor polygon shape ----------------------------------------------------
 
@@ -300,18 +338,29 @@ class OverlayWindow(QWidget):
         self._pointer_pos = QPoint(0, 0)
         self._pointer_visible = False
 
-        # QPropertyAnimation drives the pointer via the pointerPos property.
-        # 400ms linear matches config.POINTER_ANIMATION_MS. Bezier easing
-        # is Phase 2 polish (see DECISIONS.md).
-        self._animation = QPropertyAnimation(self, b"pointerPos")
-        self._animation.setDuration(300)
-        self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        # Bezier flight animation (Path A Task 8). Replaces the old linear
+        # QPropertyAnimation with Farza's quadratic-bezier-arc + smoothstep +
+        # scale-pulse. Port of OverlayWindow.swift:491-568 (no tangent rotation
+        # — our cursor is tip-anchored; the tip stays on target through flight).
+        self._flight_anim = QVariantAnimation(self)
+        self._flight_anim.setStartValue(0.0)
+        self._flight_anim.setEndValue(1.0)
+        self._flight_anim.valueChanged.connect(self._on_flight_value)
+        self._flight_p0: tuple[float, float] = (0.0, 0.0)
+        self._flight_p1: tuple[float, float] = (0.0, 0.0)
+        self._flight_p2: tuple[float, float] = (0.0, 0.0)
+        self._flight_scale: float = 1.0
 
     def paintEvent(self, _event) -> None:
         """Draw a blue arrow cursor polygon at the current pointer position.
 
         The tip vertex (0,0 in _CURSOR_VERTICES) is anchored at pointer_pos
         so point_at(x,y) puts the tip exactly on the target UI element.
+
+        During FLYING state, self._flight_scale rises to 1.3 at mid-flight and
+        returns to 1.0 on landing. We scale around the tip so the tip keeps
+        tracking the Bezier curve position exactly (scale around any other
+        point would drift the tip).
         """
         if not self._pointer_visible:
             return
@@ -324,6 +373,15 @@ class OverlayWindow(QWidget):
         painter.setBrush(QColor(30, 144, 255, 35))
         painter.drawEllipse(QPointF(px + 5, py + 10), 22, 22)
 
+        # Apply mid-flight scale pulse around the tip (0, 0 in cursor space).
+        # painter.translate + scale + translate is standard Qt pattern for
+        # scaling around a specific point.
+        if self._flight_scale != 1.0:
+            painter.save()
+            painter.translate(float(px), float(py))
+            painter.scale(self._flight_scale, self._flight_scale)
+            painter.translate(-float(px), -float(py))
+
         # Cursor polygon
         painter.setBrush(QColor(30, 144, 255, 200))  # dodger blue, more opaque
         painter.setPen(QPen(QColor(40, 40, 40, 100), 1))
@@ -332,29 +390,68 @@ class OverlayWindow(QWidget):
         ])
         painter.drawPolygon(poly)
 
+        if self._flight_scale != 1.0:
+            painter.restore()
+
     def animate_pointer_to(self, local_logical_x: int, local_logical_y: int) -> None:
-        """Start a 400ms linear animation from current pointer position to target.
+        """Fly the pointer along a quadratic Bezier arc to (x, y).
+
+        Ports farzaa/clicky OverlayWindow.swift:491-568 verbatim with ONE
+        deliberate deviation: no tangent rotation. Our cursor is a tip-anchored
+        polygon — the tip IS the pointer, so it keeps pointing at the target
+        through flight instead of rotating along the tangent.
+
+        Curve: P0=current pointer, P1=midpoint lifted up by min(dist*0.2, 80px),
+        P2=target. Duration = clamp(distance/800 s, 0.6s, 1.4s). Smoothstep
+        eases progress before bezier interpolation. Scale pulse 1.0→1.3→1.0
+        applied on LINEAR progress (not eased) so the peak lands mid-arc.
 
         Args:
             local_logical_x: within-screen logical DIP x (from physical_to_local_logical)
             local_logical_y: within-screen logical DIP y
         """
-        target = QPoint(local_logical_x, local_logical_y)
-        self._animation.stop()
-        self._animation.setStartValue(self._pointer_pos)
-        self._animation.setEndValue(target)
+        start_x = float(self._pointer_pos.x())
+        start_y = float(self._pointer_pos.y())
+        end_x = float(local_logical_x)
+        end_y = float(local_logical_y)
+        dx, dy = end_x - start_x, end_y - start_y
+        distance = math.hypot(dx, dy)
+
+        mid_x = (start_x + end_x) / 2.0
+        mid_y = (start_y + end_y) / 2.0
+        arc_height = min(distance * 0.2, 80.0)
+
+        self._flight_p0 = (start_x, start_y)
+        self._flight_p1 = (mid_x, mid_y - arc_height)
+        self._flight_p2 = (end_x, end_y)
+
+        duration_ms = int(_flight_duration_s(distance) * 1000.0)
+
+        self._flight_anim.stop()
+        self._flight_anim.setDuration(duration_ms)
+        self._flight_anim.setStartValue(0.0)
+        self._flight_anim.setEndValue(1.0)
         self._pointer_visible = True
-        self._animation.start()
+        self._flight_anim.start()
 
-    # Qt property wiring for QPropertyAnimation
-    def _get_pointer_pos(self) -> QPoint:
-        return self._pointer_pos
+    def _on_flight_value(self, linear_t) -> None:
+        """QVariantAnimation.valueChanged callback: interpolate bezier + pulse.
 
-    def _set_pointer_pos(self, pos: QPoint) -> None:
-        self._pointer_pos = pos
-        self.update()  # trigger a paintEvent
-
-    pointerPos = pyqtProperty(QPoint, _get_pointer_pos, _set_pointer_pos)
+        linear_t is Qt's raw interpolated value 0.0..1.0. We apply smoothstep
+        BEFORE the bezier sample (eased position) but use LINEAR t for the
+        scale pulse (peak lands at true midpoint, not eased midpoint).
+        """
+        t = float(linear_t)
+        eased_t = _smoothstep(t)
+        x, y = _bezier_position(eased_t, self._flight_p0, self._flight_p1, self._flight_p2)
+        self._pointer_pos = QPoint(int(x), int(y))
+        self._flight_scale = _scale_pulse(t)
+        # On completion, snap to P2 and reset scale (defensive — Qt sometimes
+        # emits valueChanged(1.0) slightly early and we want exact landing).
+        if t >= 0.9999:
+            self._pointer_pos = QPoint(int(self._flight_p2[0]), int(self._flight_p2[1]))
+            self._flight_scale = 1.0
+        self.update()
 
     def apply_win32_clickthrough(self) -> None:
         """Apply Win32 ex-styles for click-through. MUST be called after show()."""
@@ -484,12 +581,12 @@ class OverlayController:
         )
         target_overlay._pointer_visible = True
         target_overlay.animate_pointer_to(local_x, local_y)
-        target_overlay._animation.finished.connect(self._on_point_animation_finished)
+        target_overlay._flight_anim.finished.connect(self._on_point_animation_finished)
 
     def _on_point_animation_finished(self) -> None:
         """After arriving at target, dwell 3s then fly back to mouse."""
         if self._pointing_overlay:
-            self._pointing_overlay._animation.finished.disconnect(
+            self._pointing_overlay._flight_anim.finished.disconnect(
                 self._on_point_animation_finished
             )
         QTimer.singleShot(self._DWELL_MS, self._fly_back)
@@ -507,13 +604,13 @@ class OverlayController:
             local.x() + self._FOLLOW_OFFSET_X,
             local.y() + self._FOLLOW_OFFSET_Y,
         )
-        self._pointing_overlay._animation.finished.connect(self._on_return_finished)
+        self._pointing_overlay._flight_anim.finished.connect(self._on_return_finished)
         self._pointing_overlay.animate_pointer_to(target.x(), target.y())
 
     def _on_return_finished(self) -> None:
         """Return flight complete — resume mouse following."""
         if self._pointing_overlay:
-            self._pointing_overlay._animation.finished.disconnect(
+            self._pointing_overlay._flight_anim.finished.disconnect(
                 self._on_return_finished
             )
         self._pointing_overlay = None
@@ -535,10 +632,10 @@ class OverlayController:
     def hide_for_capture(self) -> None:
         """Hide ALL overlays + stop timer for screen capture."""
         self._follow_timer.stop()
-        if self._pointing_overlay and self._pointing_overlay._animation.state() == QPropertyAnimation.State.Running:
-            self._pointing_overlay._animation.stop()
+        if self._pointing_overlay and self._pointing_overlay._flight_anim.state() == QVariantAnimation.State.Running:
+            self._pointing_overlay._flight_anim.stop()
             try:
-                self._pointing_overlay._animation.finished.disconnect()
+                self._pointing_overlay._flight_anim.finished.disconnect()
             except TypeError:
                 pass
         self._state = _OverlayState.HIDDEN
