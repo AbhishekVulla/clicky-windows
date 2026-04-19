@@ -42,6 +42,7 @@ from enum import Enum, auto
 from PyQt6.QtCore import (
     QPoint,
     QPointF,
+    QRectF,
     QTimer,
     QVariantAnimation,
     Qt,
@@ -93,6 +94,55 @@ def _scale_pulse(linear_t: float) -> float:
     runs on LINEAR progress (not smoothstep'd) so the peak lands dead-center.
     Ports OverlayWindow.swift:567."""
     return 1.0 + math.sin(linear_t * math.pi) * 0.3
+
+
+# --- Path A Task 9: Waveform widget (LISTENING state visual) -----------------
+#
+# Ports farzaa/clicky leanring-buddy/OverlayWindow.swift:705-743 verbatim.
+# While PTT is held, the cursor polygon hides and this 5-bar waveform renders
+# at the cursor position. Bar heights are driven by mic RMS (from stt.py
+# Task 7) × a profile curve + an independent sine idle-pulse so bars are
+# never fully flat. Rendered at ~36 fps via QTimer.
+
+_WAVEFORM_BAR_COUNT = 5
+_WAVEFORM_BAR_PROFILE: tuple[float, ...] = (0.4, 0.7, 1.0, 0.7, 0.4)
+"""Per-bar amplitude multiplier. Center bar (idx 2) scales by 1.0 = taller.
+Edges (idx 0, 4) scale by 0.4 = shorter. Matches Clicky's visual rhythm."""
+_WAVEFORM_BASE_HEIGHT = 3.0  # minimum px — bars are never fully flat
+_WAVEFORM_MAX_REACTIVE = 10.0  # max extra px from audio-driven component
+_WAVEFORM_IDLE_PULSE_AMP = 1.5  # max extra px from independent sine pulse
+
+
+def _waveform_bar_height(bar_index: int, audio_level: float, phase_seconds: float) -> float:
+    """Compute a single bar's height in px.
+
+    Formula (port of OverlayWindow.swift:728-740):
+        normalized = max(audio_level - 0.008, 0)
+        eased = (min(normalized * 2.85, 1))^0.76
+        reactive = eased * 10 * profile[bar_index]
+        idle_pulse = (sin(phase * 3.6 + bar_index * 0.35) + 1) / 2 * 1.5
+        height = 3 + reactive + idle_pulse
+
+    - The 0.008 dead zone prevents flickering on near-silent chunks.
+    - The 2.85× boost + 0.76 power curve make quiet speech visually punchy
+      without saturating on loud speech.
+    - The per-bar phase offset (0.35 rad) gives a subtle wave pattern even
+      at silence.
+
+    Args:
+        bar_index: 0..4. Must be within _WAVEFORM_BAR_PROFILE bounds.
+        audio_level: RMS-derived level in [0, 1] (from stt.py's on_audio_level).
+        phase_seconds: elapsed time since widget startup (drives the idle pulse).
+
+    Returns:
+        Bar height in pixels, in range ~[3, 14.5].
+    """
+    normalized_level = max(audio_level - 0.008, 0.0)
+    eased = pow(min(normalized_level * 2.85, 1.0), 0.76)
+    reactive = eased * _WAVEFORM_MAX_REACTIVE * _WAVEFORM_BAR_PROFILE[bar_index]
+    animation_phase = phase_seconds * 3.6 + bar_index * 0.35
+    idle_pulse = (math.sin(animation_phase) + 1.0) / 2.0 * _WAVEFORM_IDLE_PULSE_AMP
+    return _WAVEFORM_BASE_HEIGHT + reactive + idle_pulse
 
 # --- Cursor polygon shape ----------------------------------------------------
 
@@ -458,6 +508,103 @@ class OverlayWindow(QWidget):
         hwnd = int(self.winId())
         apply_clickthrough_styles(hwnd)
 
+    # --- Waveform widget integration (Path A Task 9) ---------------------
+
+    def show_waveform(self, logical_x: float, logical_y: float) -> None:
+        """Show the 5-bar waveform at the given logical position and hide the
+        cursor polygon (LISTENING state: waveform REPLACES cursor, per
+        Clicky-verbatim behavior — user chose 'Ship A first' via AskUserQuestion)."""
+        if getattr(self, "_waveform_widget", None) is None:
+            self._waveform_widget = WaveformWidget(self)
+        # Position widget centered on the given point.
+        self._waveform_widget.move(
+            int(logical_x - WaveformWidget.WIDGET_WIDTH // 2),
+            int(logical_y - WaveformWidget.WIDGET_HEIGHT // 2),
+        )
+        self._waveform_widget.show()
+        self._waveform_visible = True
+        self.update()
+
+    def hide_waveform(self) -> None:
+        """Hide waveform + restore cursor polygon."""
+        if getattr(self, "_waveform_widget", None) is not None:
+            self._waveform_widget.hide()
+        self._waveform_visible = False
+        self.update()
+
+    def set_audio_level(self, level: float) -> None:
+        """Forward audio level to the waveform widget (no-op if not shown yet)."""
+        if getattr(self, "_waveform_widget", None) is not None:
+            self._waveform_widget.set_audio_level(level)
+
+
+# --- Waveform widget -----------------------------------------------------------
+
+class WaveformWidget(QWidget):
+    """5-bar audio-level waveform rendered via QPainter at ~36 fps.
+
+    Ports farzaa/clicky leanring-buddy/OverlayWindow.swift:705-743. During
+    PTT hold, this widget shows at the cursor position (OverlayWindow hides
+    the cursor polygon). Bar heights come from _waveform_bar_height() using
+    the RMS level set via set_audio_level() + an independent idle-pulse sine
+    so bars are never fully flat.
+
+    Thread safety: set_audio_level may be called from any thread (it just
+    assigns a float). The timer-driven update() runs on the Qt main thread.
+    Rendering runs on the main thread via paintEvent.
+    """
+
+    BAR_WIDTH = 2
+    BAR_SPACING = 2
+    WIDGET_HEIGHT = 18  # px — slightly taller than cursor for visibility
+    WIDGET_WIDTH = _WAVEFORM_BAR_COUNT * BAR_WIDTH + (_WAVEFORM_BAR_COUNT - 1) * BAR_SPACING  # = 18
+    UPDATE_INTERVAL_MS = 28  # ~36 fps, matches Farza's 1/36s cadence
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(self.WIDGET_WIDTH, self.WIDGET_HEIGHT)
+        # Transparent bg + mouse-transparent (clicks pass through to apps below).
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+
+        self._audio_level: float = 0.0
+        import time as _t
+        self._phase_start = _t.time()
+
+        self._tick_timer = QTimer(self)
+        self._tick_timer.timeout.connect(self._tick)
+        self._tick_timer.start(self.UPDATE_INTERVAL_MS)
+
+    def set_audio_level(self, level: float) -> None:
+        """Update live audio level (called from app.py via pyqtSignal)."""
+        self._audio_level = max(0.0, min(float(level), 1.0))
+
+    def _tick(self) -> None:
+        """Trigger a repaint on each timer tick — bars redraw at ~36 fps."""
+        self.update()
+
+    def paintEvent(self, _event) -> None:
+        """Draw the 5 vertical bars centered vertically in the widget."""
+        from PyQt6.QtCore import QRectF as _QRectF  # local import: type only used here
+        import time as _t
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        # Same dodger blue as cursor polygon
+        painter.setBrush(QColor(30, 144, 255, 220))
+
+        phase = _t.time() - self._phase_start
+        for i in range(_WAVEFORM_BAR_COUNT):
+            bar_h = _waveform_bar_height(i, self._audio_level, phase)
+            x = i * (self.BAR_WIDTH + self.BAR_SPACING)
+            y = (self.WIDGET_HEIGHT - bar_h) / 2.0
+            painter.drawRoundedRect(
+                _QRectF(float(x), float(y), float(self.BAR_WIDTH), float(bar_h)),
+                1.5, 1.5,
+            )
+
 
 # --- Controller --------------------------------------------------------------
 
@@ -651,6 +798,34 @@ class OverlayController:
         self._pointing_overlay = None
         self._state = _OverlayState.IDLE
         self._follow_timer.start()
+
+    # --- Waveform delegation (Path A Task 9 — called by app.py state machine)
+
+    def show_waveform(self, physical_x: int, physical_y: int, monitor: dict) -> None:
+        """Route to the right OverlayWindow and show the waveform at the
+        cursor position. app.py calls this on hotkey PRESS."""
+        screens = QGuiApplication.screens()
+        target_screen = screen_for_monitor(monitor, screens)
+        target_overlay = self._overlay_for_screen(target_screen)
+        if target_overlay is None and self.overlays:
+            target_overlay = self.overlays[0]
+        if target_overlay is None:
+            return
+        local_x, local_y = physical_to_local_logical(physical_x, physical_y, target_screen)
+        target_overlay.show_waveform(local_x, local_y)
+
+    def hide_waveform(self) -> None:
+        """Hide waveform on all overlays. app.py calls this on hotkey RELEASE."""
+        for overlay in self.overlays:
+            # Real OverlayWindow exposes hide_waveform. Mocks in tests may not.
+            if hasattr(overlay, "hide_waveform"):
+                overlay.hide_waveform()
+
+    def set_audio_level(self, level: float) -> None:
+        """Forward audio level to ALL overlays (only the showing one renders)."""
+        for overlay in self.overlays:
+            if hasattr(overlay, "set_audio_level"):
+                overlay.set_audio_level(level)
 
 
 # --- Manual verification entry point ----------------------------------------

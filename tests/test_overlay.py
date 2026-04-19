@@ -389,3 +389,50 @@ class TestBezierFlightMath:
         assert abs(_scale_pulse(0.0) - 1.0) < 1e-6
         assert abs(_scale_pulse(0.5) - 1.3) < 1e-6
         assert abs(_scale_pulse(1.0) - 1.0) < 1e-6
+
+
+# --- Path A Task 9: Waveform widget math -------------------------------------
+
+class TestWaveformBarHeight:
+    """Tests for _waveform_bar_height — ports farzaa/clicky
+    leanring-buddy/OverlayWindow.swift:728-740 verbatim.
+
+    Bar height = base (3) + reactive (audio-driven) + idle_pulse (sine).
+    Profile [0.4, 0.7, 1.0, 0.7, 0.4] makes the center bar tallest.
+    """
+
+    def test_center_bar_taller_than_edges_at_same_level(self):
+        """Center bar (index 2) has profile 1.0, edges (0, 4) have 0.4.
+        At the same audio level and phase, center must be visibly taller."""
+        from overlay import _waveform_bar_height
+        h_left = _waveform_bar_height(bar_index=0, audio_level=0.5, phase_seconds=0.0)
+        h_center = _waveform_bar_height(bar_index=2, audio_level=0.5, phase_seconds=0.0)
+        h_right = _waveform_bar_height(bar_index=4, audio_level=0.5, phase_seconds=0.0)
+        assert h_center > h_left, f"Center {h_center:.2f} not > left edge {h_left:.2f}"
+        assert h_center > h_right, f"Center {h_center:.2f} not > right edge {h_right:.2f}"
+
+    def test_bars_still_visible_at_silence(self):
+        """At audio_level=0, the idle pulse keeps bars visible (never fully flat).
+        Base height 3 + idle pulse 0-3 → range approximately [3, 6]."""
+        from overlay import _waveform_bar_height
+        # Sample a few bar-index/phase combinations.
+        heights = [
+            _waveform_bar_height(bar_index=i, audio_level=0.0, phase_seconds=t)
+            for i in range(5) for t in (0.0, 0.5, 1.0, 1.5, 2.0)
+        ]
+        assert all(h >= 3.0 for h in heights), (
+            f"Some idle heights dropped below base 3px: min={min(heights):.2f}"
+        )
+        assert all(h <= 6.5 for h in heights), (
+            f"Some idle heights exceeded ~6px ceiling: max={max(heights):.2f}"
+        )
+
+    def test_bar_height_increases_with_audio_level(self):
+        """For a fixed bar index + phase, raising audio_level must raise height."""
+        from overlay import _waveform_bar_height
+        h_quiet = _waveform_bar_height(bar_index=2, audio_level=0.1, phase_seconds=0.0)
+        h_loud = _waveform_bar_height(bar_index=2, audio_level=0.9, phase_seconds=0.0)
+        assert h_loud > h_quiet, (
+            f"Louder level should produce taller bar, got quiet={h_quiet:.2f} "
+            f"vs loud={h_loud:.2f}"
+        )
