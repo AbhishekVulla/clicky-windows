@@ -137,6 +137,19 @@ AUDIO_CHUNK_FRAMES: int = 1024
 AVAudioEngine.installTap(onBus:0, bufferSize:1024) exactly so the streaming
 WebSocket payload shape is identical for Phase 2 provider swaps."""
 
+# ── Audio level (RMS) filter — drives the waveform widget ──────────────────
+
+AUDIO_POWER_BOOST: float = 10.2
+"""Multiplier applied to per-chunk RMS before clamping to [0, 1]. Tuned to
+make normal speech register ~0.4-0.8 on the waveform. Matches Farza's
+leanring-buddy/BuddyDictationManager.swift:687-721 verbatim."""
+
+AUDIO_POWER_DECAY: float = 0.72
+"""Exponential decay floor between chunks: smoothed = max(raw, old * 0.72).
+Prevents the UI waveform from jumping DOWN sharply at natural speech pauses —
+makes the meter feel responsive to loud sounds but stable at quiet ones.
+Matches Farza's implementation."""
+
 
 # ── TTS (Cartesia Sonic-3 WebSocket streaming) ──────────────────────────────
 

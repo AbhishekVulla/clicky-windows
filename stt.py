@@ -191,6 +191,12 @@ class AssemblyAIStreamingSTT(STT):
         # decay doesn't leak into the next PTT's transcript.
         self._tts_grace_until: float = 0.0
 
+        # Audio-level (RMS) signal for the waveform widget (Path A Task 7).
+        # Runs on every chunk — even during grace period — because the UI
+        # waveform should continue showing mic activity.
+        self._audio_level_cb: Callable[[float], None] | None = None
+        self._last_audio_level: float = 0.0
+
     # -- DI factory defaults --------------------------------------------------
 
     @staticmethod
@@ -406,6 +412,21 @@ class AssemblyAIStreamingSTT(STT):
         for the thread-safety contract."""
         self._partial_cb = callback
 
+    def on_audio_level(self, callback: Callable[[float], None]) -> None:
+        """Register a callback fired once per audio chunk with RMS level in [0, 1].
+
+        Level = sqrt(mean(samples²)) × AUDIO_POWER_BOOST, clamped to [0, 1],
+        then smoothed via a decay filter (max(raw, last × AUDIO_POWER_DECAY))
+        so the UI meter doesn't jump down sharply at natural speech pauses.
+
+        Thread safety: the callback runs on the sounddevice portaudio callback
+        thread, NOT the Qt main thread. Callers that touch Qt must marshal via
+        pyqtSignal (see Invariant #9). Must be fast + must not raise — the
+        callback is wrapped in a try/except that swallows exceptions to protect
+        the audio-input thread.
+        """
+        self._audio_level_cb = callback
+
     def set_tts_grace_until(self, epoch_ts: float) -> None:
         """Mic chunks before ``epoch_ts`` are discarded — used after ``tts.stop()``.
 
@@ -428,7 +449,32 @@ class AssemblyAIStreamingSTT(STT):
         TTS-to-mic feedback protection (Path A Task 2): chunks received
         before self._tts_grace_until are dropped so speaker decay after
         tts.stop() doesn't leak into the next PTT's transcript.
+
+        Audio-level signal (Path A Task 7): RMS is computed + emitted via
+        self._audio_level_cb on every chunk, BEFORE the recording / grace
+        checks. The UI waveform should keep showing mic activity even when
+        we're not recording or we're in grace (otherwise the bars freeze
+        mid-utterance which looks broken).
         """
+        # Audio-level signal for the waveform widget — runs on every chunk.
+        if self._audio_level_cb is not None and indata is not None:
+            try:
+                import numpy as _np
+                from config import AUDIO_POWER_BOOST, AUDIO_POWER_DECAY
+                samples = _np.frombuffer(bytes(indata), dtype=_np.int16).astype(_np.float32) / 32768.0
+                if samples.size > 0:
+                    rms = float(_np.sqrt(_np.mean(samples * samples)))
+                    raw_level = min(max(rms * AUDIO_POWER_BOOST, 0.0), 1.0)
+                    smoothed = max(raw_level, self._last_audio_level * AUDIO_POWER_DECAY)
+                    self._last_audio_level = smoothed
+                    try:
+                        self._audio_level_cb(smoothed)
+                    except Exception:
+                        # Callback errors must NEVER crash the audio thread.
+                        pass
+            except Exception:
+                pass
+
         if not self._recording:
             return
         # TTS-to-mic grace: app.py sets a 200ms window after every tts.stop().

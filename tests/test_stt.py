@@ -234,6 +234,53 @@ class TestAssemblyAIStreamingSTT:
         # Original error should be chained for debugging.
         assert isinstance(exc_info.value.__cause__, ConnectionError)
 
+    def test_on_audio_chunk_computes_rms_and_calls_level_callback(self):
+        """Path A Task 7: each audio chunk must compute RMS and emit via the
+        registered on_audio_level callback. Drives the waveform widget."""
+        import struct
+        stt_obj, _, _, _, _ = self._make_stt()
+        stt_obj.connect()
+        stt_obj.start_recording()
+
+        received: list = []
+        stt_obj.on_audio_level(received.append)
+
+        # 1024-frame int16 PCM buffer with known amplitude (0.5 of int16 max)
+        samples = [int(0.5 * 32767)] * 1024
+        pcm_bytes = struct.pack("<" + "h" * 1024, *samples)
+
+        stt_obj._on_audio_chunk(pcm_bytes, 1024, None, None)
+
+        assert len(received) == 1, (
+            f"Expected 1 level emission per chunk, got {len(received)}"
+        )
+        assert 0.0 < received[0] <= 1.0, (
+            f"Level must be clamped to (0, 1], got {received[0]}"
+        )
+
+    def test_audio_level_decay_filter_prevents_sudden_drops(self):
+        """Level must never drop faster than AUDIO_POWER_DECAY between chunks
+        (smoother waveform, no jitter during natural speech pauses)."""
+        import struct
+        from config import AUDIO_POWER_DECAY
+        stt_obj, _, _, _, _ = self._make_stt()
+        stt_obj.connect()
+        stt_obj.start_recording()
+
+        received: list = []
+        stt_obj.on_audio_level(received.append)
+
+        loud = struct.pack("<" + "h" * 1024, *([int(0.8 * 32767)] * 1024))
+        silent = b"\x00" * 2048
+
+        stt_obj._on_audio_chunk(loud, 1024, None, None)
+        stt_obj._on_audio_chunk(silent, 1024, None, None)
+
+        assert received[1] >= received[0] * AUDIO_POWER_DECAY * 0.95, (
+            f"Level dropped too fast: {received[0]} → {received[1]}, "
+            f"expected floor of {received[0] * AUDIO_POWER_DECAY:.3f}"
+        )
+
     def test_set_tts_grace_until_blocks_mic_chunks(self):
         """set_tts_grace_until(t) must drop mic chunks until time.time() >= t.
 
