@@ -127,7 +127,7 @@ Clicky Windows/
 ├── app.py              ← Qt main orchestrator + PTT pipeline + debug logging
 ├── debug_log.py        ← Per-interaction debug folders (screenshots + timing + coords)
 ├── capture.py          ← screen capture + cursor + DPI + aspect-ratio resize + multi-screen
-├── ai.py               ← AIClient abstract + AnthropicClient (plain vision + [POINT] regex)
+├── ai.py               ← AIClient abstract + AnthropicClient + GeminiClient + create_ai_client() factory (dual-SDK routing by MODEL_ID prefix — anthropic/* via anthropic SDK, google/* via openai SDK + OpenRouter OpenAI-compat endpoint)
 ├── overlay.py          ← per-monitor PyQt6 + Win32 click-through + blue cursor polygon
 ├── stt.py              ← STT abstract + AssemblyAIStreamingSTT (u3-rt-pro + ForceEndpoint)
 ├── tts.py              ← TTS abstract + CartesiaSonicTTS (Sonic-3 streaming via iter_bytes())
@@ -173,6 +173,7 @@ Clicky Windows/
 ## Dependencies (Phase 1)
 ```
 anthropic        # Claude SDK — plain vision messages.stream(). Supports OpenRouter via ANTHROPIC_BASE_URL env var
+openai           # OpenRouter OpenAI-compat endpoint for Gemini + future providers (GeminiClient subclass, 2026-04-19 Phase 1.5 Step 1)
 mss              # Multi-monitor DPI-aware screen capture
 PyQt6            # Transparent per-monitor overlay + QPropertyAnimation
 pynput           # Global hotkey (Listener suppress=False observe-only)

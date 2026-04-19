@@ -803,4 +803,91 @@ Router is `ai.create_ai_client(model_id, api_key)` — prefix-based dispatch. ap
 
 ---
 
+## 2026-04-19 (late evening): Head-to-head Claude vs Gemini on identical PTT workload — final latency data
+
+**Context.** Earlier 2026-04-19 evening entry reverted default from Gemini back to Claude based on coordinate-accuracy testing via `py -3.13 -m ai`. User wanted second data point: run the EXACT same PTT question ("how do I make my repo public") through the full orchestrator (`py -3.13 -m app`) with BOTH models on the SAME GitHub page, compare full-pipeline debug logs.
+
+**Measurement (both runs are real PTT interactions on the same Chrome tab on the same GitHub repo, same user utterance):**
+
+| Stage | Gemini 2.5 Flash (session 2026-04-19_06-08-32) | Claude Sonnet 4.6 (session 2026-04-19_06-18-30) |
+|---|---|---|
+| STT stop_recording finalization | 302ms | 376ms |
+| Screen capture (hide overlay + mss.grab + resize) | 503ms | 238ms |
+| Memory recall | 2ms | 2ms |
+| **LLM streaming stage** | **3768ms** | **3655ms** |
+| TTS dispatch | ~15ms | ~15ms |
+| **Total pipeline** | **4669ms** | **4325ms (340ms FASTER)** |
+| Coordinate returned | `(721, 215)` labeled "settings tab" | `(934, 184)` labeled "settings tab" |
+| Coordinate accuracy (ground truth: Settings gear icon at ~(950, 138) in 1280×800 image) | **~230px horizontal miss, marker in empty space between Issues and Pull Requests tabs** | **Bullseye — marker directly on the Settings gear icon** |
+| Response length | 242 chars | 123 chars |
+
+**Decision.** Phase 1.5 Step 1 is CLOSED. Claude Sonnet 4.6 is the default. Gemini infrastructure (GeminiClient + factory + dual-SDK routing) stays — it was the right architectural bet even if this specific model is the wrong default. Gemini 2.5 Flash is available as opt-in via `MODEL_ID=google/gemini-2.5-flash` in `.env` for users who prioritize latency over precision.
+
+**Why this is final (not re-opened):**
+- Real-world OpenRouter latency variance (±400ms per run across network + model load + queue) completely swamps Gemini's theoretical TTFT advantage. Claude was 340ms FASTER on this single A/B — that's noise-level.
+- Coordinate precision gap is NOT noise. Gemini's 230px miss on the Settings tab is a categorical failure for a pointing-at-UI-elements product.
+- Option 3 (Gemini-specific prompt engineering with bounds rules + anti-normalized instruction + few-shot bottom-of-screen example) was planned but skipped — if Gemini has no latency edge, no prompt fix on accuracy is worth the effort vs Path A parallelism.
+
+**Consequences:**
+- `.env` MODEL_ID stays `anthropic/claude-sonnet-4-6`
+- 8 commits (`6ee8f3f`..`a4520ec`) pushed to origin/main 2026-04-19 late evening — GeminiClient + factory + dual-SDK routing + 138/138 tests + full docs trail. Infrastructure is load-bearing for future provider drops (Grok, Llama, Gemini-when-fixed).
+- Phase 1.5 Step 2 (Path A parallelism) becomes THE primary latency vector, with Claude preserved (no precision tax). Target: 5-9s → ~2s via capture-at-press, prefix caching, STT cutoff fix, TTS-to-mic feedback fix, memory reduction.
+- Lesson logged: **head-to-head A/B on identical real workload beats isolated live-gate runs.** The ai.py-only tests showed Gemini might work in ideal conditions. The full-orchestrator A/B on the same workload shows Gemini loses on BOTH latency and accuracy. Always test the real pipeline, not isolated components.
+
+**References:**
+- Debug logs: `~/.clicky-windows/debug/2026-04-19_06-08-32_chrome.exe/` (Gemini) and `~/.clicky-windows/debug/2026-04-19_06-18-30_chrome.exe/` (Claude) — both have `screenshot_with_marker.jpg` showing the coordinate placement.
+- Earlier evening entry supersedes: Gemini 2.5/3 rejected as default on ai.py-only testing
+- This entry finalizes: head-to-head confirms the rejection with stronger data
+
+---
+
+## 2026-04-19 (late evening): Competitive landscape + "don't fork" strategic decision
+
+**Context.** User asked brutally-honest question: "Why am I building from scratch instead of forking an existing Clicky clone that already supports Windows + Linux?" Research agent did exhaustive GitHub fork-tree + web search pass. Found 12+ Clicky clones shipped in the 12 days since Farza open-sourced macOS Clicky on 2026-04-07. Space is saturating fast. Strategic decision needed: fork one, or continue current Python/PyQt6 implementation.
+
+**Clones found (12 significant, ranked by fork-worthiness):**
+
+**Tier 1 — serious candidates:**
+1. **`tornikegomareli/clicky-desktop`** — Rust + Raylib, 8 ⭐, MIT, Linux + Windows binaries shipped, CI, active (last commit 2026-04-11). **~90% feature parity with our Phase 1.** BUT `computer_use.rs` header reads *"Ported from ElementLocationDetector.swift:1-335"* — **the exact dead code our DECISIONS.md 2026-04-12 e3 research-pass caught.** Zero tests. No persistent memory.
+2. **`tekram/clicky-windows`** — TypeScript/Electron/React, 26 ⭐, MIT, Windows only, actively developed (3 days ago). **Shipped installer (Squirrel), 3 STT providers (AssemblyAI + OpenAI Whisper + whisper.cpp local), 3 TTS providers (ElevenLabs + OpenAI + Windows SAPI), OpenRouter 300+ models, HIPAA mode (all-local processing).** THE Windows Clicky a non-tech user finds first today. Missing: persistent memory.
+3. **`mo-tunn/OpenGuider`** — JS/Electron, 66 ⭐, Apache 2.0, Windows + macOS + Linux installers. Claude + OpenAI + Gemini + Groq + OpenRouter + Ollama. Structured task-planner (trili.ai-style). Missing: persistent memory.
+
+**Tier 2 — Windows clones less mature:**
+4-10: `shreshth-s/clicky-windows` (C#/WPF, 11 ⭐), `Arnie936/zippy-windows` (C#/WinForms "Zippy", 28 ⭐), `NReyes22/clicky-windows` (C#, 2 ⭐), `CONFUZ3/ClickyWindows` (C#, 4 ⭐), `jvaught01/flicky` (Electron, 7 ⭐), `annasba07/clicky-windows` (Rust incomplete, 0 ⭐), `JaySmith502/clicky-win` (Python+uv, 3 ⭐ — **closest Python cousin, has per-app static knowledge-base injection but NOT learned persistent memory**).
+
+**Tier 3 — adjacent:**
+11. `danpeg/clicky` — macOS proactive-tutor fork, 86 ⭐ (highest-star fork of any kind).
+12. `rishabhsai/glance` — UIA structured screen library (Phase 2 reference).
+13. `mediar-ai/terminator` — Rust UIA cross-platform library (Phase 2 accessibility upgrade).
+
+**Decision: Do NOT fork. Continue current Python/PyQt6 implementation.**
+
+**Alternatives considered:**
+1. **Fork `tornikegomareli/clicky-desktop`** (Rust, Linux+Windows). ✓ Cross-platform, shipped binaries, feature-complete. ✗ **Requires full Rust rewrite** (zero Rust in current codebase), ✗ **inherits the ElementLocationDetector dead-code port** we caught and corrected, ✗ **zero tests** (we'd lose our 138-test safety net), ✗ **still needs persistent memory built from scratch**. Net cost: ~3-4 weeks of work to return to current state minus test coverage.
+2. **Fork `tekram/clicky-windows`** (Electron, Windows). ✓ Shipped installer + BYOK UI + HIPAA + provider abstraction. ✗ **Electron adds 150MB install size** and degrades overlay performance (we care about a transparent click-through always-on-top overlay — Electron is wrong for this). ✗ **No persistent memory** (our differentiator unchanged). ✗ Rewriting architectural pieces in TypeScript is slower than our current Python velocity.
+3. **Fork `mo-tunn/OpenGuider`** (Electron, 3 platforms). ✓ Most provider-agnostic, cross-platform. ✗ Electron drawbacks (as above). ✗ Different UX philosophy (structured planner vs conversational buddy — their ethos is trili.ai, not Clicky). ✗ No persistent memory.
+
+**Why current path won:**
+- Python/PyQt6 is ~30MB install vs Electron's 150MB. Better suited for an always-on overlay.
+- Claude Code has stronger Python fluency than Rust — we iterate faster here.
+- 138 passing tests + DECISIONS.md discipline + research-pass habit are engineering-rigor moats no fork would preserve.
+- The `ElementLocationDetector.swift` dead-code gotcha caught in our 2026-04-12 e3 research pass would be INHERITED by the Rust fork (tornikegomareli ported it verbatim without noticing the dead-code status). We'd be downgrading.
+- **Persistent per-app markdown memory is unclaimed territory.** All 12 clones either have no memory or have static user-curated docs (`JaySmith502/clicky-win`). Our Karpathy-style learned memory is the one "wow" frame nobody else can reproduce.
+
+**Consequences + what MUST happen for this decision to hold:**
+- Phase B section added to ROADMAP.md with explicit parity-gap closures (installer B1, tray B2, OpenRouter UI B4, HIPAA B5, Linux B6). These are EXISTENTIAL for competing with tekram who already has them.
+- **Hard deadline sanity-check:** if a non-tech user googles "clicky windows" today, they find `tekram/clicky-windows` and `tornikegomareli/clicky-desktop` shipped. We must have `Clicky-Windows-Setup.exe` + tray + demo video (B1 + B2 + B3) shipped within ~2-3 weeks or we become invisible. Phase 1.5 Step 2 (Path A parallelism) is one week; B1-B3 is the week after. That's the ~3-week window.
+- Engineering-rigor differentiators (tests, DECISIONS.md trail, research-pass discipline, Boris #5 reviews) are only valuable if we SHIP. Post-Phase-B, we pitch the "unexpected finding" B0 writeup as the public differentiator.
+- Fork conversation reopens ONLY if:
+  - Someone ships persistent memory in a competing clone (our moat falls). Probability moderate-high within 30 days given the clone velocity.
+  - Python-specific wall hits in Phase B (install experience bad, threading contention, PyQt6 reliability on Win 11 24H2). Probability low — nothing in Phase 1 has hit this.
+
+**References:**
+- Research agent full findings (2026-04-19 late evening): 12 clones inspected via `gh api` forks list + line-level source reads on top 3 candidates.
+- GitHub: https://github.com/tornikegomareli/clicky-desktop, https://github.com/tekram/clicky-windows, https://github.com/mo-tunn/OpenGuider
+- Farza upstream Issue #26 (Windows, 18 comments) + #13 (Linux) + #59 (Linux, newer)
+- ROADMAP.md "Competitive landscape snapshot (2026-04-19 research pass)" + Phase B section captures the actionable parity gaps.
+
+---
+
 <!-- Append new decisions below this line. NEVER delete old entries. Format: ## YYYY-MM-DD: Short title → Context → Decision → Alternatives → Why → Consequences → References -->

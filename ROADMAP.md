@@ -132,8 +132,8 @@ Two steps, each standalone-shippable. Ship Step 1 first, measure, then decide if
 
 | Step | Goal | Expected latency win | Status |
 |---|---|---|---|
-| **1** | Swap Claude Sonnet 4.6 → Gemini 3 Flash Preview via OpenRouter | 5-9s → 3-4s (~50% reduction on dominant stage) | 🔄 **Partially done: infrastructure landed, default reverted.** GeminiClient + factory + dual-SDK routing shipped (138/138 tests). Real-world measurement showed ~1s latency savings but ~200px coordinate accuracy loss — not worth the trade-off. Default reverted to Claude. Gemini kept as opt-in alternative via `.env` MODEL_ID. See DECISIONS.md 2026-04-19 (evening) "Gemini 2.5/3 Flash rejected as default". |
-| **2** | Path A parallelism — capture at hotkey PRESS (not release), prefix caching for system prompt, speculative LLM on partial STT transcripts, clear `_final_event` before `force_endpoint()`, 200ms audio grace period after `tts.stop()` | 5-9s → ~2s (primary latency vector now that Step 1 is rejected) | 🟡 **Next sprint — primary latency win.** Step 1 didn't deliver; Path A's fixes are user-visible (capture-at-press saves 200-400ms, STT cutoff fix eliminates rework loops, TTS-to-mic feedback elimination eliminates re-prompts). |
+| **1** | Swap Claude Sonnet 4.6 → Gemini 3 Flash Preview via OpenRouter | 5-9s → 3-4s (hypothesis — REJECTED by measurement) | ✅ **CLOSED — infrastructure shipped, default stays Claude.** GeminiClient + factory + dual-SDK routing shipped and pushed (commits `6ee8f3f`..`a4520ec`, 138/138 tests). **Head-to-head measurement on identical workload ("how do I make my repo public"):** Gemini 2.5 Flash 4669ms total + 230px coordinate miss. Claude Sonnet 4.6 4325ms total (**340ms FASTER**) + 0px miss (bullseye on Settings tab). Gemini has no real-world latency advantage via OpenRouter AND is far less precise. Latency variance through OpenRouter (±400ms per run) completely swamps Gemini's theoretical TTFT edge. `.env` stays on Claude. Gemini kept as opt-in via `MODEL_ID=google/...`. See DECISIONS.md 2026-04-19 (evening) + late-evening entries. |
+| **2** | Path A parallelism — capture at hotkey PRESS (not release), prefix caching for system prompt, speculative LLM on partial STT transcripts, clear `_final_event` before `force_endpoint()`, 200ms audio grace period after `tts.stop()` | 5-9s → ~2s (primary latency vector — Step 1 rejected) | 🟡 **Next sprint — primary latency win + superpowers-ceremony plan pending.** User-visible fixes only (capture-at-press saves 200-400ms, STT cutoff fix eliminates truncation loops, TTS-to-mic feedback elimination eliminates recursive self-prompts). Precision preserved (no LLM swap). Needs deep research pass before coding — Aaron's feedback was surface-level; need to dig into Vapi / Pipecat / LiveKit concrete parallelism patterns. |
 
 ### Step 1 (Gemini 3 Flash swap) — this sprint
 
@@ -164,6 +164,102 @@ Two steps, each standalone-shippable. Ship Step 1 first, measure, then decide if
 1. `py -3.13 -m app` PTT interaction in Excel: hotkey release → first audible word within 2.0 seconds, measured from `~/.clicky-windows/debug/*/interaction.log`.
 2. 3 successful runs in a row without crashing, regression on any Phase 1 acceptance criterion.
 3. All existing 118+ tests still green. New tests for any new code.
+
+---
+
+## Phase B: Ship-to-real-users polish (parity + installer + competitive gaps)
+
+**Why this section exists.** 2026-04-19 competitive research found 12+ Clicky clones shipped in 12 days since Farza open-sourced macOS Clicky. The space is saturating fast. Our engineering rigor + persistent memory are worth nothing if a non-tech user googles "clicky windows" and installs `tekram/clicky-windows` first. These gaps MUST close before the demo video (Step 8) ships, in roughly this order.
+
+**Target window:** 2-3 weeks after Phase 1.5 Step 2 lands.
+
+### B1. PyInstaller bundle + simple installer (REMOVES the #1 barrier — "download 4 tools + edit .env")
+
+- `pyinstaller --onedir --windowed app.py` producing a self-contained folder with bundled Python + all deps (PyQt6, cartesia SDK, assemblyai SDK, anthropic SDK, openai SDK, mss, pynput, sounddevice, numpy, Pillow, python-dotenv).
+- Simple NSIS or Inno Setup installer wrapping the PyInstaller output → `Clicky-Windows-Setup.exe`.
+- First-launch QInputDialog wizard for the 3 API keys (ANTHROPIC_API_KEY, ASSEMBLYAI_API_KEY, CARTESIA_API_KEY) stored in Windows Credential Manager via the `keyring` lib (mirror Grafyn's `settings.rs` migration pattern).
+- Acceptance: double-click `.exe`, enter 3 keys once, hotkey works globally on next launch. Zero terminal required.
+- **Effort:** 3-5 days.
+- **Competitive parity:** tekram/clicky-windows has Squirrel (Electron Forge), tornikegomareli/clicky-desktop has release tarballs, mo-tunn/OpenGuider has full .exe/.dmg. We have NOTHING. This is existential for demo-video adoption.
+
+### B2. System tray icon + minimal settings panel (QUIT without terminal)
+
+- `QSystemTrayIcon` in PyQt6 with 3 menu items: Open Settings, About, Quit.
+- Minimal `QWidget` settings panel: change hotkey (rebindable), change voice (`CARTESIA_VOICE_ID` dropdown), change LLM (`MODEL_ID` — dropdown of tested-known-working options: Claude Sonnet 4.6, Gemini 2.5/3 with a precision-warning), clear memory button (per-app + global nuke).
+- Acceptance: non-tech user can change voice + quit app without touching terminal.
+- **Effort:** 3-5 days.
+- **Competitive parity:** tekram has tray + settings UI. We have stdout + Ctrl+C. Non-tech users won't find how to quit.
+
+### B3. Real demo video showing memory differentiator (THE "wow" moment)
+
+- 30-90 second screen recording. MUST include 2+ sessions of the SAME app with memory landing. Example script:
+  - Session 1 (Monday): "how do I freeze the top row" in Excel → Clicky points at View, voice explains.
+  - Session 2 (Thursday, same Excel workbook): "remind me how to freeze panes?" → Clicky says *"you asked about this Monday — same spot, View → Freeze Panes → Freeze Top Row"* and points.
+- This is the ONE frame no other Clicky clone can reproduce. Memory is the moat.
+- **Effort:** 1 day of recording + editing.
+- **Publish to:** GitHub README, LinkedIn post (mirror Farza's original LinkedIn demo format), X/Twitter.
+
+### B4. OpenRouter UI / provider-swap settings (part of B2 settings panel, listed separately for priority)
+
+- Covered partly by B2 — a Model dropdown in settings reads/writes `MODEL_ID`.
+- Expand to show "custom model" text field for any OpenRouter-supported `provider/model-id`.
+- **Competitive parity:** tekram + mo-tunn let users pick provider. We force `.env` editing.
+
+### B5. HIPAA / offline mode (local STT + TTS fallbacks — feature parity with tekram)
+
+- Subclass drops on existing abstract bases:
+  - `FasterWhisperSTT(STT)` — `faster-whisper` library, offline CT2 Whisper-base, no network.
+  - `Pyttsx3TTS(TTS)` — local Windows SAPI, no network.
+- Settings panel toggle: "Offline mode (local STT + TTS only)" — disables all cloud providers, uses local subclasses. Visual persistent indicator so user knows they're offline.
+- **Effort:** ~1 week.
+- **Competitive parity:** tekram has this (HIPAA mode — whisper.cpp + Windows SAPI). Differentiator for enterprise / healthcare / regulated users.
+
+### B6. Linux port (cross-platform = 3x addressable market)
+
+- `mss` already works on Linux. PyQt6 works on Linux. `pynput` works on Linux (X11 + Wayland).
+- Win32 layered-window ctypes in `overlay.py` is the main Windows-specific piece — replace with Qt-native attribute-based transparency on Linux + compositor hints.
+- Ctypes `GetForegroundWindow` in `app.py` replaced with a `wmctrl` / `xdotool` equivalent.
+- **Effort:** ~1-2 weeks.
+- **Competitive parity:** tornikegomareli/clicky-desktop ships Linux. mo-tunn ships Linux. Farza's Issue #13 + #59 explicitly request Linux. Windows-only story becomes weak if Rust clones continue to dominate cross-platform.
+- **Decision gate:** only start Linux port after B1-B3 ship (installer + tray + demo video). Cross-platform is worthless if nobody can install Windows version first.
+
+### Phase B execution order (commit to this order, don't skip)
+
+1. **B1 installer** — removes the install barrier. Until this ships, you're invisible to 99% of users.
+2. **B3 demo video** — now that install is trivial, show the memory "wow" moment. Requires B1 to be credible ("I can actually try this?" → yes, one click).
+3. **B2 tray + settings** — polish on top of shipped installer. Iteration loop with early users.
+4. **B4 OpenRouter UI** — subset of B2 scope.
+5. **B5 HIPAA / offline** — feature parity with tekram. Unlocks regulated-industry conversations.
+6. **B6 Linux port** — cross-platform. Only if B1-B5 shipped AND there's demonstrable Linux-user demand.
+
+---
+
+## Competitive landscape snapshot (2026-04-19 research pass)
+
+**12+ Clicky clones shipped in 12 days since Farza open-sourced macOS Clicky.** Space is saturating fast. Full findings in DECISIONS.md 2026-04-19 (late evening) "Competitive landscape + don't-fork decision."
+
+**Direct competitors by tier:**
+- **Tier 1 (serious threats):**
+  - `tekram/clicky-windows` — Electron, 26 ⭐, actively developed, **shipped installer, 3 STT providers, 3 TTS providers, OpenRouter 300+ models, HIPAA mode.** Missing: persistent memory.
+  - `tornikegomareli/clicky-desktop` — Rust + Raylib, 8 ⭐, Linux + Windows binaries. Ported the `ElementLocationDetector.swift` dead code we already caught. Zero tests. Missing: persistent memory.
+  - `mo-tunn/OpenGuider` — Electron, 66 ⭐, Windows+Mac+Linux, Claude+OpenAI+Gemini+Groq+OpenRouter+Ollama. Structured tutorial mode (trili.ai-style). Missing: persistent memory.
+- **Tier 2 (lower-threat, single-language Windows clones):**
+  - `shreshth-s/clicky-windows` (C#/WPF, 11 ⭐), `Arnie936/zippy-windows` (C#/WinForms rebranded "Zippy", 28 ⭐), `NReyes22/clicky-windows` (C#, 2 ⭐), `jvaught01/flicky` (Electron, 7 ⭐), `annasba07/clicky-windows` (Rust incomplete, 0 ⭐), `JaySmith502/clicky-win` (Python — **only one with per-app context, but static user-curated docs, not learned memory**).
+- **Tier 3 (adjacent / inspiration):**
+  - `danpeg/clicky` — macOS fork, 86 ⭐, proactive tutor mode (Phase 2 reference).
+  - `rishabhsai/glance` — UIA structured screen understanding library (Phase 2 replacement for pixel coords).
+  - `mediar-ai/terminator` — Rust UIA cross-platform library (Phase 2 accessibility upgrade).
+
+**What no one else has shipped:** Karpathy-style per-app persistent markdown memory (`~/.clicky-windows/memory/<app>.md` + SQLite index). This remains unclaimed territory. **Our moat.**
+
+**What everyone else has that we don't** (now tracked in Phase B above):
+- Installer (B1) — tekram Squirrel, tornikegomareli tarballs, mo-tunn .exe/.dmg
+- Tray icon + settings UI (B2) — tekram
+- OpenRouter UI / provider-swap (B4) — tekram, mo-tunn, jvaught01
+- HIPAA / offline mode (B5) — tekram (whisper.cpp + SAPI)
+- Linux support (B6) — tornikegomareli, mo-tunn
+
+**Decision: don't fork, keep building.** Forking tornikegomareli requires a Rust rewrite + inherits the dead-code mistake we already fixed + still requires building memory from scratch. Electron forks are heavier than our PyQt6 stack. Our differentiator (memory) is real and unclaimed. See DECISIONS.md 2026-04-19 (late evening) for full rationale.
 
 ---
 

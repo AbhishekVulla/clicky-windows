@@ -1,7 +1,7 @@
 # Clicky Windows — Product Requirements Document
 
-**Status:** Phase 1 in progress (Step 7 app.py shipped, Step 7.5 lint_memory + Step 8 polish remaining)
-**Last updated:** 2026-04-13
+**Status:** Phase 1 mostly done (Steps 0-7 shipped at 138/138 tests). Phase 1.5 Step 1 CLOSED 2026-04-19 — Gemini rejected as default based on head-to-head measurement (Claude 4.3s + pixel-precise vs Gemini 4.7s + 230px miss); GeminiClient infrastructure shipped as opt-in via `MODEL_ID` in `.env`. Phase 1.5 Step 2 (Path A parallelism) next — superpowers-ceremony plan pending. Phase B (installer + tray + demo video + HIPAA + Linux) added to ROADMAP.md to close competitive-parity gaps vs `tekram/clicky-windows` + `tornikegomareli/clicky-desktop` + `mo-tunn/OpenGuider`.
+**Last updated:** 2026-04-19 (late evening)
 **Owner:** Abhishek Vulla ([Building 0](file:///C:/Users/Abhis/OneDrive/Documents/2nd%20Brain/wiki/building0.md))
 
 This doc answers **what** and **why** + the full **Codebase Architecture** + **User Journeys** + **Invariants** (the single source of truth against post-compact drift). For **how** see [CLAUDE.md](CLAUDE.md). For **where are we now** see [ROADMAP.md](ROADMAP.md). For **why we chose X over Y** see [DECISIONS.md](DECISIONS.md).
@@ -252,8 +252,11 @@ If triggered: port to Tauri 2.0 + Rust backend + Vue 3 frontend + Pinia, matchin
 | **Clippi.us** | macOS only, "Windows soon" | Yes | Yes | No | No | Free | Windows + memory + open source + shipped |
 | **GhostDesk** | Windows | No | Voice out only | No | No | $9.99/mo | Points, free, memory |
 | **Screenpipe** | Win + Mac | No | No | Records everything | Yes | Free | Interactive push-to-talk, not passive recording |
-| **tekram/clicky-windows** | Windows (Electron) | Partial | Yes | No | Yes | Free | Memory, polished, shipped (tekram is 14 stars, unfinished) |
-| **danpeg/clicky** (fork) | macOS | Yes, proactive | Yes | No | Yes | Free | Windows. Copy their proactive-mode idea in Phase 2, targeted at real memory patterns. |
+| **tekram/clicky-windows** (2026-04-19 update) | Windows (Electron) | Yes | Yes (3 STT: AssemblyAI + OpenAI Whisper + whisper.cpp local; 3 TTS: ElevenLabs + OpenAI + Windows SAPI) | **No** | Yes, MIT | Free | **Memory** (their #1 missing feature). We: 30MB PyQt6 vs their 150MB Electron. They have shipped Squirrel installer (we don't yet — tracked as Phase B1). Now 26 ⭐, actively developed — THE real Windows competitor today. |
+| **tornikegomareli/clicky-desktop** (2026-04-19 new) | Windows + Linux (Rust + Raylib) | Yes (ports `[POINT:x,y:label:screenN]` verbatim) | Yes (AssemblyAI STT + ElevenLabs/espeak TTS) | **No** | Yes, MIT | Free | **Memory** + **engineering rigor** (they have zero tests; we have 138). They inherited the `ElementLocationDetector.swift` dead-code port (their `computer_use.rs` explicitly ports `ElementLocationDetector.swift:1-335` — the file we caught as unreferenced in 2026-04-12 e3). 8 ⭐, active. |
+| **mo-tunn/OpenGuider** (2026-04-19 new) | Windows + macOS + Linux (Electron) | Yes, with structured pointer hints | Yes (AssemblyAI + Whisper; Google + OpenAI + ElevenLabs TTS) | **No** (session history only) | Yes, Apache 2.0 | Free | **Memory** + **conversational ethos** (they ship trili.ai-style structured task planners; our UX is Farza's "learn by doing" conversational buddy — opposite philosophy). 66 ⭐. |
+| **shreshth-s / NReyes22 / Arnie936 ("Zippy") / jvaught01 ("Flicky") / JaySmith502 / annasba07 / CONFUZ3** (2026-04-19 minor clones) | Windows (C#/WPF, WinForms, Electron, Python, Rust-incomplete) | Yes (all use `[POINT]` tag) | Varies | **No** (JaySmith502 has static user-curated per-app docs but not learned) | Yes | Free | Memory + polish + shipped installer. Most are 2-28 ⭐, evidence the space is saturating fast. |
+| **danpeg/clicky** (macOS fork) | macOS | Yes, proactive | Yes | No | Yes | Free (Cloudflare Worker) | Windows. 86 ⭐ (highest fork). Copy their proactive-mode idea in Phase 2, targeted at real memory patterns. |
 | **Claude Cowork / Grunty** | Cross-platform | N/A (controls, doesn't point) | No | No | Grunty yes | Varies | Different category — we guide, they act |
 | **Microsoft Copilot Vision** | Win 11 | No | No | No | No | Bundled | Points, voice, memory |
 | **Littlebird** | Cross-platform | No | No | Yes | No | Enterprise, $11M raised | Consumer, free, visual pointer |
