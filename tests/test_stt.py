@@ -234,6 +234,36 @@ class TestAssemblyAIStreamingSTT:
         # Original error should be chained for debugging.
         assert isinstance(exc_info.value.__cause__, ConnectionError)
 
+    def test_set_tts_grace_until_blocks_mic_chunks(self):
+        """set_tts_grace_until(t) must drop mic chunks until time.time() >= t.
+
+        Prevents TTS speaker decay after tts.stop() from being transcribed as
+        the next PTT's audio (acoustic feedback loop — verified in debug logs
+        where transcripts contained phantom phrases from the previous TTS).
+        """
+        import time as _t
+        stt_obj, fake_client, _, _, _ = self._make_stt()
+        stt_obj.connect()
+        stt_obj.start_recording()
+
+        # Before grace: chunks forwarded normally.
+        stt_obj._on_audio_chunk(b"\x00" * 2048, 1024, None, None)
+        assert stt_obj._chunk_count == 1
+
+        # Set grace window 200ms into the future.
+        stt_obj.set_tts_grace_until(_t.time() + 0.200)
+
+        # Chunk during grace: must be dropped.
+        stt_obj._on_audio_chunk(b"\x00" * 2048, 1024, None, None)
+        assert stt_obj._chunk_count == 1, (
+            "Expected chunk dropped during TTS grace, but it was forwarded"
+        )
+
+        # End grace window explicitly (avoid real-time sleep in tests).
+        stt_obj._tts_grace_until = 0.0
+        stt_obj._on_audio_chunk(b"\x00" * 2048, 1024, None, None)
+        assert stt_obj._chunk_count == 2
+
     def test_on_turn_sets_final_event_on_end_of_turn_flag(self):
         """Regression: end_of_turn=True must set _final_event regardless of turn_is_formatted.
 

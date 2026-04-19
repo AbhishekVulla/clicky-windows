@@ -185,6 +185,12 @@ class AssemblyAIStreamingSTT(STT):
         self._stream_error: Exception | None = None
         self._chunk_count = 0
 
+        # TTS-to-mic feedback-loop suppression (Path A Task 2).
+        # After tts.stop(), app.py sets a 200ms grace window; mic chunks
+        # received before self._tts_grace_until are dropped so speaker
+        # decay doesn't leak into the next PTT's transcript.
+        self._tts_grace_until: float = 0.0
+
     # -- DI factory defaults --------------------------------------------------
 
     @staticmethod
@@ -400,6 +406,16 @@ class AssemblyAIStreamingSTT(STT):
         for the thread-safety contract."""
         self._partial_cb = callback
 
+    def set_tts_grace_until(self, epoch_ts: float) -> None:
+        """Mic chunks before ``epoch_ts`` are discarded — used after ``tts.stop()``.
+
+        Prevents TTS speaker decay from being transcribed as the next PTT's
+        audio. ``app.py`` calls this with ``time.time() + 0.200`` immediately
+        after every ``tts.stop()`` call (press and release handlers). A simple
+        float assignment — safe to call from any thread.
+        """
+        self._tts_grace_until = epoch_ts
+
     # -- Internal callbacks (run on WebSocket client thread) -----------------
 
     def _on_audio_chunk(self, indata, frames, time_info, status) -> None:
@@ -408,8 +424,16 @@ class AssemblyAIStreamingSTT(STT):
         Runs on the portaudio callback thread. Must be fast and must not
         raise. Only forwards audio when _recording is True (hotkey held).
         When _recording is False (idle), chunks are discarded — mic stays hot.
+
+        TTS-to-mic feedback protection (Path A Task 2): chunks received
+        before self._tts_grace_until are dropped so speaker decay after
+        tts.stop() doesn't leak into the next PTT's transcript.
         """
         if not self._recording:
+            return
+        # TTS-to-mic grace: app.py sets a 200ms window after every tts.stop().
+        import time as _t
+        if _t.time() < self._tts_grace_until:
             return
         if self._client is None:
             print("[stt] WARNING: _recording=True but _client is None — audio dropped", flush=True)

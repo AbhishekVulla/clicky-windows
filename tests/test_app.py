@@ -119,6 +119,57 @@ class TestClickyApp:
         assert app._worker_thread.daemon is True
         app._worker_thread.join(timeout=2)
 
+    def test_handle_press_sets_tts_grace_on_stt(self, mocker):
+        """_handle_press calls tts.stop() then sets a ~200ms STT grace window
+        so speaker decay doesn't leak into the transcription.
+        """
+        import time as _t
+        app = self._make_app(mocker)
+        mocker.patch("app.get_foreground_app", return_value=("EXCEL.EXE", "Sheet1"))
+
+        t_before = _t.time()
+        app._handle_press()
+
+        app._stt.set_tts_grace_until.assert_called_once()
+        grace_ts = app._stt.set_tts_grace_until.call_args.args[0]
+        # Should be ~200ms in the future (give ±50ms slack for test timing)
+        assert grace_ts >= t_before + 0.150, (
+            f"Grace ts {grace_ts} should be ~200ms after t_before {t_before}"
+        )
+        assert grace_ts <= t_before + 0.300, (
+            f"Grace ts {grace_ts} should not be more than 300ms in future"
+        )
+
+    def test_handle_release_sets_tts_grace_when_cancelling_worker(self, mocker):
+        """On a re-press mid-response, _handle_release kills in-flight TTS + sets
+        grace so the new PTT doesn't pick up the aborted TTS's decay.
+        """
+        import threading
+        import time as _t
+        app = self._make_app(mocker)
+        app._stt.stop_recording.return_value = ""
+
+        # Fake an in-flight worker thread so the cancel branch runs.
+        fake_worker = mocker.MagicMock()
+        fake_worker.is_alive.return_value = True
+        app._worker_thread = fake_worker
+
+        t_before = _t.time()
+        app._handle_release()
+
+        app._tts.stop.assert_called()
+        app._stt.set_tts_grace_until.assert_called()
+        grace_ts = app._stt.set_tts_grace_until.call_args.args[0]
+        assert grace_ts >= t_before + 0.150
+
+        # Let the spawned worker thread exit cleanly so pytest teardown is clean.
+        if app._worker_thread is not None and app._worker_thread is not fake_worker:
+            if hasattr(app._worker_thread, "join"):
+                try:
+                    app._worker_thread.join(timeout=2)
+                except Exception:
+                    pass
+
     def test_stop_sets_cancel_event(self, mocker):
         app = self._make_app(mocker)
         app.stop()

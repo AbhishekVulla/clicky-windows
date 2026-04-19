@@ -190,6 +190,9 @@ class ClickyApp(QObject):
         _log("PRESS handler START")
         t0 = time.time()
         self._tts.stop()
+        # Prevent TTS speaker decay from leaking into this PTT's transcript
+        # (acoustic feedback loop). 200ms window tuned to real laptop-mic decay.
+        self._stt.set_tts_grace_until(time.time() + 0.200)
         # Check if TTS thread actually died
         tts_thread = self._tts._current_thread
         tts_alive = tts_thread.is_alive() if tts_thread else False
@@ -211,6 +214,9 @@ class ClickyApp(QObject):
             _log("  cancelling previous worker + stopping TTS")
             self._cancel_event.set()
             self._tts.stop()
+            # Same 200ms grace as press — prevents aborted TTS tail from
+            # contaminating the new PTT's transcript.
+            self._stt.set_tts_grace_until(time.time() + 0.200)
 
         self._cancel_event = threading.Event()
 
