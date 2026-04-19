@@ -134,7 +134,7 @@ Two steps, each standalone-shippable. Ship Step 1 first, measure, then decide if
 | Step | Goal | Expected latency win | Status |
 |---|---|---|---|
 | **1** | Swap Claude Sonnet 4.6 → Gemini 3 Flash Preview via OpenRouter | 5-9s → 3-4s (hypothesis — REJECTED by measurement) | ✅ **CLOSED — infrastructure shipped, default stays Claude.** GeminiClient + factory + dual-SDK routing shipped and pushed (8 commits on 2026-04-19: `02196e7` → `3988a51`, 138/138 tests). **Head-to-head measurement on identical workload ("how do I make my repo public"):** Gemini 2.5 Flash 4669ms total + 230px coordinate miss. Claude Sonnet 4.6 4325ms total (**340ms FASTER**) + 0px miss (bullseye on Settings tab). Gemini has no real-world latency advantage via OpenRouter AND is far less precise. Latency variance through OpenRouter (±400ms per run) completely swamps Gemini's theoretical TTFT edge. `.env` stays on Claude. Gemini kept as opt-in via `MODEL_ID=google/...`. See DECISIONS.md 2026-04-19 (evening) + late-evening entries. |
-| **2** | Path A parallelism — capture at hotkey PRESS (not release), prefix caching for system prompt, speculative LLM on partial STT transcripts, clear `_final_event` before `force_endpoint()`, 200ms audio grace period after `tts.stop()` | 5-9s → ~2s (primary latency vector — Step 1 rejected) | 🟡 **Next sprint — primary latency win + superpowers-ceremony plan pending.** User-visible fixes only (capture-at-press saves 200-400ms, STT cutoff fix eliminates truncation loops, TTS-to-mic feedback elimination eliminates recursive self-prompts). Precision preserved (no LLM swap). Needs deep research pass before coding — Aaron's feedback was surface-level; need to dig into Vapi / Pipecat / LiveKit concrete parallelism patterns. |
+| **2** | Path A parallelism — 8-item locked scope (STT end_of_turn fix + capture-at-press + sentence-level TTS chunking + OpenRouter prompt caching + listening chime + cursor visual overhaul [waveform/spinner/bezier] + TTS-to-mic grace + measurement harness) | 5-9s → ~1.6-1.9s actual | 🟡 **Next sprint — research complete 2026-04-19, superpowers ceremony pending.** Research pass across 12 Explore agents (Aaron's InspireCon advice + Optimistic UI patterns + Clicky shipping-source verification). Rejected: Cerebras (no vision), Groq (unproven precision), ElevenLabs (Cartesia wins blind tests), Gemini Live (same 230px floor), speculative LLM (negative EV at 3.7s round-trip), filler phrases (yappy + costly). See "Step 2" section below for locked scope + rejected items + realistic latency math. |
 
 ### Step 1 (Gemini 3 Flash swap) — this sprint
 
@@ -145,20 +145,55 @@ Two steps, each standalone-shippable. Ship Step 1 first, measure, then decide if
 - **Acceptance:** Gemini 3 Flash coordinate accuracy within ±20px of ground truth on `debug_capture.jpg` (Step 1 verification). If passes → set as Phase 1.5 default. If fails → keep Claude as default, code stays as opt-in alternative.
 - See DECISIONS.md 2026-04-19 "Gemini 3 Flash Preview via OpenRouter" for rationale + alternatives considered.
 
-### Step 2 (Path A parallelism) — next sprint, contingent on Step 1 not hitting <2s alone
+### Step 2 (Path A parallelism) — next sprint
 
-- **Fix STT cutoff (highest impact):** `stop_recording()` currently reads stale `_final_event` set by during-recording Turns — returns partial transcript like "How do I—" before the post-force_endpoint Turn arrives. Fix: clear `_final_event` before `force_endpoint()`. Verified root cause via `~/.clicky-windows/debug/2026-04-13_03-24-32_chrome.exe/` logs.
-- **Fix TTS-to-mic feedback loop:** Laptop mic hears TTS playing from speakers → transcribed as next turn's input. Verified in debug logs (e.g. transcript "one thing to watch—" when no one said that — matches previous TTS response). Fix: 200ms audio grace period after `tts.stop()` in `start_recording()` — discard mic chunks during decay window.
-- **Capture-at-press:** Start `capture_all_screens()` on hotkey PRESS (currently on RELEASE). Saves 200-400ms because screen capture overlaps with user speaking. Trade-off: screen might change mid-utterance, but in practice UI is static during 2-3s PTT hold. Re-capture at release only if cursor position changed >50px.
-- **Prefix caching:** Cache the 35-line `_CLICKY_SYSTEM_PROMPT` via OpenRouter's prompt caching. Per-turn savings: 100-200ms on Gemini/Claude (system prompt KV tensors reused).
-- **Speculative LLM on partial STT transcripts:** Send partial transcript to LLM as it arrives from AssemblyAI's during-recording Turns. Cancel + restart with final on ForceEndpoint. Saves 300-500ms by overlapping Claude/Gemini with user's last ~500ms of speech. HIGH COMPLEXITY — only do this if Steps 1 + 2a-d combined still miss <2s target.
-- **Memory recall reduction:** Debug logs show yapping correlates with 1500-char memory injection. Reduce to 500-800 chars (last 2-3 interactions).
+Deep research pass completed 2026-04-19 late-evening across v1+v2+v3 waves (12 Explore agents). Aaron's InspireCon advice was grounded in source where possible; vendor picks that don't clear Clicky's vision-precision floor were rejected. Three visual-state research rounds verified Farza's actual Clicky behavior from `OverlayWindow.swift` + `CompanionManager.swift` + `BuddyDictationManager.swift`.
+
+**Locked Path A scope (8 commits, ~521 LOC):**
+
+1. **STT `end_of_turn` fix** (stt.py:429, 1 line) — correctness. The current `_on_turn` handler sets `_final_event` only when `turn_is_formatted=True`, but `format_turns=False` means that event never fires. Real fix: `if is_formatted:` → `if getattr(event, "end_of_turn", False):`. AssemblyAI docs confirm `end_of_turn` is the only reliable completion signal. Kills the 9-char "How do I—" cutoff bug (verified in `~/.clicky-windows/debug/2026-04-13_03-24-32_chrome.exe/interaction.log`).
+2. **Capture-at-press + memory-at-press** (app.py, ~40 LOC) — **-250ms actual**. Current capture stage is 238ms (overlay-hide + 50ms wait + `mss.grab` + PIL LANCZOS + overlay-show). Shift to press-time. Re-capture-on-release only if cursor moved >50px (cheap safeguard).
+3. **Sentence-level TTS chunking via queue** (tts.py + app.py, ~100 LOC) — **-2000ms perceived**. Current `speak_sentence()` delegates to `speak()` which cancels the prior thread, so consecutive calls cancel each other (see tts.py:168-174). Real fix: add `queue.Queue` + dedicated worker thread in `CartesiaSonicTTS` that consumes sentences sequentially. Wire `flush_sentences` in app.py pipeline so TTS starts on first `.!?` boundary while Claude still generates the rest.
+4. **OpenRouter prompt caching** on system prompt + memory block (ai.py, ~30 LOC) — **-50-100ms actual**. OpenRouter passes through Anthropic-native `cache_control: {"type": "ephemeral"}` breakpoints for `anthropic/*` routes. Cache system prompt + memory only (never per-turn content to avoid the full-context-caching latency paradox). 5-min TTL. Breaks even on first cache hit.
+5. **Listening chime on hotkey PRESS** (app.py, ~10 LOC) — 0ms latency, pure UX. 50-80ms tone via async `sounddevice.play()` (non-blocking). Standard pattern (Alexa/Siri/Google) to reduce "did it hear me" anxiety.
+6. **Cursor visual overhaul** (overlay.py + stt.py, ~230 LOC) — port Farza's shipping state machine verbatim. Three animations mapped to three states:
+   - **LISTENING (PTT held)** — triangle hides; 5-bar blue waveform widget rendered in its place. Bars = RMS × profile `[0.4, 0.7, 1.0, 0.7, 0.4]` + 0.57Hz sine idle-pulse. 36fps. Port from `OverlayWindow.swift:705-743`. RMS computed in stt.py audio callback (sum-of-squares / frame_count, ×10.2 boost, clamp[0,1], 0.72 decay filter) and emitted via new `pyqtSignal(float)`. Port from `BuddyDictationManager.swift:687-721`.
+   - **THINKING (release → coord returned)** — waveform fades out (150ms), spinning arc fades in. 14×14pt circle, 2.5pt blue stroke, `trim(15%-85%)`, angular gradient, rotates 360° every 800ms. Port from `OverlayWindow.swift:745-774`.
+   - **FLYING (coord arrived → arrival)** — quadratic bezier arc + smoothstep easing + tangent rotation + 1.3x mid-flight scale pulse. Duration scales with distance (600-1400ms). Port verbatim from `OverlayWindow.swift:491-568`.
+   - **SPEAKING** — zero animation by design. Voice is the feedback. Matches "non-yappy" priority.
+7. **200ms TTS-to-mic grace period** (stt.py + app.py, ~10 LOC) — correctness. After `tts.stop()`, discard mic chunks for 200ms so speaker decay doesn't loop into the next PTT's transcript. Verified needed from debug logs.
+8. **Measurement harness** (tools/bench_path_a.py, ~100 LOC) — Mann-Whitney U + bootstrap-CI on median, N=20 before/after. Four metrics: release→first-partial, release→final-transcript, release→Claude-first-token, release→first-audible-word. Validated via `scipy.stats.mannwhitneyu` + `scipy.stats.bootstrap`. Workload via `CannedSTT` mock (deterministic) for STT-downstream isolation + real mic for end-to-end.
+
+**Rejected from Path A scope (with reasons):**
+
+- **Cerebras inference (Aaron's #1 pick)** — Cerebras Cloud serves zero vision models as of 2026 (verified in their own OpenRouter integration docs). Text-only TPS irrelevant; hard blocker for Clicky's `[POINT:x,y]` requirement.
+- **Groq Llama 4 Scout** — has vision + 27x cheaper, but zero published pixel-precision benchmarks on ScreenSpot. Gambling on unproven precision after already rejecting Gemini on that exact axis. Fallback-only candidate, not primary.
+- **ElevenLabs Flash TTS (Aaron's pick)** — blind tests favor Cartesia Sonic-2 61.4% vs ElevenLabs Flash V2 38.6% for conversational agents. Flash v2.5 TTFB ~75ms vs Sonic-3 ~40-90ms (Cartesia wins). Aaron anchored on ElevenLabs brand rep for audiobooks, not voice agents.
+- **Gemini Live Flash API ("near instant")** — uses the same vision model as the chat API already rejected on 230px miss. Live collapses STT/LLM/TTS but doesn't fix the precision floor. Also: no OpenRouter pass-through (WebSocket vs HTTP), synchronous-only tool calls (can't emit coord JSON + speak simultaneously).
+- **Speculative LLM on partial STT transcripts** — break-even at 33% miss rate given our 3.7s Claude round-trip. Vapi's 465ms works because Groq Llama-4 is ~200ms; our round-trip makes the miss cost punitive. Negative EV until LLM stage drops to ~1s.
+- **Filler phrase during TTFT ("hm, let me see")** — contradicts user's "non-yappy" priority + adds API cost. Listening chime on PRESS already provides instant acknowledgment.
+- **Memory recall reduction to 500-800 chars** — absorbed into #4 (prompt caching). The memory block is cached on round 1; size no longer drives per-turn cost after that. Revisit only if cache-miss rate is high.
+
+**Realistic post-Path-A latency (no perception gimmicks):**
+
+| Stage | Today | Post-Path-A |
+|---|---|---|
+| STT finalize (release → transcript) | 300ms | 300ms (unchanged — the `end_of_turn` fix is correctness, not speed) |
+| Capture + memory + hide | 240ms (post-release) | 0ms (done during utterance) |
+| Claude TTFT | 1200ms | ~1100ms (with prompt cache) |
+| Claude first-sentence stream | — (collected to end) | +300ms |
+| TTS TTFB (starts on first sentence, not full response) | 250ms (after full response) | 250ms (after first sentence) |
+| **Total release → first audible word** | **~4.9s** | **~1.6-1.9s** |
+
+Beats Aaron's <2s target. Matches Clicky macOS shipping feel. Precision moat (Claude Sonnet 4.6) preserved.
 
 ### Not doing in Phase 1.5
 
-- Gemini Live API (WebSocket speech-to-speech): locks us into Google, violates BYOK. Hard no.
-- WebSocket TTS sentence chunking via Cartesia's `websocket_connect()`: potential +300-500ms win, but complex refactor of `tts.py`. Defer until Phase 2 unless Steps 1+2 miss target.
-- Grok / Cerebras / local models: subclass drops in Phase 2, not latency-critical for Phase 1.5.
+- Gemini Live API (WebSocket speech-to-speech): same vision floor as Gemini chat (already rejected on 230px). Also locks us into Google + WebSocket refactor. Hard no.
+- Cerebras / Groq: vision blocker (Cerebras) or precision-unproven (Groq). Revisit only if vision-capable fast inference emerges.
+- ElevenLabs TTS: blind-tests favor Cartesia Sonic-3 for conversational voice agents. Sonic stays.
+- WebSocket TTS sentence chunking via Cartesia's `websocket_connect()`: not needed — queue-based sequential HTTP streaming achieves the same latency win with simpler code.
+- Speculative LLM on partial transcripts: negative-EV at current 3.7s round-trip.
 
 ### Phase 1.5 acceptance (run all three before declaring done)
 
