@@ -426,8 +426,13 @@ class AssemblyAIStreamingSTT(STT):
         is_formatted = bool(getattr(event, "turn_is_formatted", False))
         print(f"[stt] Turn event: formatted={is_formatted}, recording={self._recording}, text={text[:80]!r}", flush=True)
 
-        if is_formatted:
-            # Formatted turns are the "final for this utterance" signal.
+        if getattr(event, "end_of_turn", False) is True or is_formatted:
+            # End-of-turn is the only reliable completion signal with
+            # format_turns=False (AssemblyAI docs). Keep the is_formatted
+            # branch as a backup for any backend that emits both.
+            # `is True` guards against MagicMock auto-attributes in tests
+            # (MagicMock is truthy but `is True` is False) AND matches the
+            # real SDK contract where end_of_turn is a bool.
             if text:
                 if self._final_transcript:
                     self._final_transcript = f"{self._final_transcript} {text}".strip()

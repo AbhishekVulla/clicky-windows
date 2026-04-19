@@ -200,10 +200,13 @@ class TestAssemblyAIStreamingSTT:
         stt_obj.on_partial_transcript(received.append)
         stt_obj.start()
 
-        # Synthesize a partial (turn_is_formatted=False).
+        # Synthesize a partial (turn_is_formatted=False, end_of_turn=False).
+        # Explicit end_of_turn=False matches real AssemblyAI TurnEvent shape
+        # and guards against MagicMock's truthy auto-attribute.
         partial = MagicMock()
         partial.transcript = "how do i"
         partial.turn_is_formatted = False
+        partial.end_of_turn = False
         turn_handler_holder["handler"](fake_client, partial)
 
         assert received == ["how do i"]
@@ -230,3 +233,31 @@ class TestAssemblyAIStreamingSTT:
         assert "check" in msg.lower()
         # Original error should be chained for debugging.
         assert isinstance(exc_info.value.__cause__, ConnectionError)
+
+    def test_on_turn_sets_final_event_on_end_of_turn_flag(self):
+        """Regression: end_of_turn=True must set _final_event regardless of turn_is_formatted.
+
+        Root cause of the '9-char How do I—' cutoff bug: _on_turn previously
+        only set _final_event when turn_is_formatted=True, but we run with
+        format_turns=False, so that event never fires. The only reliable
+        completion signal on u3-rt-pro is end_of_turn. See
+        ~/.clicky-windows/debug/2026-04-13_03-24-32_chrome.exe/interaction.log
+        for the verified bug artifact.
+        """
+        stt_obj, fake_client, _, _, _ = self._make_stt()
+        stt_obj.connect()
+        stt_obj.start_recording()
+
+        # Simulate an unformatted Turn with end_of_turn=True (format_turns=False mode).
+        event = MagicMock()
+        event.transcript = "How do I make my repo public?"
+        event.turn_is_formatted = False
+        event.end_of_turn = True
+
+        stt_obj._on_turn(fake_client, event)
+
+        assert stt_obj._final_event.is_set(), (
+            "Expected _final_event to be set on end_of_turn=True, "
+            "but it was only triggering on turn_is_formatted=True."
+        )
+        assert stt_obj._final_transcript == "How do I make my repo public?"
