@@ -281,6 +281,66 @@ class TestAssemblyAIStreamingSTT:
             f"expected floor of {received[0] * AUDIO_POWER_DECAY:.3f}"
         )
 
+    def test_stop_recording_waits_for_delayed_end_of_turn(self):
+        """Regression for the "How do I add—" cutoff bug (2026-04-19 late-evening).
+
+        AssemblyAI emits end_of_turn=True ~300-700ms AFTER force_endpoint()
+        is called. Previously stop_recording had an `else: break` that
+        exited the wait loop after the FIRST 300ms with no event, returning
+        stale _latest_partial. Fix: loop must keep iterating until the real
+        deadline (2s), OR until a final event arrives.
+
+        This test simulates the timing by delaying the end_of_turn=True
+        event 500ms (between the "too fast" and "too slow" thresholds)
+        and asserting the final transcript is returned, not the partial.
+        """
+        import threading as _threading
+        import time as _time
+
+        stt_obj, fake_client, fake_audio_stream, _, _ = self._make_stt()
+
+        turn_handler_holder: dict = {}
+
+        def record_on(event, handler):
+            if getattr(event, "name", str(event)) == "Turn":
+                turn_handler_holder["handler"] = handler
+
+        fake_client.on.side_effect = record_on
+
+        # Fire the interim partial immediately (no end_of_turn) so
+        # _latest_partial is populated (matches real behavior).
+        def on_force_endpoint():
+            handler = turn_handler_holder["handler"]
+            partial = MagicMock()
+            partial.transcript = "How do I add—"
+            partial.turn_is_formatted = True
+            partial.end_of_turn = False
+            handler(fake_client, partial)
+
+            # 500ms later: real final end_of_turn=True. This arrives AFTER
+            # the first 300ms wait of stop_recording's loop — previously
+            # the `else: break` exited before this, now we keep waiting.
+            def delayed_final():
+                _time.sleep(0.5)
+                final = MagicMock()
+                final.transcript = "How do I add an MCP server?"
+                final.turn_is_formatted = True
+                final.end_of_turn = True
+                handler(fake_client, final)
+
+            _threading.Thread(target=delayed_final, daemon=True).start()
+
+        fake_client.force_endpoint.side_effect = on_force_endpoint
+
+        stt_obj.start()
+        result = stt_obj.stop()
+
+        assert result == "How do I add an MCP server?", (
+            f"Expected final transcript 'How do I add an MCP server?', got {result!r} — "
+            "stop_recording is returning the stale partial instead of waiting "
+            "for the real end_of_turn=True event."
+        )
+
     def test_on_turn_ignores_formatted_revision_without_end_of_turn(self):
         """Regression for the "That's kind of—" stutter bug (2026-04-19).
 

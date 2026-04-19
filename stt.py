@@ -348,26 +348,38 @@ class AssemblyAIStreamingSTT(STT):
                 self._stream_error = RuntimeError(f"force_endpoint failed: {exc}")
             self._final_event.set()
 
-        # Wait for Turn events. AssemblyAI often sends a short partial first,
-        # then the full transcript 1-2s later. We wait for the LONGEST
-        # transcript within the timeout window, not just the first one.
+        # Wait for the post-force_endpoint Turn event (end_of_turn=True).
+        # AssemblyAI processes force_endpoint with ~300-700ms network +
+        # server latency. Our handler only fires on end_of_turn=True (the
+        # authoritative signal per docs.assemblyai.com — see 2026-04-19
+        # stutter-fix commit 51ff788). Previous code had `else: break`
+        # that exited after the FIRST 300ms with no event, returning a
+        # stale _latest_partial ("How do I add—" instead of "How do I add
+        # an MCP server?"). Fix: keep waiting the full 2s deadline.
+        #
+        # After the first event arrives, do a short grace wait for any
+        # additional end_of_turn events (multi-utterance hold — e.g. user
+        # pauses between two sentences during a single PTT press).
         import time as _t
         deadline = _t.time() + _FINAL_TRANSCRIPT_TIMEOUT_S
+        first_event_seen = False
         while _t.time() < deadline:
             self._final_event.wait(timeout=0.3)
             if self._final_event.is_set():
-                # Got a Turn — but there might be a longer one coming.
-                # Reset the event and wait 300ms more for a better result.
                 self._final_event.clear()
+                first_event_seen = True
+                # Short grace window for any trailing end_of_turn=True event
+                # (multi-utterance case).
                 remaining = deadline - _t.time()
                 if remaining > 0.3:
                     self._final_event.wait(timeout=0.3)
                     if not self._final_event.is_set():
-                        break  # 300ms of silence — no more Turns coming
+                        break  # 300ms of silence after first final — done
                 else:
-                    break  # near deadline, take what we have
-            else:
-                break  # 300ms with no Turn at all
+                    break  # near deadline
+            elif first_event_seen:
+                break  # saw a final, then 300ms silence — done
+            # else: no event yet, keep iterating until deadline
 
         result = (self._final_transcript or self._latest_partial or "").strip()
         stream_error = self._stream_error
