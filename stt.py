@@ -359,7 +359,12 @@ class AssemblyAIStreamingSTT(STT):
         #
         # After the first event arrives, do a short grace wait for any
         # additional end_of_turn events (multi-utterance hold — e.g. user
-        # pauses between two sentences during a single PTT press).
+        # pauses between two sentences during a single PTT press). Grace
+        # window is 100ms (Option 2, 2026-04-20): Conservative VAD
+        # (min_turn_silence=800ms) makes mid-hold multi-utterance rare,
+        # so 100ms is enough to catch any trailing event that would have
+        # been clustered right behind the first. Saves ~200ms median STT
+        # finalize vs the old 300ms grace.
         import time as _t
         deadline = _t.time() + _FINAL_TRANSCRIPT_TIMEOUT_S
         first_event_seen = False
@@ -371,10 +376,10 @@ class AssemblyAIStreamingSTT(STT):
                 # Short grace window for any trailing end_of_turn=True event
                 # (multi-utterance case).
                 remaining = deadline - _t.time()
-                if remaining > 0.3:
-                    self._final_event.wait(timeout=0.3)
+                if remaining > 0.1:
+                    self._final_event.wait(timeout=0.1)
                     if not self._final_event.is_set():
-                        break  # 300ms of silence after first final — done
+                        break  # 100ms of silence after first final — done
                 else:
                     break  # near deadline
             elif first_event_seen:

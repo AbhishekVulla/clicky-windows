@@ -341,6 +341,55 @@ class TestAssemblyAIStreamingSTT:
             "for the real end_of_turn=True event."
         )
 
+    def test_stop_recording_grace_window_is_100ms(self):
+        """Option 2 (2026-04-20): after the first end_of_turn=True event fires,
+        stop_recording waits only 100ms for a trailing multi-utterance event
+        (down from 300ms). With Conservative VAD the multi-utterance case is
+        rare enough that 100ms is sufficient; shrinking saves ~200ms median
+        STT finalize.
+
+        Tests by firing end_of_turn=True synchronously from force_endpoint's
+        side_effect, then measuring how long stop_recording takes to return.
+        Expected ~100ms grace + tiny overhead. Upper bound 200ms — fails if
+        someone restores the old 300ms grace.
+        """
+        import time as _time
+
+        stt_obj, fake_client, _, _, _ = self._make_stt()
+
+        turn_handler_holder: dict = {}
+
+        def record_on(event, handler):
+            if getattr(event, "name", str(event)) == "Turn":
+                turn_handler_holder["handler"] = handler
+
+        fake_client.on.side_effect = record_on
+
+        def on_force_endpoint():
+            handler = turn_handler_holder["handler"]
+            final = MagicMock()
+            final.transcript = "hello world"
+            final.turn_is_formatted = False
+            final.end_of_turn = True
+            handler(fake_client, final)
+
+        fake_client.force_endpoint.side_effect = on_force_endpoint
+
+        stt_obj.connect()
+        stt_obj.start_recording()
+
+        t0 = _time.perf_counter()
+        result = stt_obj.stop_recording()
+        elapsed = _time.perf_counter() - t0
+
+        assert result == "hello world"
+        assert elapsed < 0.2, (
+            f"stop_recording took {elapsed * 1000:.0f}ms after first "
+            f"end_of_turn — grace window must be ~100ms, not "
+            f"{elapsed * 1000:.0f}ms. Did someone revert Option 2 to the "
+            f"old 300ms grace?"
+        )
+
     def test_on_turn_ignores_formatted_revision_without_end_of_turn(self):
         """Regression for the "That's kind of—" stutter bug (2026-04-19).
 
