@@ -276,3 +276,145 @@ class TestCartesiaSonicTTSSpeak:
         assert tts_obj._sentence_queue.empty(), (
             "stop() must drain queued sentences — none should remain pending"
         )
+
+    def test_prefetch_fires_before_previous_playback_completes(self):
+        """Option B: HTTP request for sentence N+1 must start while N is still
+        playing. Uses an Event handshake (not time.sleep timing math) so the
+        test is deterministic under thread-scheduling jitter: we block the
+        first sentence's playback inside fake_play, check that generate was
+        called for the second sentence DURING that block, then release.
+
+        Fails on single-worker impl: worker is stuck inside fake_play for the
+        first sentence, so generate('second') cannot have been called yet.
+        Passes on double-buffer impl: prefetch thread is independent of
+        playback thread, so it fires generate('second') while playback sits
+        in fake_play.
+        """
+        import time as _t
+        from unittest.mock import MagicMock
+        from tts import CartesiaSonicTTS
+
+        gen_log: list[str] = []
+        gen_log_lock = threading.Lock()
+        first_play_started = threading.Event()
+        release_first_play = threading.Event()
+
+        def client_factory(*, api_key):
+            client = MagicMock()
+
+            def gen(**kwargs):
+                with gen_log_lock:
+                    gen_log.append(kwargs["transcript"])
+                resp = MagicMock()
+                resp.iter_bytes.return_value = iter([b"\x00" * 16])
+                return resp
+
+            client.tts.generate.side_effect = gen
+            return client
+
+        def player_factory(*, sample_rate):
+            def fake_play(samples):
+                first_play_started.set()
+                # Block until the test explicitly releases — this simulates
+                # "first sentence is still playing" in a deterministic way.
+                if not release_first_play.wait(timeout=2.0):
+                    raise AssertionError("release_first_play was never set")
+
+            return fake_play, None
+
+        tts_obj = CartesiaSonicTTS(
+            api_key="test-key",
+            client_factory=client_factory,
+            player_factory=player_factory,
+        )
+
+        tts_obj.speak_sentence("first.")
+        tts_obj.speak_sentence("second.")
+
+        # Deterministic signal: first sentence has started playing.
+        assert first_play_started.wait(timeout=2.0), (
+            "First sentence's fake_play was never entered — something is "
+            "wrong with the queue worker startup."
+        )
+
+        # Prefetch is decoupled from playback — give the prefetch worker
+        # up to 500ms to call generate() for the second sentence while
+        # the first is still "playing" (blocked in fake_play).
+        for _ in range(25):
+            with gen_log_lock:
+                if "second." in gen_log:
+                    break
+            _t.sleep(0.02)
+
+        # Snapshot gen_log BEFORE releasing playback, so we know whether
+        # 'second.' was generated WHILE first was playing (not after).
+        with gen_log_lock:
+            generated_during_first_playback = list(gen_log)
+
+        # Release playback so the test can exit cleanly.
+        release_first_play.set()
+
+        assert "second." in generated_during_first_playback, (
+            f"Prefetch did not fire during first sentence's playback. "
+            f"gen_log while first was blocked in fake_play: "
+            f"{generated_during_first_playback!r}. Expected 'second.' "
+            f"to appear there (prefetch overlapping playback)."
+        )
+
+    def test_prefetch_error_does_not_deadlock_playback(self):
+        """If generate() raises for one sentence, the prefetch worker must
+        catch the exception and put (epoch, sentence, None) so playback
+        skips without hanging. Subsequent good sentences must still play.
+        """
+        import time as _t
+        from unittest.mock import MagicMock
+        from tts import CartesiaSonicTTS
+
+        played_count = [0]
+        lock = threading.Lock()
+
+        def client_factory(*, api_key):
+            client = MagicMock()
+
+            def gen(**kwargs):
+                transcript = kwargs["transcript"]
+                if "bad" in transcript:
+                    raise ConnectionError(f"simulated HTTP error for {transcript!r}")
+                resp = MagicMock()
+                resp.iter_bytes.return_value = iter([b"\x00" * 16])
+                return resp
+
+            client.tts.generate.side_effect = gen
+            return client
+
+        def player_factory(*, sample_rate):
+            def play(samples):
+                with lock:
+                    played_count[0] += 1
+
+            return play, None
+
+        tts_obj = CartesiaSonicTTS(
+            api_key="test-key",
+            client_factory=client_factory,
+            player_factory=player_factory,
+        )
+
+        tts_obj.speak_sentence("good one.")
+        tts_obj.speak_sentence("bad one.")
+        tts_obj.speak_sentence("good two.")
+
+        # Wait up to 2s for 2 good sentences to play (bad one skipped).
+        for _ in range(100):
+            with lock:
+                count = played_count[0]
+            if count >= 2:
+                break
+            _t.sleep(0.02)
+
+        with lock:
+            final = played_count[0]
+        assert final >= 2, (
+            f"Playback deadlocked: expected 2 good sentences to play around "
+            f"the failing one, got {final}"
+        )
