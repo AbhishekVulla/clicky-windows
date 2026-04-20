@@ -1,7 +1,7 @@
 # Clicky Windows — Roadmap
 
-**Status:** Phase 1 in progress
-**Last updated:** 2026-04-11
+**Status:** Phase 1 latency optimization complete (178/178 tests). Next: parallel capture refactor (planned, not yet shipped) → then B1 installer.
+**Last updated:** 2026-04-20
 
 This doc answers **where are we now**. It combines what other projects split into PLAN.md + PROGRESS.md + TASKS.md + TESTING.md — all of that lives here in status columns and acceptance proof.
 
@@ -134,7 +134,7 @@ Two steps, each standalone-shippable. Ship Step 1 first, measure, then decide if
 | Step | Goal | Expected latency win | Status |
 |---|---|---|---|
 | **1** | Swap Claude Sonnet 4.6 → Gemini 3 Flash Preview via OpenRouter | 5-9s → 3-4s (hypothesis — REJECTED by measurement) | ✅ **CLOSED — infrastructure shipped, default stays Claude.** GeminiClient + factory + dual-SDK routing shipped and pushed (8 commits on 2026-04-19: `02196e7` → `3988a51`, 138/138 tests). **Head-to-head measurement on identical workload ("how do I make my repo public"):** Gemini 2.5 Flash 4669ms total + 230px coordinate miss. Claude Sonnet 4.6 4325ms total (**340ms FASTER**) + 0px miss (bullseye on Settings tab). Gemini has no real-world latency advantage via OpenRouter AND is far less precise. Latency variance through OpenRouter (±400ms per run) completely swamps Gemini's theoretical TTFT edge. `.env` stays on Claude. Gemini kept as opt-in via `MODEL_ID=google/...`. See DECISIONS.md 2026-04-19 (evening) + late-evening entries. |
-| **2** | Path A parallelism — 8-item locked scope (STT end_of_turn fix + capture-at-press + sentence-level TTS chunking + OpenRouter prompt caching + listening chime + cursor visual overhaul [waveform/spinner/bezier] + TTS-to-mic grace + measurement harness) | 5-9s → ~1.6-1.9s actual | 🟡 **Next sprint — research complete 2026-04-19, superpowers ceremony pending.** Research pass across 12 Explore agents (Aaron's InspireCon advice + Optimistic UI patterns + Clicky shipping-source verification). Rejected: Cerebras (no vision), Groq (unproven precision), ElevenLabs (Cartesia wins blind tests), Gemini Live (same 230px floor), speculative LLM (negative EV at 3.7s round-trip), filler phrases (yappy + costly). See "Step 2" section below for locked scope + rejected items + realistic latency math. |
+| **2** | Path A parallelism — 8-item locked scope (STT end_of_turn fix + capture-at-press + sentence-level TTS chunking + OpenRouter prompt caching + listening chime + cursor visual overhaul [waveform/spinner/bezier] + TTS-to-mic grace + measurement harness) | 5-9s → ~1.6-1.9s actual (multi-sentence) | ✅ **SHIPPED 2026-04-19** (12 TDD commits) + post-Path-A fixes on 2026-04-20 (Option B HTTP double-buffer `4291401` + Option 2 STT grace shrink `d29e6dd`). **Measured results (N=10+ post-fix logs):** multi-sentence first-audible ~1.7s, single-sentence first-audible ~4.5-6s, STT finalize median 466ms (was 723ms before Option 2). Total-to-Claude-done median dropped 1051ms vs pre-Phase-1.5 baseline. 178/178 tests green. |
 
 ### Step 1 (Gemini 3 Flash swap) — this sprint
 
@@ -207,7 +207,7 @@ Beats Aaron's <2s target. Matches Clicky macOS shipping feel. Precision moat (Cl
 
 **Why this section exists.** 2026-04-19 competitive research found 12+ Clicky clones shipped in 12 days since Farza open-sourced macOS Clicky. The space is saturating fast. Our engineering rigor + persistent memory are worth nothing if a non-tech user googles "clicky windows" and installs `tekram/clicky-windows` first. These gaps MUST close before the demo video (Step 8) ships, in roughly this order.
 
-**Target window:** 2-3 weeks after Phase 1.5 Step 2 lands.
+**Target window:** Phase 1.5 Step 2 LANDED 2026-04-19/20. Phase B ready to start. One more cheap latency fix planned BEFORE B1: parallel capture-on-release with STT finalize (~200-300ms win when cursor moved >50px). See "Planned next — parallel capture" at the bottom of this doc.
 
 ### B1. PyInstaller bundle + simple installer (REMOVES the #1 barrier — "download 4 tools + edit .env")
 
@@ -286,17 +286,16 @@ Farza's shipping Clicky does the same (always-visible buddy) — it's a delibera
 
 **Decision gate**: revisit before recording the demo video (Phase B3). If (b) or (c) wins, it's a ~10-20 LOC change in overlay.py `_on_follow_tick` setting `_pointer_visible` / painter opacity based on state.
 
-### F2. WebSocket TTS for gap-free sentence streaming
+### F2. TTS gap between sentences — ✅ FIXED 2026-04-20 via Option B (HTTP double-buffer)
 
-Path A's sentence-level TTS via HTTP has a ~150-250ms TTFB gap between sentences (each `speak_sentence` call opens a new Cartesia HTTP connection). Observed in manual testing as audible silence between sentences.
+**Shipped:** Option B (HTTP double-buffering, commit `4291401`). Prefetch worker fetches sentence N+1 in parallel with N's playback. Inter-sentence gaps dropped from 150-250ms → 0ms. `tts.py` split into prefetch + playback threads with size-1 handoff queue + epoch-guarded `stop()`.
 
-Options ranked by fix quality:
+**Still open (first-sentence TTFB):** Option B does NOT help single-sentence responses or the first sentence of a multi-sentence response — prefetch has no previous sentence to hide behind. That ~300ms first-sentence TTFB is only addressable via Cartesia WebSocket TTS (Option C, 1-2 days work). Rejected for now as complexity-vs-win unfavorable. **Revisit trigger:** post-installer public user testing where first-sentence lag becomes a top complaint.
 
-1. **Cartesia WebSocket** (`client.tts.websocket()`) — one persistent connection, multiple transcript messages, no per-sentence TTFB. Gap drops from ~200ms to ~10ms. Effort: 4-8 hours (SDK surface verification + reconnection logic + thread-safety + tests rewrite).
-2. **HTTP double-buffering** — worker pops sentence N+1 from queue + starts its HTTP request WHILE sentence N's audio is still draining. By the time N ends, N+1 is ready. Gap ≈ 0. Effort: 1-2 hours in `tts.py` `_queue_worker`.
-3. **Prompt Claude for period-terminated sentences** — avoids em-dashes-as-connectors so our flush triggers hit more often. Doesn't fix the gap, but makes sentence streaming fire in the first place. (Ships in current sprint.)
-
-**Decision gate**: revisit if manual testing after the current spinner/waveform sprint still shows sentence-streaming gaps feel bad. Otherwise defer to post-demo.
+**Original options (kept for history):**
+1. ~~**Cartesia WebSocket**~~ — deferred (Option C).
+2. ✅ **HTTP double-buffering** — SHIPPED as Option B.
+3. **Prompt Claude for period-terminated sentences** — not needed; Option B handles existing splitter output.
 
 ### F3. Adaptive sentence splitter
 
@@ -370,6 +369,30 @@ Key Phase 2 items from [PRD.md § Phase 2 Scope](PRD.md#phase-2-scope-2-4-weeks-
 - PyInstaller bundle + clean install path
 - **"Unexpected finding" writeup published** (B0 editorial standard)
 - 5+ outside users with documented feedback
+
+---
+
+## Planned next (NOT yet shipped) — parallel capture-on-release
+
+**Status:** Plan approved by user 2026-04-20 late-afternoon. Code NOT yet touched. Will resume in next session.
+
+**Goal:** Eliminate sequential `stop_recording() → re-capture` tax (~280-340ms) by moving re-capture onto a worker thread started at key release, in parallel with STT finalize. Wall-clock becomes `max(STT, capture)` instead of `STT + capture`.
+
+**Two sub-changes (separate commits per user preference):**
+1. **Threshold bump 50→150px** in [app.py:371](app.py) — eliminates re-capture entirely for small cursor movements. 1-line change. 5 min.
+2. **Parallelize re-capture with STT** — launch `_capture_at_release_worker` thread as first step of `_pipeline_worker`, before calling `stt.stop_recording()`. Main thread blocks on STT, then reads capture result from `queue.Queue(maxsize=1)`. ~2-3 hours + tests.
+
+**Measured wins (from 2026-04-20 log analysis):**
+- Cursor-moved sessions (~60% of real PTT): save 280-340ms per session.
+- Cursor-still sessions (~40%): already 0ms (press-time reuse), no change.
+- No-speech sessions (9% lifetime, 0% today): one wasted background capture. Not user-perceivable latency; minor overlay hide/show flicker at most.
+
+**Invariants preserved:**
+- `overlay.hide_for_capture()` still fires BEFORE every `mss.grab()` (Invariant #3 preserved, just runs on worker thread).
+- `pyqtSignal` for all Qt interactions (no main-thread violations).
+- Cursor position snapshot taken synchronously at release (not mid-thread) — decision stable under user cursor motion during STT.
+
+**Full plan:** see `C:\Users\Abhis\.claude\plans\streamed-tumbling-sunbeam.md` (in-chat plan — will need to be overwritten with this new task on resume, OR paste the plan from chat history).
 
 ---
 

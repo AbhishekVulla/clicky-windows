@@ -10,6 +10,61 @@ For **how** → [CLAUDE.md](CLAUDE.md)
 
 ---
 
+## 2026-04-20 (late-afternoon): Option 2 — shrink `stop_recording` grace window 300ms → 100ms
+
+**Context:** Post-Option-B latency analysis across 15 pre-fix + 10 post-fix logs showed STT finalize median was 723ms vs pre-Phase-1.5's 301ms. The 2s outer deadline almost never fired; the real waste was the 300ms grace window `stop_recording` waits AFTER the first `end_of_turn=True` event, in case a trailing multi-utterance final follows.
+
+**Decision:** Shrink the inner grace window (`_final_event.wait(timeout=...)` on the second wait in `stop_recording`) from 300ms to 100ms. With Conservative VAD (`min_turn_silence=800ms`) the mid-PTT multi-utterance case is rare enough that 100ms is sufficient to catch a trailing event clustered right behind the first. The outer 2s deadline is untouched — still an edge-case safety net for AssemblyAI hiccups.
+
+**Alternatives considered:**
+- **Option 1: Tune VAD less conservatively** (threshold=0.5, min_silence=600) — rejected. Pre-fix logs had 100% em-dash stutter rate with default VAD (threshold=0.4, min_silence=400). Relaxing confidence = re-introducing stutter risk for ~200ms win.
+- **Option 3: Disable VAD entirely, force_endpoint is the only trigger** — researched, NOT supported by AssemblyAI Universal-Streaming. No `disable_vad` / `turn_detection_mode=manual` flag exists. Closest workaround (near-zero thresholds + silence-burst PCM injection) has real stutter risk and unknown server-side clamping behavior. SDK source: [`assemblyai/streaming/v3/client.py:172-174`](https://github.com/AssemblyAI/assemblyai-python-sdk/blob/master/assemblyai/streaming/v3/client.py) confirms `force_endpoint()` is fire-and-forget; server runs its own VAD pipeline before firing `end_of_turn`.
+
+**Measured impact (bulk log analysis):**
+- Pre-Option-2 (Conservative VAD + 300ms grace): 723ms median STT finalize
+- Post-Option-2 (Conservative VAD + 100ms grace): ~466ms median STT finalize
+- Net saving: ~257ms median per PTT release
+
+**Consequences:**
+- Trade-off: if user pauses 100-300ms between two sentences mid-PTT-hold, trailing sentence gets cut. Rare case; easy tune-back if observed.
+- Test: `test_stop_recording_grace_window_is_100ms` uses Event handshake + deterministic timing (fails if someone restores 300ms).
+- 178/178 tests green.
+
+**References:** Commit `d29e6dd`. AssemblyAI API surface research via general-purpose agent (Option 3 feasibility).
+
+---
+
+## 2026-04-20 (afternoon): Option B — HTTP double-buffer for seamless sentence playback
+
+**Context:** Post-Path-A manual testing revealed 150-250ms audible gaps between sentences in multi-sentence Claude responses. Path A's sentence-level TTS via HTTP pays Cartesia TTFB (~200-400ms per sentence) after each playback finishes, before the next sentence's audio arrives. Research verified Cartesia SDK's `tts.generate()` returns `BinaryAPIResponse` which eagerly fetches the full body (docstring: *"If you want to stream the response data instead of eagerly reading it all at once then you should use `.with_streaming_response`"*). Our non-streaming call blocks ~200-400ms per sentence — this is the gap.
+
+**Decision:** Split the single queue worker in `tts.py` into two daemon threads with a size-1 handoff queue:
+- **Prefetch worker**: pops sentence N+1 from `_sentence_queue`, calls `generate()` (blocks for full-body fetch), puts `(epoch, sentence, response)` into `_prefetch_queue`.
+- **Playback worker**: pops tuple, iterates `iter_bytes()` → sounddevice. Compares `epoch` against current `_epoch` and closes-without-playing stale responses.
+
+When N is playing (1-2s of audio), prefetch is already fetching N+1 in parallel. By the time N ends, N+1 is buffered and plays instantly.
+
+**Alternatives considered:**
+- **Option A: Keep as-is** — accepted gap costs ~400ms of dead air across 3-sentence response. Rejected per user preference.
+- **Option C: Cartesia WebSocket TTS** — 1-2 days work, eliminates TTFB entirely (including first sentence). Rejected for now: reconnection logic + test rewrites + state-machine complexity. Deferred until post-installer public user testing reveals first-sentence gap as a top complaint.
+
+**Race condition fixed:** if `stop()` fires while prefetch is mid-`generate()`, the eventual `put()` carries the OLD epoch. Playback worker rejects stale-epoch items at pop time and calls `response.close()`. Prevents orphaned audio playing after user-triggered abort.
+
+**Measured impact (manual PTT, multi-sentence response):**
+- Before: S1 [250ms gap] S2 [200ms gap] S3 = ~450ms dead air
+- After: S1 S2 S3 = 0ms dead air (fetch hidden under audio playback)
+
+**Important note for single-sentence responses:** Option B does NOT help. Prefetch has no previous sentence to hide behind. First-sentence TTFB (~300ms) remains. Only Option C WebSocket (deferred) closes that.
+
+**Consequences:**
+- Refactor: `_do_speak` split into `_generate_response` + `_play_response`. `speak()` path preserved via thin wrapper (keeps test surface for 4 `test_tts.py` tests that call `_do_speak` directly).
+- Tests: +2 (prefetch-timing via Event handshake, prefetch-error resilience) = 177.
+- `stop()` extended from 4-pronged → 6-pronged kill: +epoch bump + prefetch-queue drain.
+
+**References:** Commit `4291401`. Research on cartesia SDK: [`resources/tts.py:87-163`](C:/Users/Abhis/AppData/Local/Programs/Python/Python313/Lib/site-packages/cartesia/resources/tts.py), [`_response.py:472-478`](C:/Users/Abhis/AppData/Local/Programs/Python/Python313/Lib/site-packages/cartesia/_response.py).
+
+---
+
 ## 2026-04-20 (early morning): stop_recording wait-loop fix — remove premature `else: break`
 
 **Context:** After 51ff788 correctly restricted the STT handler to `end_of_turn=True`, manual user-testing surfaced a cutoff regression: all 3 PTT interactions returned stale `_latest_partial` text ("How do I add—", "Where is the—", "Wer ist—") instead of real finals. Debug logs showed the real `end_of_turn=True` event arriving ~500-700ms AFTER `force_endpoint()`; `stop_recording`'s wait loop had `else: break` that exited after the FIRST 300ms with no event → returned `_latest_partial`.
