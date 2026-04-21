@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import queue
 import re
 import signal
 import sys
@@ -302,6 +303,79 @@ class ClickyApp(QObject):
             _log(f"ERROR: press-time capture failed — {type(exc).__name__}: {exc}")
             self._press_captures = None  # Release-time path falls back to re-capture
 
+    def _release_capture_worker(
+        self,
+        release_cursor: tuple[int, int],
+        app_name: str,
+        result_queue: "queue.Queue",
+    ) -> None:
+        """Background thread launched at hotkey release. Runs in parallel with
+        stt.stop_recording() so re-capture wall-clock is hidden under STT
+        finalize latency. Makes the reuse-vs-recapture decision itself to
+        preserve 'no flicker on cursor-still sessions' UX — mirrors the
+        serial logic in _pipeline_worker pre-refactor.
+
+        Pushes a tuple (captures, memory_context, reason_log_str) to
+        result_queue. On exception pushes (None, None, error_str) so the
+        main thread's queue.get() never hangs.
+
+        Invariant #3 preserved: overlay.hide_for_capture() fires BEFORE every
+        mss.grab() via sig_hide_overlay (Qt signal to main thread).
+        """
+        try:
+            # If press-time capture is still running, wait briefly for it to
+            # finish before making the reuse decision. Avoids overlay-hide
+            # collision between press-time + release-time captures.
+            press_thread = self._capture_thread
+            if press_thread is not None and press_thread.is_alive():
+                press_thread.join(timeout=0.5)
+
+            # Compute cursor delta at release.
+            cursor_moved_px = 9999
+            if self._press_cursor_pos is not None:
+                dx = release_cursor[0] - self._press_cursor_pos[0]
+                dy = release_cursor[1] - self._press_cursor_pos[1]
+                cursor_moved_px = int((dx * dx + dy * dy) ** 0.5)
+
+            if (
+                self._press_captures is not None
+                and cursor_moved_px <= _REUSE_THRESHOLD_PX
+            ):
+                reason = (
+                    f"reusing press-time captures "
+                    f"(cursor moved {cursor_moved_px}px, "
+                    f"threshold {_REUSE_THRESHOLD_PX}px)"
+                )
+                result_queue.put(
+                    (self._press_captures, self._press_memory, reason)
+                )
+                return
+
+            # Re-capture path — fire invariant-preserving hide → grab → show.
+            if self._press_captures is None:
+                reason_suffix = "no press-time capture available"
+            else:
+                reason_suffix = (
+                    f"cursor moved {cursor_moved_px}px > "
+                    f"{_REUSE_THRESHOLD_PX}px threshold"
+                )
+            reason = f"re-capturing on release ({reason_suffix})"
+
+            self.sig_hide_overlay.emit()
+            threading.Event().wait(0.05)
+            captures = capture_all_screens()
+            self.sig_show_overlay.emit()
+            memory_context = self._memory.recall(app_name)
+            result_queue.put((captures, memory_context, reason))
+        except Exception as exc:
+            _log(
+                f"ERROR: release capture worker failed — "
+                f"{type(exc).__name__}: {exc}"
+            )
+            result_queue.put(
+                (None, None, f"error: {type(exc).__name__}: {exc}")
+            )
+
     def _handle_release(self) -> None:
         """Hotkey released: cancel previous worker, spawn new pipeline."""
         import time
@@ -310,13 +384,23 @@ class ClickyApp(QObject):
         # current cursor position. Cursor polygon stays hidden while spinner
         # runs; buddy reappears when pipeline hides spinner + fires bezier.
         self.sig_hide_waveform.emit()
+
+        # Snapshot release-time cursor synchronously. Taken here (not at
+        # worker-start) so mouse motion during STT can't flip the
+        # reuse-vs-recapture decision mid-flight. Reused for the spinner
+        # dispatch below to avoid a redundant Win32 GetCursorPos call.
+        release_cursor: tuple[int, int] | None = None
         try:
             cursor_x, cursor_y = get_cursor_position()
+            release_cursor = (cursor_x, cursor_y)
             mon = monitor_containing(cursor_x, cursor_y, list_monitors())
             if mon is not None:
                 self.sig_show_spinner.emit(cursor_x, cursor_y, mon)
         except Exception as exc:
             _log(f"WARN: show_spinner dispatch failed — {exc}")
+        if release_cursor is None:
+            release_cursor = self._press_cursor_pos or (0, 0)
+
         if self._worker_thread and self._worker_thread.is_alive():
             _log("  cancelling previous worker + stopping TTS")
             self._cancel_event.set()
@@ -327,12 +411,26 @@ class ClickyApp(QObject):
 
         self._cancel_event = threading.Event()
 
+        # Size-1 queue: capture worker pushes once, pipeline worker gets once.
+        release_capture_queue: queue.Queue = queue.Queue(maxsize=1)
+
+        # Launch capture worker BEFORE pipeline worker so it starts doing its
+        # reuse-decision + potential mss.grab in parallel with stt.stop_recording.
+        capture_worker_thread = threading.Thread(
+            target=self._release_capture_worker,
+            args=(release_cursor, self._current_app, release_capture_queue),
+            daemon=True,
+            name="clicky-release-capture",
+        )
+        capture_worker_thread.start()
+
         self._worker_thread = threading.Thread(
             target=self._pipeline_worker,
             args=(
                 self._current_app,
                 self._current_title,
                 self._cancel_event,
+                release_capture_queue,
             ),
             daemon=True,
             name="clicky-pipeline",
@@ -346,8 +444,16 @@ class ClickyApp(QObject):
         app_name: str,
         window_title: str,
         cancel: threading.Event,
+        capture_queue: "queue.Queue",
     ) -> None:
-        """Sequential pipeline: STT → capture → recall → stream → TTS → overlay."""
+        """Sequential pipeline: STT → capture → recall → stream → TTS → overlay.
+
+        ``capture_queue`` is populated in parallel by
+        :meth:`_release_capture_worker` (launched in ``_handle_release``
+        BEFORE this thread). This thread blocks on ``stt.stop_recording()``,
+        then reads the capture result from the queue. Wall-clock becomes
+        ``max(STT, capture)`` instead of ``STT + capture``.
+        """
         dbg = DebugSession.start(app_name, window_title)
         try:
             if cancel.is_set():
@@ -367,32 +473,39 @@ class ClickyApp(QObject):
             if cancel.is_set():
                 return
 
-            # Decide: reuse press-time captures (if cursor is still) or re-grab.
-            cursor_now = get_cursor_position()
-            cursor_moved_px = 9999
-            if self._press_cursor_pos is not None:
-                dx = cursor_now[0] - self._press_cursor_pos[0]
-                dy = cursor_now[1] - self._press_cursor_pos[1]
-                cursor_moved_px = int((dx * dx + dy * dy) ** 0.5)
-
-            if self._press_captures is not None and cursor_moved_px <= _REUSE_THRESHOLD_PX:
-                dbg.log(
-                    f"CAPTURE: reusing press-time captures "
-                    f"(cursor moved {cursor_moved_px}px, threshold {_REUSE_THRESHOLD_PX}px)"
+            # Read capture result from the worker that's been running in
+            # parallel with stt.stop_recording above. Timeout is 5s — far
+            # above any realistic capture time (~300ms worst case) — so if
+            # the worker errored silently we fail loudly instead of hanging.
+            # Fallback on timeout or error: use press-time captures if
+            # available, else abort pipeline.
+            try:
+                captures, memory_context, capture_reason = capture_queue.get(
+                    timeout=5.0
                 )
+            except queue.Empty:
+                dbg.log("CAPTURE: worker timeout after 5s — falling back to press-time")
                 captures = self._press_captures
                 memory_context = self._press_memory
-            else:
-                if self._press_captures is None:
-                    reason = "no press-time capture available"
+                capture_reason = "worker timeout — press-time fallback"
+
+            if captures is None:
+                if self._press_captures is not None:
+                    dbg.log(
+                        f"CAPTURE: worker failed ({capture_reason}) — "
+                        f"using press-time fallback"
+                    )
+                    captures = self._press_captures
+                    memory_context = self._press_memory
                 else:
-                    reason = f"cursor moved {cursor_moved_px}px > {_REUSE_THRESHOLD_PX}px threshold"
-                dbg.log(f"CAPTURE: re-capturing on release ({reason})")
-                self.sig_hide_overlay.emit()
-                threading.Event().wait(0.05)
-                captures = capture_all_screens()
-                self.sig_show_overlay.emit()
-                memory_context = self._memory.recall(app_name)
+                    dbg.log(
+                        f"CAPTURE: worker failed and no press-time fallback "
+                        f"({capture_reason}) — aborting pipeline"
+                    )
+                    _log("ERROR: No screenshots available for Claude, aborting.")
+                    return
+
+            dbg.log(f"CAPTURE: {capture_reason}")
 
             dbg.log(f"CAPTURE: {len(captures)} screen(s)")
             for i, c in enumerate(captures):

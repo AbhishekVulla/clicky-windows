@@ -296,10 +296,14 @@ class TestClickyApp:
         assert app._press_cursor_pos == (100, 200)
         app._memory.recall.assert_called_once_with("EXCEL.EXE")
 
-    def test_pipeline_worker_reuses_press_time_captures_when_cursor_still(self, mocker):
-        """If cursor moved <=50px between press and release, reuse the
-        press-time captures (no re-grab on release path)."""
-        import threading
+    def test_release_capture_worker_reuses_when_cursor_still(self, mocker):
+        """If cursor moved ~0px between press and release, worker must
+        reuse the press-time captures without calling capture_all_screens
+        (no flicker, no wasted work on cursor-still sessions).
+
+        Post-Commit-2: decision logic moved from _pipeline_worker to
+        _release_capture_worker. This test targets the worker directly."""
+        import queue as _queue
         app = self._make_app(mocker)
 
         fake_capture = mocker.MagicMock()
@@ -316,26 +320,23 @@ class TestClickyApp:
         app._press_memory = "prior memory"
         app._press_cursor_pos = (100, 100)
 
-        # Cursor moved only 20px (well within 50px threshold)
-        mocker.patch("app.get_cursor_position", return_value=(115, 105))
         capture_fn = mocker.patch("app.capture_all_screens")
 
-        app._stt.stop_recording.return_value = "test transcript"
-        # Short-circuit the Claude call by making ask_stream a no-op
-        fake_stream = mocker.MagicMock()
-        fake_stream.text_deltas.return_value = iter([])
-        fake_stream.final_result.return_value = mocker.MagicMock(
-            spoken_text="ok", coordinate=None, element_label=None, screen_number=None,
+        result_queue: _queue.Queue = _queue.Queue(maxsize=1)
+        # Cursor moved only 18px (sqrt(15²+10²)) — well within 150px threshold
+        app._release_capture_worker(
+            release_cursor=(115, 110),
+            app_name="EXCEL.EXE",
+            result_queue=result_queue,
         )
-        app._ai.ask_stream.return_value.__enter__ = mocker.MagicMock(return_value=fake_stream)
-        app._ai.ask_stream.return_value.__exit__ = mocker.MagicMock(return_value=False)
-
-        cancel = threading.Event()
-        app._pipeline_worker("EXCEL.EXE", "Sheet1", cancel)
 
         assert not capture_fn.called, (
-            "Expected pipeline to reuse press-time captures when cursor is still"
+            "Expected worker to reuse press-time captures when cursor is still"
         )
+        captures, memory_context, reason = result_queue.get_nowait()
+        assert captures == [fake_capture]
+        assert memory_context == "prior memory"
+        assert "reusing" in reason
 
     def test_pipeline_streams_sentences_during_claude_generation(self, mocker):
         """Pipeline must call tts.speak_sentence for each .!? boundary in the
@@ -345,7 +346,11 @@ class TestClickyApp:
         Biggest latency win in Path A: first audible word happens when sentence-1
         is ready (~1200ms after Claude TTFT) instead of when sentence-N is done
         (~3700ms).
-        """
+
+        Post-Commit-2: `_pipeline_worker` takes a pre-populated capture queue
+        (normally filled in parallel by `_release_capture_worker`). Tests pass
+        a manually-populated queue."""
+        import queue as _queue
         import threading
         from PIL import Image
         app = self._make_app(mocker)
@@ -362,7 +367,6 @@ class TestClickyApp:
         app._press_captures = [fake_cap]
         app._press_memory = ""
         app._press_cursor_pos = (100, 100)
-        mocker.patch("app.get_cursor_position", return_value=(100, 100))
         app._stt.stop_recording.return_value = "how do I make my repo public"
 
         # Stream that yields sentences one delta at a time + a [POINT:...] tag at the end.
@@ -387,8 +391,12 @@ class TestClickyApp:
         app._ai.ask_stream.return_value.__enter__ = mocker.MagicMock(return_value=fake_stream)
         app._ai.ask_stream.return_value.__exit__ = mocker.MagicMock(return_value=False)
 
+        # Pre-populate capture queue simulating the parallel worker's output.
+        capture_queue: _queue.Queue = _queue.Queue(maxsize=1)
+        capture_queue.put(([fake_cap], "", "test: reusing press-time captures"))
+
         cancel = threading.Event()
-        app._pipeline_worker("TEST.EXE", "TestWindow", cancel)
+        app._pipeline_worker("TEST.EXE", "TestWindow", cancel, capture_queue)
 
         sentence_calls = [c.args[0] for c in app._tts.speak_sentence.call_args_list]
 
@@ -412,13 +420,13 @@ class TestClickyApp:
             "Batch tts.speak() should be replaced with sentence-level streaming"
         )
 
-    def test_pipeline_worker_reuses_on_medium_cursor_move(self, mocker):
-        """Commit 1 (2026-04-21): 150px reuse threshold (raised from 50).
+    def test_release_capture_worker_reuses_on_medium_cursor_move(self, mocker):
+        """Commit 1 threshold (50 → 150px) verified at the worker level.
         Cursor moves 106px — within 'target hover' intent, not 'user
-        repositioned' — so pipeline reuses press-time captures. Pre-Commit-1
+        repositioned' — so worker reuses press-time captures. Pre-Commit-1
         this would have re-captured (106 > 50); post-Commit-1 it reuses
         (106 <= 150)."""
-        import threading
+        import queue as _queue
         app = self._make_app(mocker)
 
         fake_capture = mocker.MagicMock()
@@ -435,33 +443,32 @@ class TestClickyApp:
         app._press_memory = "prior memory"
         app._press_cursor_pos = (100, 100)
 
-        # Cursor moved 106px (sqrt(80² + 70²)) — above old 50px threshold,
-        # below new 150px threshold. Post-Commit-1 should reuse.
-        mocker.patch("app.get_cursor_position", return_value=(180, 170))
         capture_fn = mocker.patch("app.capture_all_screens")
 
-        app._stt.stop_recording.return_value = "test transcript"
-        fake_stream = mocker.MagicMock()
-        fake_stream.text_deltas.return_value = iter([])
-        fake_stream.final_result.return_value = mocker.MagicMock(
-            spoken_text="ok", coordinate=None, element_label=None, screen_number=None,
+        result_queue: _queue.Queue = _queue.Queue(maxsize=1)
+        # Cursor moved 106px (sqrt(80² + 70²)) — above old 50px threshold,
+        # below new 150px threshold. Should reuse.
+        app._release_capture_worker(
+            release_cursor=(180, 170),
+            app_name="EXCEL.EXE",
+            result_queue=result_queue,
         )
-        app._ai.ask_stream.return_value.__enter__ = mocker.MagicMock(return_value=fake_stream)
-        app._ai.ask_stream.return_value.__exit__ = mocker.MagicMock(return_value=False)
-
-        cancel = threading.Event()
-        app._pipeline_worker("EXCEL.EXE", "Sheet1", cancel)
 
         assert not capture_fn.called, (
-            "Expected pipeline to reuse press-time captures at 106px "
+            "Expected worker to reuse press-time captures at 106px "
             "(within new 150px threshold), but capture_all_screens was called"
         )
+        captures, _, reason = result_queue.get_nowait()
+        assert captures == [fake_capture]
+        assert "reusing" in reason and "106px" in reason
 
-    def test_pipeline_worker_recaptures_on_large_cursor_move(self, mocker):
-        """If cursor moved past the reuse threshold, pipeline re-captures on
+    def test_release_capture_worker_recaptures_on_large_cursor_move(self, mocker):
+        """If cursor moved past the reuse threshold, worker re-captures on
         release (safeguard against stale screenshots when user actively
-        repositioned mid-utterance)."""
-        import threading
+        repositioned mid-utterance).
+
+        Post-Commit-2: decision logic lives in _release_capture_worker."""
+        import queue as _queue
         from PIL import Image
         app = self._make_app(mocker)
 
@@ -484,26 +491,25 @@ class TestClickyApp:
         app._press_captures = [stale_capture]
         app._press_memory = "prior"
         app._press_cursor_pos = (100, 100)
+        app._memory.recall.return_value = "fresh memory"
 
-        # Cursor moved 283px (sqrt(200²+200²)) — well past 150px threshold
-        mocker.patch("app.get_cursor_position", return_value=(300, 300))
         capture_fn = mocker.patch("app.capture_all_screens", return_value=[fresh_capture])
 
-        app._stt.stop_recording.return_value = "test transcript"
-        fake_stream = mocker.MagicMock()
-        fake_stream.text_deltas.return_value = iter([])
-        fake_stream.final_result.return_value = mocker.MagicMock(
-            spoken_text="ok", coordinate=None, element_label=None, screen_number=None,
+        result_queue: _queue.Queue = _queue.Queue(maxsize=1)
+        # Cursor moved 283px (sqrt(200²+200²)) — well past 150px threshold
+        app._release_capture_worker(
+            release_cursor=(300, 300),
+            app_name="EXCEL.EXE",
+            result_queue=result_queue,
         )
-        app._ai.ask_stream.return_value.__enter__ = mocker.MagicMock(return_value=fake_stream)
-        app._ai.ask_stream.return_value.__exit__ = mocker.MagicMock(return_value=False)
-
-        cancel = threading.Event()
-        app._pipeline_worker("EXCEL.EXE", "Sheet1", cancel)
 
         assert capture_fn.called, (
-            "Expected re-capture when cursor moved >50px between press and release"
+            "Expected re-capture when cursor moved >150px between press and release"
         )
+        captures, memory_context, reason = result_queue.get_nowait()
+        assert captures == [fresh_capture]
+        assert memory_context == "fresh memory"
+        assert "re-capturing" in reason
 
     def test_default_ai_client_comes_from_factory(self, mocker):
         """When no ai_client passed, ClickyApp calls create_ai_client(MODEL_ID, ...)."""
@@ -522,3 +528,158 @@ class TestClickyApp:
         assert "model_id" in kwargs
         assert "api_key" in kwargs
         assert clicky._ai is mock_factory.return_value
+
+    # --- Commit 2: parallel release capture (2026-04-21) -----------------
+
+    def test_release_capture_runs_in_parallel_with_stt(self, mocker):
+        """Commit 2: release-time capture worker must start BEFORE
+        stt.stop_recording returns. Event handshake proves parallelism:
+        STT blocks in stop_recording until the test releases it; capture
+        is instrumented to signal when it's called. If capture_started
+        fires WHILE stt_release is still unset, parallelism is proven.
+        If the refactor regressed to serial, capture_started never fires
+        until after stt_release — test times out.
+
+        Pattern mirrors test_tts.py::test_prefetch_fires_before_previous_playback_completes.
+        """
+        import threading as _t
+        from PIL import Image
+
+        app = self._make_app(mocker)
+        stt_release = _t.Event()
+        capture_started = _t.Event()
+
+        def blocking_stop_recording():
+            if not stt_release.wait(timeout=2.0):
+                raise AssertionError("stt_release never set")
+            return "hello world"
+        app._stt.stop_recording.side_effect = blocking_stop_recording
+
+        fake_cap = mocker.MagicMock()
+        fake_cap.image = Image.new("RGB", (1280, 800))
+        fake_cap.label = "screen 1 of 1"
+        fake_cap.scale_x = fake_cap.scale_y = 1.0
+        fake_cap.monitor = {"left": 0, "top": 0, "width": 1920, "height": 1080}
+        fake_cap.target_width = 1280
+        fake_cap.target_height = 800
+        fake_cap.is_cursor_screen = True
+
+        def signal_capture():
+            capture_started.set()
+            return [fake_cap]
+        mocker.patch("app.capture_all_screens", side_effect=signal_capture)
+        mocker.patch("app.get_cursor_position", return_value=(500, 500))
+        mocker.patch("app.list_monitors", return_value=[fake_cap.monitor])
+        mocker.patch("app.monitor_containing", return_value=fake_cap.monitor)
+        app._memory.recall.return_value = ""
+        # Force re-capture path (no press-time capture available).
+        app._press_captures = None
+        app._press_cursor_pos = (0, 0)
+
+        # Short-circuit Claude.
+        fake_stream = mocker.MagicMock()
+        fake_stream.text_deltas.return_value = iter([])
+        fake_stream.final_result.return_value = mocker.MagicMock(
+            spoken_text="ok", coordinate=None, element_label=None, screen_number=None,
+        )
+        app._ai.ask_stream.return_value.__enter__ = mocker.MagicMock(return_value=fake_stream)
+        app._ai.ask_stream.return_value.__exit__ = mocker.MagicMock(return_value=False)
+
+        app._handle_release()
+
+        # PROOF OF PARALLELISM: capture must fire while STT is still blocked.
+        assert capture_started.wait(timeout=2.0), (
+            "release capture worker didn't fire capture_all_screens within 2s. "
+            "Either the worker wasn't launched, or it's waiting on STT (regressed to serial)."
+        )
+        assert not stt_release.is_set(), (
+            "capture_started fired AFTER stt_release — shouldn't happen but indicates test bug."
+        )
+
+        # Now release STT and let the pipeline finish cleanly.
+        stt_release.set()
+        if app._worker_thread is not None:
+            app._worker_thread.join(timeout=3.0)
+
+    def test_release_no_speech_bails_without_hanging(self, mocker):
+        """Commit 2: if stt.stop_recording returns empty, pipeline_worker
+        must bail out without hanging on capture_queue.get(). The worker
+        thread finishes in the background as a daemon thread."""
+        app = self._make_app(mocker)
+        app._stt.stop_recording.return_value = ""  # no speech
+        mocker.patch("app.get_cursor_position", return_value=(100, 100))
+        mon = {"left": 0, "top": 0, "width": 1920, "height": 1080}
+        mocker.patch("app.list_monitors", return_value=[mon])
+        mocker.patch("app.monitor_containing", return_value=mon)
+        mocker.patch("app.capture_all_screens", return_value=[mocker.MagicMock()])
+        app._memory.recall.return_value = ""
+
+        app._handle_release()
+
+        # Pipeline worker should exit cleanly (not hang on queue.get).
+        if app._worker_thread is not None:
+            app._worker_thread.join(timeout=3.0)
+            assert not app._worker_thread.is_alive(), (
+                "pipeline_worker hung after no-speech bail — likely blocked on "
+                "capture_queue.get() without a timeout or fallback"
+            )
+        # Claude must not have been called (no speech → no request).
+        app._ai.ask_stream.assert_not_called()
+
+    def test_release_capture_worker_hides_overlay_before_grab(self, mocker):
+        """Invariant #3: overlay.hide_for_capture() MUST fire BEFORE every
+        mss.grab(). If Claude sees our blue cursor in its input screenshot
+        it tries to point at itself (infinite feedback loop).
+
+        Test strategy: call _release_capture_worker DIRECTLY on the test
+        thread (bypassing _handle_release) so the pyqtSignal slot dispatch
+        fires synchronously. Cross-thread pyqtSignal.emit requires a
+        QApplication event loop to fire the slot; calling the worker
+        synchronously avoids that dependency.
+
+        The worker's sig_hide_overlay.emit() → _on_hide_overlay slot →
+        app._overlay.hide_for_capture() gives us the observable call on
+        the mock overlay. Compare ordering vs capture_all_screens.
+        """
+        import queue as _queue
+
+        app = self._make_app(mocker)
+        app._memory.recall.return_value = ""
+        app._press_captures = None  # force re-capture path
+        app._press_cursor_pos = (0, 0)
+
+        events = []
+        mon = {"left": 0, "top": 0, "width": 1920, "height": 1080}
+
+        app._overlay.hide_for_capture.side_effect = lambda: events.append("hide")
+
+        def record_capture():
+            events.append("capture")
+            cap = mocker.MagicMock()
+            cap.image = mocker.MagicMock()
+            cap.label = "s"
+            cap.scale_x = cap.scale_y = 1.0
+            cap.monitor = mon
+            cap.target_width = 1280
+            cap.target_height = 800
+            cap.is_cursor_screen = True
+            return [cap]
+
+        mocker.patch("app.capture_all_screens", side_effect=record_capture)
+
+        # Call worker directly on this thread — slot dispatch is synchronous.
+        result_queue: _queue.Queue = _queue.Queue(maxsize=1)
+        app._release_capture_worker(
+            release_cursor=(500, 500),
+            app_name="TEST.EXE",
+            result_queue=result_queue,
+        )
+
+        assert "hide" in events and "capture" in events, (
+            f"Expected both hide+capture events, got {events}"
+        )
+        assert events.index("hide") < events.index("capture"), (
+            f"INVARIANT #3 VIOLATION: hide must fire before capture, got order {events}"
+        )
+        # Worker must always push a result to the queue (never hang).
+        assert not result_queue.empty(), "worker did not push result to queue"
