@@ -412,9 +412,55 @@ class TestClickyApp:
             "Batch tts.speak() should be replaced with sentence-level streaming"
         )
 
+    def test_pipeline_worker_reuses_on_medium_cursor_move(self, mocker):
+        """Commit 1 (2026-04-21): 150px reuse threshold (raised from 50).
+        Cursor moves 106px — within 'target hover' intent, not 'user
+        repositioned' — so pipeline reuses press-time captures. Pre-Commit-1
+        this would have re-captured (106 > 50); post-Commit-1 it reuses
+        (106 <= 150)."""
+        import threading
+        app = self._make_app(mocker)
+
+        fake_capture = mocker.MagicMock()
+        fake_capture.image = mocker.MagicMock()
+        fake_capture.label = "screen 1 of 1"
+        fake_capture.scale_x = 1.0
+        fake_capture.scale_y = 1.0
+        fake_capture.monitor = {"left": 0, "top": 0, "width": 1920, "height": 1080}
+        fake_capture.target_width = 1280
+        fake_capture.target_height = 800
+        fake_capture.is_cursor_screen = True
+
+        app._press_captures = [fake_capture]
+        app._press_memory = "prior memory"
+        app._press_cursor_pos = (100, 100)
+
+        # Cursor moved 106px (sqrt(80² + 70²)) — above old 50px threshold,
+        # below new 150px threshold. Post-Commit-1 should reuse.
+        mocker.patch("app.get_cursor_position", return_value=(180, 170))
+        capture_fn = mocker.patch("app.capture_all_screens")
+
+        app._stt.stop_recording.return_value = "test transcript"
+        fake_stream = mocker.MagicMock()
+        fake_stream.text_deltas.return_value = iter([])
+        fake_stream.final_result.return_value = mocker.MagicMock(
+            spoken_text="ok", coordinate=None, element_label=None, screen_number=None,
+        )
+        app._ai.ask_stream.return_value.__enter__ = mocker.MagicMock(return_value=fake_stream)
+        app._ai.ask_stream.return_value.__exit__ = mocker.MagicMock(return_value=False)
+
+        cancel = threading.Event()
+        app._pipeline_worker("EXCEL.EXE", "Sheet1", cancel)
+
+        assert not capture_fn.called, (
+            "Expected pipeline to reuse press-time captures at 106px "
+            "(within new 150px threshold), but capture_all_screens was called"
+        )
+
     def test_pipeline_worker_recaptures_on_large_cursor_move(self, mocker):
-        """If cursor moved >50px, pipeline re-captures on release (safeguard
-        against stale screenshots when user actively repositioned mid-utterance)."""
+        """If cursor moved past the reuse threshold, pipeline re-captures on
+        release (safeguard against stale screenshots when user actively
+        repositioned mid-utterance)."""
         import threading
         from PIL import Image
         app = self._make_app(mocker)
@@ -439,8 +485,8 @@ class TestClickyApp:
         app._press_memory = "prior"
         app._press_cursor_pos = (100, 100)
 
-        # Cursor moved 141px (sqrt(100²+100²)) — well past 50px threshold
-        mocker.patch("app.get_cursor_position", return_value=(200, 200))
+        # Cursor moved 283px (sqrt(200²+200²)) — well past 150px threshold
+        mocker.patch("app.get_cursor_position", return_value=(300, 300))
         capture_fn = mocker.patch("app.capture_all_screens", return_value=[fresh_capture])
 
         app._stt.stop_recording.return_value = "test transcript"

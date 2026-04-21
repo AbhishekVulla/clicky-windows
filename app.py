@@ -56,6 +56,13 @@ _SENTENCE_END_RE = re.compile(r"[.!?]\s")
 
 _MAX_HISTORY_EXCHANGES = 10
 
+_REUSE_THRESHOLD_PX = 150
+"""Max cursor movement between press and release for reusing press-time
+captures. Raised from 50 → 150 on 2026-04-21 after real-session logs
+showed 100-150px cursor hovers were re-capturing unnecessarily.
+150px = ~3cm on a 200% DPI laptop display — within 'target hover'
+intent, not 'user repositioned intentionally'."""
+
 
 def flush_sentences(buffer: str) -> tuple[list[str], str]:
     """Split buffer into complete sentences and leftover.
@@ -368,10 +375,10 @@ class ClickyApp(QObject):
                 dy = cursor_now[1] - self._press_cursor_pos[1]
                 cursor_moved_px = int((dx * dx + dy * dy) ** 0.5)
 
-            if self._press_captures is not None and cursor_moved_px <= 50:
+            if self._press_captures is not None and cursor_moved_px <= _REUSE_THRESHOLD_PX:
                 dbg.log(
                     f"CAPTURE: reusing press-time captures "
-                    f"(cursor moved {cursor_moved_px}px, threshold 50px)"
+                    f"(cursor moved {cursor_moved_px}px, threshold {_REUSE_THRESHOLD_PX}px)"
                 )
                 captures = self._press_captures
                 memory_context = self._press_memory
@@ -379,7 +386,7 @@ class ClickyApp(QObject):
                 if self._press_captures is None:
                     reason = "no press-time capture available"
                 else:
-                    reason = f"cursor moved {cursor_moved_px}px > 50px threshold"
+                    reason = f"cursor moved {cursor_moved_px}px > {_REUSE_THRESHOLD_PX}px threshold"
                 dbg.log(f"CAPTURE: re-capturing on release ({reason})")
                 self.sig_hide_overlay.emit()
                 threading.Event().wait(0.05)
