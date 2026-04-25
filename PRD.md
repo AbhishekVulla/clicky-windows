@@ -263,31 +263,72 @@ If triggered: port to Tauri 2.0 + Rust backend + Vue 3 frontend + Pinia, matchin
 
 ## Competitor Landscape
 
-| Competitor | Platform | Points at screen? | Voice? | Memory? | Open source? | Price | Our edge |
-|---|---|---|---|---|---|---|---|
-| **Clicky** (farzaa/clicky) | macOS only | Yes | Yes | No | Yes, MIT | Free (Cloudflare Worker proxy holds keys) | Windows + persistent memory + BYOK |
-| **Clippi.us** | macOS only, "Windows soon" | Yes | Yes | No | No | Free | Windows + memory + open source + shipped |
-| **GhostDesk** | Windows | No | Voice out only | No | No | $9.99/mo | Points, free, memory |
-| **Screenpipe** | Win + Mac | No | No | Records everything | Yes | Free | Interactive push-to-talk, not passive recording |
-| **tekram/clicky-windows** (2026-04-19 update) | Windows (Electron) | Yes | Yes (3 STT: AssemblyAI + OpenAI Whisper + whisper.cpp local; 3 TTS: ElevenLabs + OpenAI + Windows SAPI) | **No** | Yes, MIT | Free | **Memory** (their #1 missing feature). We: 30MB PyQt6 vs their 150MB Electron. They have shipped Squirrel installer (we don't yet — tracked as Phase B1). Now 26 ⭐, actively developed — THE real Windows competitor today. |
-| **tornikegomareli/clicky-desktop** (2026-04-19 new) | Windows + Linux (Rust + Raylib) | Yes (ports `[POINT:x,y:label:screenN]` verbatim) | Yes (AssemblyAI STT + ElevenLabs/espeak TTS) | **No** | Yes, MIT | Free | **Memory** + **engineering rigor** (they have zero tests; we have 138). They inherited the `ElementLocationDetector.swift` dead-code port (their `computer_use.rs` explicitly ports `ElementLocationDetector.swift:1-335` — the file we caught as unreferenced in 2026-04-12 e3). 8 ⭐, active. |
-| **mo-tunn/OpenGuider** (2026-04-19 new) | Windows + macOS + Linux (Electron) | Yes, with structured pointer hints | Yes (AssemblyAI + Whisper; Google + OpenAI + ElevenLabs TTS) | **No** (session history only) | Yes, Apache 2.0 | Free | **Memory** + **conversational ethos** (they ship trili.ai-style structured task planners; our UX is Farza's "learn by doing" conversational buddy — opposite philosophy). 66 ⭐. |
-| **shreshth-s / NReyes22 / Arnie936 ("Zippy") / jvaught01 ("Flicky") / JaySmith502 / annasba07 / CONFUZ3** (2026-04-19 minor clones) | Windows (C#/WPF, WinForms, Electron, Python, Rust-incomplete) | Yes (all use `[POINT]` tag) | Varies | **No** (JaySmith502 has static user-curated per-app docs but not learned) | Yes | Free | Memory + polish + shipped installer. Most are 2-28 ⭐, evidence the space is saturating fast. |
-| **danpeg/clicky** (macOS fork) | macOS | Yes, proactive | Yes | No | Yes | Free (Cloudflare Worker) | Windows. 86 ⭐ (highest fork). Copy their proactive-mode idea in Phase 2, targeted at real memory patterns. |
-| **Claude Cowork / Grunty** | Cross-platform | N/A (controls, doesn't point) | No | No | Grunty yes | Varies | Different category — we guide, they act |
-| **Microsoft Copilot Vision** | Win 11 | No | No | No | No | Bundled | Points, voice, memory |
-| **Littlebird** | Cross-platform | No | No | Yes | No | Enterprise, $11M raised | Consumer, free, visual pointer |
-| **[trili.ai](https://trili.ai/)** (*"Master Any Software"*) | Windows | No (text instructions only) | Partial (text-first) | Unknown | No (closed SaaS) | Unknown | **Opposite design philosophy.** trili.ai ships sidebar panel + text chat + pre-planned "STEP 1 OF 7" structured tutorials (Khan Academy model). Clicky Windows ships transparent click-through overlay + voice-first + conversational "learn by doing" + persistent memory. Evidence: user-provided 2026-04-12 screenshot. |
-| **Vercept** (acquired by Anthropic, Feb 2026) | ??? | Unknown | Unknown | Unknown | No | Not yet shipped | **STRATEGIC THREAT** — Anthropic will ship first-party Windows screen-aware AI. Phase 1 must ship before they do. Memory is the long-term moat. |
+**Last refreshed:** 2026-04-26 via parallel agent research. Memory note: this section is the project's single source of truth for competitor facts. CLAUDE.md just points here. Refresh quarterly or when a major shipped competitor moves the picture.
 
-**Key insight:** nobody has shipped *Windows + pointing + voice + memory* as a single product. **The combination is open.** Our edges: open source + BYOK from day 1 + zero screen-cost overlay + voice-first + conversational learn-by-doing + persistent memory.
+### Voice + overlay + Windows (closest threat axis)
+
+| Competitor | Platform | Points? | Voice? | Memory? | Stars / activity (2026-04-26) | Notes |
+|---|---|---|---|---|---|---|
+| **tekram/clicky-windows** | Windows (Electron+TS) | Yes | Yes | **No** | **38 ⭐ (was 14, ACTIVE — last push 3 days ago)** | Has installer, multi-provider (Anthropic/OpenAI/OpenRouter), Whisper+ElevenLabs, system tray, HIPAA mode. **Direct competitor on the casual Windows-port axis.** Their gap = our wedge: persistent memory. |
+| **JaySmith502/clicky-win** | Windows (Python) | Yes | Yes | **Partial** (user-curated NotebookLM-imported docs keyed to window title — not auto-learned) | 4 ⭐ (hobby tier) | Architectural twin to ours: Python + Ctrl+Alt PTT + waveform + per-app markdown KB. Theirs is read-only curated; ours is auto-written from interactions. Differentiated but no longer architecturally unique. |
+| **danpeg/clicky** (macOS fork) | macOS only | Yes, proactive | Yes | No | 88 ⭐, stalled (last push 18 days) | Phase 2 inspiration for proactive mode (target real memory patterns). |
+| **Clippi.us** | macOS only ("Windows soon") | Yes | Yes | No | Closed-source | Status unchanged from April 2026. Has not shipped Windows. |
+
+### Autonomous GUI agents (different category — they execute, we point)
+
+| Competitor | Platform | Notes |
+|---|---|---|
+| **Claude Cowork** (Anthropic) | Windows shipped 2026-02-10 | Chat-side-panel + multi-step exec + scheduled tasks. NOT voice/overlay; product boundary intact. Pro/Max tier. |
+| **CursorTouch Windows-MCP** | Windows | 5.3k ⭐, programmatic Windows agent library, MIT. Not consumer-facing. |
+| **Claude Computer Use** | API beta | Sonnet 4.6 hit 72.5% OSWorld (vs <15% late 2024). Beta header still required. Cowork is the consumer surface. |
+| **Playwright MCP** (microsoft) | Cross-platform | 31.4k ⭐. Browser automation dev tool. Auto-included in GitHub Copilot Coding Agent. |
+| **OpenAI Operator** | Browser only | ChatGPT Pro tier. No native desktop. |
+| **Google Project Mariner** | Web only | Trusted-tester preview Q1 2026. Explicitly not desktop. |
+| **MS Copilot Agent Mode** | M365 apps only | GA Apr 22, 2026 in Word/Excel/PPT. Windows-wide "Agent Workspace" still private preview. |
+
+### Voice + screen-aware on Windows (no overlay / no memory)
+
+| Competitor | Notes |
+|---|---|
+| **Microsoft "Hey Copilot" + Copilot Vision** | Wake-word + screen-aware chat in Windows 11 itself. **Platform-level commoditizer for non-tech users.** Long-game threat (6-12 months). Position Clicky Windows as the depth / learn-by-doing tool, not mass-market. |
+| **GhostDesk 2.0** | Added Nova-3 STT in v2, paid Windows overlay ($5/24h, $9.99/mo). "Interview cheating" angle. No pointing, no per-app memory. Razorpay/Dodo billing, OCR. |
+
+### Adjacent / different category
+
+| Competitor | Notes |
+|---|---|
+| **Screenpipe** | 24/7 passive recorder, MCP server, MIT. Not interactive buddy. |
+| **trili.ai** | Khan-Academy structured tutorials, sidebar. Site is a stub. Opposite design philosophy. |
+| **Skywork Desktop** | Windows persistent agent environment (launched Feb 2026). Different category (agent, not buddy). |
+| **OpenClaw 2026.4.10** | OSS local LLM harness with "Active Memory" plugin. Different surface (local LLM, no overlay). |
+| **Littlebird** | Enterprise cross-platform, $11M raised. Consumer-free differentiator survives. |
+
+### Threats downgraded since April 2026
+
+- ~~**Vercept** (acquired Anthropic Feb 25, 2026)~~ — Vy desktop app shut down 2026-03-25. Team absorbed into Computer Use group. **Threat eliminated.**
+- ~~**Farza ships Windows officially**~~ — He's running Chasi (YC W26). 0 comments from him on Issue #26 ever. Last meaningful Clicky commit 2026-04-10 (license + key cleanup). **Window is open; community owns Windows.**
+
+### Differentiator framing (locked 2026-04-26)
+
+The Karpathy markdown memory pattern went viral early April 2026 (VentureBeat coverage; MemPalace 47K stars in 2 weeks). Memory as a *technique* is no longer novel.
+
+**Lead positioning: voice PTT + visual pointer + persistent per-app auto-memory + Windows-native — the trifecta, combined.**
+
+Every shipped competitor occupies at most 2-3 of these 4 axes:
+- tekram: voice + overlay + Windows, **no memory**
+- JaySmith502: voice + overlay + memory + Windows, but memory is **curated, not auto-learned**
+- Claude Cowork: chat-only, **no voice + no overlay**
+- MS "Hey Copilot": voice + screen-aware, **no overlay + no memory**
+- GhostDesk 2.0: voice + overlay (no pointing) + Windows, **no memory**
+
+The trifecta is uncrowded. See [LAUNCH.md](LAUNCH.md) (gitignored, internal) for full writeup pitch + distribution channels.
 
 ## Validated User Demands (sourced from Clicky GitHub issues + forks + Farza's social)
 
 Every Phase 2 Scope bullet traces to one or more of these:
 
 1. **Windows version** — #1 request on farzaa/clicky. [Issue #26](https://github.com/farzaa/clicky/issues/26) (18 comments), [#21](https://github.com/farzaa/clicky/issues/21), [#19](https://github.com/farzaa/clicky/issues/19), [#54](https://github.com/farzaa/clicky/issues/54). Two independent forks.
-2. **Persistent memory** — #2 request. [Issue #30](https://github.com/farzaa/clicky/issues/30) ("stateless Claude wrapper: no memory between sessions"). Our Phase 1 differentiator.
+2. **Persistent memory** — #2 request. Original [Issue #30](https://github.com/farzaa/clicky/issues/30) titled "stateless Claude wrapper: no memory between sessions" was repurposed/hijacked by 2026-04 into an "OpenClaw Gateway backend" thread; original framing only survives in older fork READMEs. Stronger 2026 evidence: Karpathy's LLM Wiki tweet went viral early April 2026 (VentureBeat coverage); MemPalace launched 2026-04-05 → 47K GitHub stars in 2 weeks. **Memory as a pattern is now industry-default; the differentiator is the trifecta** (voice PTT + visual pointer + persistent per-app auto-memory + Windows). Our Phase 1 ships persistent memory; Phase 2 proactive mode trains on real recurring-question patterns from the markdown.
 3. **Proactive mode** — validated by the [danpeg/clicky](https://github.com/danpeg/clicky) fork (79 stars in 3 days without marketing).
 4. **BYOK / multi-model** — Issues [#22](https://github.com/farzaa/clicky/issues/22), [#27](https://github.com/farzaa/clicky/issues/27), [#32](https://github.com/farzaa/clicky/issues/32), [#33](https://github.com/farzaa/clicky/issues/33); PR [#51](https://github.com/farzaa/clicky/pull/51). Our Phase 1 ships `.env` BYOK; Phase 2 adds keychain UI.
 5. **Clipboard copy** — [Issue #43](https://github.com/farzaa/clicky/issues/43), PR [#23](https://github.com/farzaa/clicky/pull/23).
