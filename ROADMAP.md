@@ -1,7 +1,7 @@
 # Clicky Windows — Roadmap
 
-**Status:** Phase 1 latency optimization complete (178/178 tests). Next: parallel capture refactor (planned, not yet shipped) → then B1 installer.
-**Last updated:** 2026-04-20
+**Status:** Phase 1 + Phase 1.5 + parallel-capture refactor all SHIPPED (182/182 tests). Active sprint: **Phase B1 installer (PyInstaller + Inno Setup + keyring migration)** — gates Option B distribution strategy (public flip + Issue #26 comment + demo video). See [LAUNCH.md](LAUNCH.md) (gitignored) for the launch / writeup framing.
+**Last updated:** 2026-04-26
 
 This doc answers **where are we now**. It combines what other projects split into PLAN.md + PROGRESS.md + TASKS.md + TESTING.md — all of that lives here in status columns and acceptance proof.
 
@@ -205,9 +205,9 @@ Beats Aaron's <2s target. Matches Clicky macOS shipping feel. Precision moat (Cl
 
 ## Phase B: Ship-to-real-users polish (parity + installer + competitive gaps)
 
-**Why this section exists.** 2026-04-19 competitive research found 12+ Clicky clones shipped in 12 days since Farza open-sourced macOS Clicky. The space is saturating fast. Our engineering rigor + persistent memory are worth nothing if a non-tech user googles "clicky windows" and installs `tekram/clicky-windows` first. These gaps MUST close before the demo video (Step 8) ships, in roughly this order.
+**Why this section exists.** 2026-04-19 competitive research found 12+ Clicky clones shipped in 12 days since Farza open-sourced macOS Clicky. **Refreshed 2026-04-26:** tekram/clicky-windows now at 38 stars (was 14) with active commits + installer; JaySmith502/clicky-win is an architectural twin (Python + per-app KB). The space is saturating fast. Our engineering rigor + persistent memory are worth nothing if a non-tech user googles "clicky windows" and installs tekram first. These gaps MUST close before the demo video ships, in roughly this order.
 
-**Target window:** Phase 1.5 Step 2 LANDED 2026-04-19/20. Phase B ready to start. One more cheap latency fix planned BEFORE B1: parallel capture-on-release with STT finalize (~200-300ms win when cursor moved >50px). See "Planned next — parallel capture" at the bottom of this doc.
+**Target window:** Phase 1.5 + parallel-capture refactor LANDED 2026-04-19/20/26 (commits `4291401` + `d29e6dd` + `abb5a59` + `0f5342b`). **B1 installer is now the active sprint** — required for Option B (public flip + 30-50 real installs). See [LAUNCH.md](LAUNCH.md) for distribution channels + writeup framing.
 
 ### B1. PyInstaller bundle + simple installer (REMOVES the #1 barrier — "download 4 tools + edit .env")
 
@@ -372,27 +372,26 @@ Key Phase 2 items from [PRD.md § Phase 2 Scope](PRD.md#phase-2-scope-2-4-weeks-
 
 ---
 
-## Planned next (NOT yet shipped) — parallel capture-on-release
+## ✅ SHIPPED 2026-04-26 — parallel capture-on-release
 
-**Status:** Plan approved by user 2026-04-20 late-afternoon. Code NOT yet touched. Will resume in next session.
+**Commits:**
+- `abb5a59` perf(app): raise re-capture reuse threshold 50 → 150px
+- `0f5342b` perf(app): parallelize re-capture with STT finalize via worker thread
 
-**Goal:** Eliminate sequential `stop_recording() → re-capture` tax (~280-340ms) by moving re-capture onto a worker thread started at key release, in parallel with STT finalize. Wall-clock becomes `max(STT, capture)` instead of `STT + capture`.
+**Goal achieved:** sequential `stop_recording() → re-capture` tax eliminated. Wall-clock now `max(STT, capture)` on cursor-moved sessions. Saves 280-340ms on ~60% of real PTTs.
 
-**Two sub-changes (separate commits per user preference):**
-1. **Threshold bump 50→150px** in [app.py:371](app.py) — eliminates re-capture entirely for small cursor movements. 1-line change. 5 min.
-2. **Parallelize re-capture with STT** — launch `_capture_at_release_worker` thread as first step of `_pipeline_worker`, before calling `stt.stop_recording()`. Main thread blocks on STT, then reads capture result from `queue.Queue(maxsize=1)`. ~2-3 hours + tests.
+**Architecture:** `_release_capture_worker` mirrors the existing `_press_time_capture` pattern. At hotkey release, worker thread launches BEFORE `stt.stop_recording()` blocks. Worker decides reuse-vs-recapture itself, pushes result to `queue.Queue(maxsize=1)`. Main thread blocks on STT, then reads queue with 5s timeout + press-time fallback.
 
-**Measured wins (from 2026-04-20 log analysis):**
-- Cursor-moved sessions (~60% of real PTT): save 280-340ms per session.
-- Cursor-still sessions (~40%): already 0ms (press-time reuse), no change.
-- No-speech sessions (9% lifetime, 0% today): one wasted background capture. Not user-perceivable latency; minor overlay hide/show flicker at most.
+**Tests:** 182 passed (178 baseline + 1 Commit 1 + 3 net new Commit 2 — Event-handshake parallelism proof, no-speech bail, Invariant #3 hide-before-grab).
 
 **Invariants preserved:**
-- `overlay.hide_for_capture()` still fires BEFORE every `mss.grab()` (Invariant #3 preserved, just runs on worker thread).
-- `pyqtSignal` for all Qt interactions (no main-thread violations).
-- Cursor position snapshot taken synchronously at release (not mid-thread) — decision stable under user cursor motion during STT.
+- `overlay.hide_for_capture()` fires BEFORE every `mss.grab()` via `sig_hide_overlay` pyqtSignal (Invariant #3).
+- `pyqtSignal` for all Qt interactions (Invariant #9, no thread violations).
+- Cursor snapshot taken synchronously at release in `_handle_release`.
 
-**Full plan:** see `C:\Users\Abhis\.claude\plans\streamed-tumbling-sunbeam.md` (in-chat plan — will need to be overwritten with this new task on resume, OR paste the plan from chat history).
+**Known trade-off:** no-speech sessions (~9% lifetime, 0% today) fire a wasted overlay-hide → capture → show cycle in background. Latency unchanged; minor cosmetic flicker only. Accepted.
+
+**Full plan:** `C:\Users\Abhis\.claude\plans\streamed-tumbling-sunbeam.md`.
 
 ---
 

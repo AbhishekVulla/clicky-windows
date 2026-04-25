@@ -115,13 +115,36 @@ Only triggered if Phase 2 hits a Python-specific wall (install experience rough,
 9. **Settings UI** — Issue #60 (new)
 10. **Linux support** — Issues #13, #59 (new)
 
-## Competitors
-- **Clippi.us** — macOS only, "Windows coming soon"
-- **GhostDesk** — Windows, $9.99/mo, no pointing / no voice
-- **Screenpipe** — passive 24/7 recorder, not interactive
-- **tekram/clicky-windows** — Electron, 14 stars, unfinished
-- **trili.ai** — Windows sidebar + text chat + "STEP 1 OF 7" structured tutorials. Khan-Academy design philosophy — opposite of Clicky Windows's overlay + voice + conversational learn-by-doing model. Our edges: open source + BYOK + zero screen-cost overlay + voice-first + conversational + persistent memory.
-- **Vercept** — acquired by Anthropic Feb 2026; strategic threat. Ship Phase 1 before they do.
+## Competitors (refreshed 2026-04-26 via parallel agent research)
+
+**Voice + overlay + Windows (closest threat axis):**
+- **tekram/clicky-windows** — Electron+TS, **38 stars (was 14, growing fast), ACTIVE — last push 3 days ago.** Has installer, multi-provider (Anthropic/OpenAI/OpenRouter), Whisper+ElevenLabs, system tray, HIPAA mode. **Direct competitor on the casual Windows-port axis. Their gap: no persistent memory.** Threat assumption "abandoned, 14 stars, unfinished" is wrong as of 2026-04-26.
+- **JaySmith502/clicky-win** — Python Windows port, 4 stars (hobby tier). Architectural twin to ours. **Their memory is user-curated NotebookLM-imported docs keyed to window titles**; ours is auto-learned from Claude interactions. Differentiated but not unique anymore.
+
+**Autonomous GUI agents (different category — they execute, we point):**
+- **Claude Cowork (Anthropic)** — Windows shipped Feb 10, 2026. Chat-side-panel + multi-step exec + scheduled tasks. NOT voice/overlay; product boundary intact.
+- **CursorTouch Windows-MCP** — 5.3k stars, programmatic Windows agent library. Not consumer-facing.
+- **Claude Computer Use** — Sonnet 4.6 hit 72.5% OSWorld (vs <15% late 2024). Still beta header. Cowork is the consumer surface.
+- **Playwright MCP** — 31.4k stars, browser automation dev tool.
+- **OpenAI Operator** — browser only.
+- **Google Project Mariner** — web only, trusted-tester preview.
+- **MS Copilot Agent Mode** — GA Apr 22, 2026 in Word/Excel/PPT only. Windows-wide "Agent Workspace" still private preview.
+
+**Voice + screen-aware on Windows (no overlay / no memory):**
+- **Microsoft "Hey Copilot" + Copilot Vision** — wake-word + screen-aware chat in Windows 11 itself. **Platform-level commoditizer for non-tech users.** Long-game threat (6-12 months). Position Clicky as the depth / learn-by-doing tool, not the mass-market AI assistant.
+- **GhostDesk 2.0** — added Nova-3 STT in v2, paid Windows overlay ($9.99/mo etc.), "interview cheating" angle. No pointing, no per-app memory.
+
+**Adjacent / different category:**
+- **Clippi.us** — macOS only, "Windows coming soon" (same status as April 2026).
+- **Screenpipe** — 24/7 passive recorder, MCP server; not interactive buddy.
+- **trili.ai** — Khan-Academy structured tutorials, sidebar; opposite design philosophy.
+- **Skywork Desktop** — Windows persistent agent environment (launched Feb 2026). Different category.
+
+**Threats downgraded since April 2026:**
+- ~~Vercept (acquired Anthropic Feb 25, 2026)~~ — **Vy desktop app shut down Mar 25, 2026.** Team absorbed into Computer Use group; powering Cowork's OSWorld jump. No standalone voice product surfaced. Voice-screen-aware angle did NOT materialize as an Anthropic product. **Threat eliminated.**
+- ~~Farza ships Windows officially~~ — **He's running Chasi (YC W26), unrelated.** 0 comments from him on Issue #26 ever. farzaa/clicky last meaningful commit 2026-04-10 (license + key cleanup). Window is open.
+
+**Differentiator framing (post-2026-04-26):** the Karpathy markdown memory pattern went viral early April 2026 (VentureBeat coverage; MemPalace 47K stars in 2 weeks). Memory as a *technique* is no longer novel. **Lead positioning: voice PTT + visual pointer + persistent per-app auto-memory + Windows — the trifecta, combined.** Every shipped competitor has at most 2-3 of these 4 axes. See [LAUNCH.md](LAUNCH.md) (gitignored) for full writeup framing + distribution channels.
 
 ## File Structure (Phase 1)
 ```
