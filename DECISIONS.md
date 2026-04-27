@@ -10,6 +10,104 @@ For **how** → [CLAUDE.md](CLAUDE.md)
 
 ---
 
+## 2026-04-26: Considered fully-local stack — tiered (cloud default + Phase 3 Private Mode opt-in) chosen
+
+**Context:** User-prompted by Microsoft VibeVoice release ("local MIT-licensed STT + TTS, 90-min generation from 10s clip, 60-min transcription"). Question: should Clicky bundle local alternatives so users don't need to BYOK API keys for AssemblyAI / Cartesia / Anthropic? Three parallel research agents evaluated (1) VibeVoice specs from primary Microsoft sources, (2) real user reactions on Reddit / HN / GitHub Issues, (3) end-to-end fully-local stack feasibility on 5 consumer hardware tiers.
+
+**Decision:** **Stay tiered. Cloud default for Phase 1/2; Private Mode as future Phase 3 opt-in subclass drop on existing `AIClient` / `STT` / `TTS` abstractions.** Do not pursue fully-local as default. The provider abstraction (CLAUDE.md "Provider abstraction from day 1") was forward-looking design; Phase 3 Private Mode is a 3-subclass drop, not a rewrite.
+
+**Alternatives considered:**
+
+### VibeVoice — REJECTED
+
+Microsoft TTS family: VibeVoice-1.5B / 7B / Realtime-0.5B (TTS), plus VibeVoice-ASR (separate 9B STT sibling). MIT-licensed code. The user's "60-min transcription + 90-min generation in one model" framing is a conflation — they are sibling models with different params and use cases.
+
+Rejection reasons:
+- **Wrong product shape.** Base 1.5B/7B target long-form podcast generation (90 min, 4 speakers), not <500ms PTT-response latency.
+- **Realtime-0.5B variant TTFB ~200-300ms** matches Cartesia on a beefy GPU but at 24kHz vs Cartesia's 44.1kHz — audible quality regression.
+- **Hard CUDA dependency.** ~2GB VRAM floor (Realtime-0.5B), ~7GB (1.5B). Fails on the 60-70% of Windows boxes without discrete NVIDIA GPU.
+- **VibeVoice-ASR is 9B params BF16 (~18GB on disk).** Designed for batch hour-long structured transcription, not PTT finalization. Wrong tool.
+- **License gray area.** Microsoft's own model-card terms prohibit *"real-time or low-latency voice conversion for live deepfake applications"* — flagged for desktop voice assistants.
+- **Supply-chain risk.** Microsoft disabled the GitHub repo Aug 2025 over voice-cloning misuse; community forks (vibevoice-community, shijincai, arpy8) host backups. Precedent that they could pull again.
+- **No successful desktop-bundle stories** found across HN / Reddit / Issues. Every deployment is Gradio + Python + CUDA or ComfyUI nodes.
+
+### Kokoro-82M — Phase 3 candidate
+
+Apache 2.0, ~95MB total weights (80MB INT8 ONNX + voices), 24kHz. **TTS Arena Elo 1059 (#1 open-weight model overall).** 54 built-in voices, **NO voice cloning**. CPU-friendly via `kokoro-onnx` PyPI package + onnxruntime (~50MB) — total bundle delta ~150-200MB.
+
+Trade-offs:
+- **TTFB streaming on CPU: 1-2s** (vs Cartesia's measured 150-250ms) — 4-10x slower
+- **Sample rate 24kHz** vs Cartesia 44.1kHz — audible quality regression
+- **"Stilted" prosody** per real user reports; flat intonation on >20-word sentences
+- **Production-proven**: TinyReadAloud (Windows tray app) + dTelecom (M4 production swap, ElevenLabs → Kokoro saved $11,826 over 3 years)
+- **Real user verdict**: *"If you're trying to build a local AI assistant, Kokoro is perfect."* (HN [item 45116238](https://news.ycombinator.com/item?id=45116238))
+
+### Parakeet TDT 0.6B v3 — Phase 3 candidate
+
+CC-BY-4.0 (commercial OK), ~480MB INT8 ONNX, English-focused. **6.32% WER avg vs Whisper-large-v3's 7.44%** on the Open ASR Leaderboard — beats Whisper on average. Production-proven by Handy (cjpais), Chirp, SilentKeys.
+
+Trade-offs:
+- **Finalize latency 400-2000ms on i5-class CPU** (vs AssemblyAI's 150-300ms ForceEndpoint) — 2-10x slower for short utterances
+- **80-400ms on Intel NPU (Core Ultra)** — closes the gap on Meteor Lake+ silicon only
+- **Streaming partials require non-trivial chunked-inference plumbing** (parakeet-rs, NeMo streaming, or batch-on-PTT-release)
+- **Silence hallucination** failure mode — outputs "Yeah" / "Mm-hmm" on silent audio per NVIDIA NIM docs; pair with Silero VAD (Handy already does this)
+
+### Qwen3-VL 8B — Phase 3 vision-LLM candidate (the binding constraint)
+
+Q4 GGUF ~6GB VRAM. **ScreenSpot 92% / ScreenSpot-Pro 50%** (vs Claude Sonnet 4.6's **72.5% OSWorld**). **Known coordinate drift on click predictions** ([Qwen issue #1780](https://github.com/QwenLM/Qwen3-VL/issues/1780)).
+
+This is the actual hard problem for fully-local Clicky. STT and TTS have viable local alternatives today; the vision-LLM that has to look at a 1024×768 screenshot and emit accurate `[POINT:x,y:label]` coordinates does not run on consumer integrated graphics, and even on a 4070 it regresses ~20pp vs Sonnet on UI grounding. Cursor landing ~50px off the intended button is a worse UX failure than 1s of extra latency.
+
+### End-to-end latency budget (release → first audible word, 800-1200ms target)
+
+| Tier | Stack | Total | vs target |
+|---|---|---|---|
+| **RTX 4090** | Parakeet + Qwen3-VL 8B Q4 + Kokoro | 600-900ms | beats target |
+| **RTX 4070 (12GB)** | same | 1000-1400ms | roughly meets |
+| **Apple M3/M4** (no NVIDIA) | Parakeet-mlx + Qwen3-VL 4B MLX + Kokoro | 1200-1700ms | misses + degraded grounding |
+| **Snapdragon X NPU** (Copilot+ PC) | Phi Silica multimodal + ONNX | 1200-1500ms | marginal but power-efficient |
+| **Integrated GPU / CPU-only** | whisper.cpp + Phi-4 MM CPU + Kokoro | 5-10s | unusable (image prefill alone is 3-8s) |
+
+~10-15% of Windows users have RTX 4070+ today.
+
+**Why tiered won:**
+
+1. **Vision-LLM is the binding constraint** — STT (Parakeet) and TTS (Kokoro) are real, shipping options today; the vision-LLM that has to emit accurate coordinate tags for a screenshot is not viable on consumer integrated graphics
+2. **Even on RTX 4070+, Qwen3-VL regresses ~20pp on UI grounding vs Sonnet** — Clicky's whole UX is accurate pointing; quality regression hurts the differentiator more than cloud dependency does
+3. **~10-15% of Windows users** have eligible GPUs today; mainstream not viable until Q2 2027 per current trajectory
+4. **Provider abstraction makes Phase 3 cheap** — `AIClient` / `STT` / `TTS` abstract bases from CLAUDE.md mean Private Mode is a 3-subclass drop, not a rewrite. Cost of deferring is near-zero.
+
+**Consequences:**
+
+- Phase 1 + Phase 2 stay cloud-default. No code changes from this decision.
+- Phase 3 stub added to ROADMAP.md ("Private Mode subclass drops") — documented but NOT actively planned.
+- If Phase 3 ships, bundle delta ~6.5GB extra weights (Parakeet 480MB + Qwen3-VL Q4 ~6GB + Kokoro 95MB) vs cloud's ~5KB HTTP clients. Likely separate "Clicky Private" installer.
+- Anthropic does not offer on-device Claude Sonnet deployment. Closest "private cloud" option is AWS Bedrock + customer-managed VPC (enterprise-only, not consumer).
+- Snapdragon X NPU (Phi Silica multimodal) is the only "small enough to bundle, big enough to be useful, runs on a normal laptop" path emerging. Microsoft is doing the heavy lifting; Clicky just needs an ONNX `AIClient` subclass when Phi Silica exposes vision officially.
+
+**Revisit triggers (check periodically — when any of these flip, re-evaluate Phase 3):**
+
+1. **Vision-LLM closes the gap** — open vision model hits within 5pp of Sonnet's 72.5% OSWorld
+2. **Mid-range GPU sufficient** — 6GB-VRAM model TTFT < 500ms on RTX 3060-class hardware
+3. **NPU path matures** — Phi Silica multimodal exposes vision officially on Snapdragon X / Copilot+ PCs
+4. **Coordinate drift fixed** — [Qwen3-VL issue #1780](https://github.com/QwenLM/Qwen3-VL/issues/1780) closes; click predictions become reliable
+5. **TTS quality closes** — Kokoro successor or new entrant ships voice cloning + 44.1kHz + sub-300ms CPU TTFB
+6. **STT finalize closes** — Parakeet successor or new entrant matches AssemblyAI 150-300ms ForceEndpoint on consumer CPU without NPU dependency
+7. **Anthropic ships on-device** — currently doesn't exist for consumers
+8. **User signal** — Phase 2/B real users start asking for offline mode (Issue-class demand, similar to upstream Clicky issues #22/#27/#32/#33 about BYOK)
+
+Realistic timeline: viable on RTX 4070+ today; mid-range GPUs Q2 2027; integrated graphics never (image prefill floor is 3-8s).
+
+**References:**
+
+- VibeVoice: [GitHub microsoft/VibeVoice](https://github.com/microsoft/VibeVoice), [HF VibeVoice-1.5B](https://huggingface.co/microsoft/VibeVoice-1.5B), [HF VibeVoice-ASR](https://huggingface.co/microsoft/VibeVoice-ASR), [arXiv 2508.19205 technical report](https://arxiv.org/abs/2508.19205), [HN thread 45114245](https://news.ycombinator.com/item?id=45114245)
+- Kokoro: [HF hexgrad/Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M), [thewh1teagle/kokoro-onnx](https://github.com/thewh1teagle/kokoro-onnx), [TinyReadAloud reference deployment](https://github.com/dorofino/TinyReadAloud), [Artificial Analysis TTS leaderboard](https://artificialanalysis.ai/text-to-speech/leaderboard), [dTelecom production swap](https://blog.dtelecom.org/we-replaced-elevenlabs-with-kokoro-tts-on-an-m4-gpu-latency-fell-to-100-ms-and-tts-cost-nearly-68bcc3313cdd)
+- Parakeet: [HF nvidia/parakeet-tdt-0.6b-v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3), [FluidInference INT8 OpenVINO build](https://huggingface.co/FluidInference/parakeet-tdt-0.6b-v3-ov), [Canary + Parakeet paper arXiv 2509.14128](https://arxiv.org/abs/2509.14128), [Handy (production reference)](https://github.com/cjpais/handy), [Chirp HN thread](https://news.ycombinator.com/item?id=45930659)
+- Vision-LLM: [Qwen3-VL GitHub](https://github.com/QwenLM/Qwen3-VL), [Qwen3-VL coord drift issue #1780](https://github.com/QwenLM/Qwen3-VL/issues/1780), [ScreenSpot leaderboard](https://llm-stats.com/benchmarks/screenspot), [ScreenSpot-Pro paper](https://arxiv.org/html/2504.07981v1), [GUI-Actor (NeurIPS '25, Microsoft)](https://microsoft.github.io/GUI-Actor/), [OSWorld 2026 leaderboard](https://airank.dev/benchmarks/os-world)
+- NPU path: [Phi Silica multimodal on Copilot+ NPU](https://blogs.windows.com/windowsexperience/2025/04/25/enabling-multimodal-functionality-for-phi-silica/)
+
+---
+
 ## 2026-04-20 (late-afternoon): Option 2 — shrink `stop_recording` grace window 300ms → 100ms
 
 **Context:** Post-Option-B latency analysis across 15 pre-fix + 10 post-fix logs showed STT finalize median was 723ms vs pre-Phase-1.5's 301ms. The 2s outer deadline almost never fired; the real waste was the 300ms grace window `stop_recording` waits AFTER the first `end_of_turn=True` event, in case a trailing multi-utterance final follows.

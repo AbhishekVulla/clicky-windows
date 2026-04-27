@@ -395,6 +395,43 @@ Key Phase 2 items from [PRD.md § Phase 2 Scope](PRD.md#phase-2-scope-2-4-weeks-
 
 ---
 
+## Phase 3 (alt): Private Mode — fully-local stack opt-in (NOT pre-committed)
+
+Researched 2026-04-26 (3 parallel agents on VibeVoice + Kokoro + Parakeet + fully-local feasibility). **Decision: stay tiered, not actively planned.** See [DECISIONS.md 2026-04-26 entry](DECISIONS.md) for the full evaluation + revisit triggers.
+
+**The 3-subclass drop (when triggers below flip):**
+- `ParakeetSTT(STT)` — `onnx-asr` PyPI package (~480MB INT8 ONNX) + Silero VAD pairing for silence-hallucination protection
+- `Qwen3VLClient(AIClient)` — llama.cpp Python bindings, Q4 GGUF (~6GB VRAM) — or successor that closes the OSWorld gap
+- `KokoroTTS(TTS)` — `kokoro-onnx` PyPI (~95MB) + `espeak-ng.exe` Windows sidecar binary for G2P
+
+Bundle delta if shipped: ~6.5GB extra weights vs cloud's ~5KB HTTP clients. Likely separate "Clicky Private" installer track.
+
+**Hardware reality (today, 2026-04-26):**
+- RTX 4090: end-to-end ~600-900ms (beats 800-1200ms target)
+- RTX 4070 (12GB): ~1000-1400ms (roughly meets)
+- Apple M3/M4: ~1200-1700ms (misses + ~20pp grounding regression)
+- Snapdragon X NPU (Copilot+ PC): ~1200-1500ms (marginal but power-efficient)
+- Integrated GPU / CPU-only: ~5-10s (unusable; image prefill floor is 3-8s)
+
+~10-15% of Windows users have eligible hardware today.
+
+**Revisit triggers (check periodically):**
+
+1. Vision-LLM closes the gap — open model hits within 5pp of Sonnet's 72.5% OSWorld
+2. Mid-range GPU sufficient — 6GB-VRAM model TTFT < 500ms on RTX 3060-class
+3. NPU path matures — Phi Silica multimodal exposes vision officially on Snapdragon X
+4. Coordinate drift fixed — [Qwen3-VL issue #1780](https://github.com/QwenLM/Qwen3-VL/issues/1780) closes
+5. TTS closes — Kokoro successor ships voice cloning + 44.1kHz + sub-300ms CPU TTFB
+6. STT finalize closes — Parakeet successor matches AssemblyAI 150-300ms ForceEndpoint on consumer CPU without NPU
+7. Anthropic ships on-device deployment (currently doesn't exist for consumers)
+8. User signal — Phase 2/B real users start asking for offline mode (Issue-class demand)
+
+Realistic timeline: viable on RTX 4070+ today; mid-range GPUs Q2 2027; integrated graphics never.
+
+**Why this is documented but not planned:** the provider abstraction (`AIClient` / `STT` / `TTS` from CLAUDE.md) was forward-looking design specifically so Private Mode is a future subclass drop, not a rewrite. Cost of deferring is near-zero. Don't build until the binding constraint (vision-LLM grounding accuracy on consumer hardware) closes the gap.
+
+---
+
 ## Phase 3: Tauri Rewrite (NOT pre-committed)
 
 Only triggered if Phase 2 hits a Python-specific wall. Most likely never needed. See [PRD.md § Phase 3](PRD.md#phase-3-tauri-rewrite-not-pre-committed).
