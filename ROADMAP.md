@@ -1,7 +1,7 @@
 # Clicky Windows — Roadmap
 
-**Status:** Phase 1 + Phase 1.5 + parallel-capture refactor all SHIPPED (182/182 tests). Active sprint: **Phase B1 installer (PyInstaller + Inno Setup + keyring migration)** — gates Option B distribution strategy (public flip + Issue #26 comment + demo video). See [LAUNCH.md](LAUNCH.md) (gitignored) for the launch / writeup framing.
-**Last updated:** 2026-04-26
+**Status:** Phase 1 + Phase 1.5 + parallel-capture refactor all SHIPPED (182/182 tests). **Active sprint REORDERED 2026-04-27 (KB-first per user direction):** Phase 2 KB upload (JaySmith pattern, ~150 LOC, ~3-4hr) → Phase B1 installer (PyInstaller + Inno Setup) → Phase B1 tray + auto-updater + minimal API key dialog → Phase B2 multi-provider STT/TTS subclasses → Phase B3 HIPAA mode (whisper.cpp + Windows SAPI) → demo video (GrantaEdu Pack flow) + public flip + Issue #26 comment. **Total: ~3-5 focused days with Claude Code parallel pace.** See [DECISIONS.md 2026-04-27](DECISIONS.md) for the full strategic re-evaluation (Karpathy LLM Wiki cargo-cult retracted, Phase 2 locked as right-sized 3c, tekram/JaySmith502 corrected feature inventories).
+**Last updated:** 2026-04-27
 
 This doc answers **where are we now**. It combines what other projects split into PLAN.md + PROGRESS.md + TASKS.md + TESTING.md — all of that lives here in status columns and acceptance proof.
 
@@ -259,10 +259,25 @@ Beats Aaron's <2s target. Matches Clicky macOS shipping feel. Precision moat (Cl
 - **Competitive parity:** tornikegomareli/clicky-desktop ships Linux. mo-tunn ships Linux. Farza's Issue #13 + #59 explicitly request Linux. Windows-only story becomes weak if Rust clones continue to dominate cross-platform.
 - **Decision gate:** only start Linux port after B1-B3 ship (installer + tray + demo video). Cross-platform is worthless if nobody can install Windows version first.
 
-### Phase B execution order (commit to this order, don't skip)
+### Phase B execution order (REORDERED 2026-04-27 — KB-first per user direction; see DECISIONS.md 2026-04-27 for full rationale)
 
-1. **B1 installer** — removes the install barrier. Until this ships, you're invisible to 99% of users.
-2. **B3 demo video** — now that install is trivial, show the memory "wow" moment. Requires B1 to be credible ("I can actually try this?" → yes, one click).
+**Day-by-day sprint (Claude Code parallel pace, ~3-5 days total):**
+
+| Day | Sprint | Effort |
+|---|---|---|
+| 1 | **Phase 2: KB upload feature** — port JaySmith502 pattern (`_meta.toml` + `overview.md` + section files + 60K-char keyword-ranked budget + system-prompt injection). Defaults to `~/Documents/Clicky Wiki/knowledge/<app>/`. | ~3-4hr |
+| 2 | **Phase B1: PyInstaller + Inno Setup installer** — `pyinstaller --onedir --windowed app.py` + Inno Setup wrapper → `Clicky-Windows-Setup.exe`. Hidden imports per JaySmith spec patterns (pynput.keyboard._win32, mss.windows, sounddevice). DLL bundling unknown. | ~1 day |
+| 3 | **Phase B1: System tray + auto-updater (PyUpdater)** + minimal first-launch API key dialog. NO storage location wizard — defaults silently to `~/Documents/Clicky Wiki/`. Settings panel deferred. | ~half day |
+| 4 | **Phase B2: Multi-provider STT (Deepgram subclass)** + **TTS (ElevenLabs subclass)** + tray menu dropdown to switch | ~half day each |
+| 5 | **Phase B3 (was Phase 3): HIPAA mode** — `WhisperCppSTT(STT)` + `WindowsSAPITTS(TTS)` subclasses for fully-local audio path (vision-LLM stays cloud per DECISIONS 2026-04-26). | ~1-2 days |
+| 6 | Demo video — **GrantaEdu Pack flow as headline** ("100-page doc, learn by doing" voiceover per LAUNCH.md). Public flip + Issue #26 comment + 1 X post tagging @FarzaTV. | ~half day |
+
+**Original order (B1 first then B3 demo) was changed:** ship the differentiator (KB upload) FIRST while motivation high; grind installer after. Demo video moves to Day 6 so it can showcase the headline feature already in main.
+
+### Old Phase B order (superseded — kept for reference)
+
+1. ~~B1 installer~~ — moved to Day 2
+2. ~~B3 demo video~~ — moved to Day 6 (now showcases Phase 2 KB feature, not just memory recall)
 3. **B2 tray + settings** — polish on top of shipped installer. Iteration loop with early users.
 4. **B4 OpenRouter UI** — subset of B2 scope.
 5. **B5 HIPAA / offline** — feature parity with tekram. Unlocks regulated-industry conversations.

@@ -10,6 +10,154 @@ For **how** → [CLAUDE.md](CLAUDE.md)
 
 ---
 
+## 2026-04-27: Farza launched Clicky Agents → Karpathy LLM Wiki cargo-cult RETRACTED → Phase 2 locked as right-sized curated KB upload (JaySmith502 pattern) + sprint reorder
+
+**Context:** Farza Majeed launched Clicky Agents (~Apr 23, 2026) as a closed-source iteration on macOS Clicky. Voice-driven multi-agent task spawner ("clicky agent" wake phrase → background agent does research / Mac apps / Calendar updates). Same Cloudflare Worker proxy + AssemblyAI + ElevenLabs + Claude Sonnet 4.6 stack. Open-source `farzaa/clicky` repo (5,200 stars, MIT) explicitly framed as "the legacy version for those who want to hack on it." User asked "should I abandon Clicky Windows?" — triggered comprehensive strategic re-evaluation.
+
+**Decisions (multiple, locked 2026-04-27):**
+
+### A. NOT abandoning. Phase 1 ships.
+
+User stated goal: portfolio + Building 0 case study + 30-50 real users (NOT viral product, NOT startup). Farza's pivot doesn't change Clicky Windows's product fit because (a) original concept still active (5.2k MIT repo not archived — Farza explicitly handed it to community), (b) Windows gap is now LARGER (Mac users have buddy + agents, Windows users have nothing), (c) memory differentiator untouched (Clicky Agents has no per-app memory). Verdict: keep building. Real timeline pressure is Microsoft Copilot Vision + Razer AVA (H2 2026), not Farza.
+
+### B. Karpathy LLM Wiki proposal — RETRACTED (cargo-cult error)
+
+Earlier this same session I proposed shipping Karpathy's full LLM Wiki pattern (raw → compiled wiki layer + entity pages + concept pages + index.md + log.md + lint pass + schema doc). User correctly called it cargo-cult: *"why did you copy Andrej Karpathy's architecture verbatim without even verifying if this is even relevant to our project in the first place?"*
+
+**Why it was wrong:** Karpathy's wiki pattern is built for LONG-FORM RESEARCH SYNTHESIS over articles/papers/books, browsed in Obsidian, with the LLM compiling raw sources into a maintained wiki of entity/concept pages. Clicky's use case is SHORT-FORM RUNTIME ASSISTANCE during active work (PTT → screen capture → answer). The "compiled wiki" assumes a synthesis use case Clicky doesn't have. The "browse in Obsidian" assumption doesn't fit Clicky's voice-during-active-work UX. The "lint for contradictions / orphan pages" solves wiki-maintenance for a wiki nobody browses. Wrong use case, wrong UX, wrong scale.
+
+**Retracted:** three-layer architecture (raw/wiki/schema), ingest pipeline (LLM updates 5-15 wiki files per PTT), query pipeline, lint pass, `index.md` + `log.md`, schema CLAUDE.md inside the wiki, 1-2 weeks of work. The earlier proposed `tools/lint_memory.py` revival is also retracted — it had no real user even with the wiki framing.
+
+### C. Phase 2 LOCKED: right-sized 3c — user-uploadable docs per app (JaySmith502 pattern, code-verified)
+
+**Architecture (verified from JaySmith502/clicky-win source):**
+
+```
+~/.clicky-windows/  (existing — keep transcript dump as raw substrate)
+└── memory/<app>.md       ← existing auto-learned (unchanged)
+
+~/Documents/Clicky Wiki/  (default; override later via settings)
+└── knowledge/
+    └── <app>/
+        ├── _meta.toml    ← name + window_titles list
+        ├── overview.md   ← ALWAYS injected
+        ├── *.md          ← section files, keyword-ranked
+        └── ...
+```
+
+**Implementation pattern (cribbed from JaySmith's `knowledge_base.py`, ~150 LOC):**
+- `_meta.toml` schema: `name = "Wild Apricot"` + `window_titles = ["Wild Apricot", "wildapricot.org"]`
+- Window matching: case-insensitive substring, first-match-wins
+- Re-read fresh on every turn (no cache — files are small)
+- 60K-char token budget for KB content
+- `overview.md` ALWAYS included even if over budget
+- Other sections ranked by `len(heading_words & transcript_keywords)`, greedy fit
+- Empty-transcript-over-budget → overview-only fallback
+- Injected into SYSTEM prompt with marker: *"app knowledge base: you are helping the user with {app_name}. here is reference documentation that you should treat as authoritative:\n\n{kb_content}"*
+
+**Cost: ~150 LOC + ~10 tests. ~3-4 hours of focused work** (Claude Code parallel pace, not solo-dev pace).
+
+**Demo headline framing (locked 2026-04-27, mirrors Farza's "learn by doing" original Clicky pitch):**
+
+> *"I've got this 100-page documentation for software I have to use, and I don't want to read it or watch a tutorial. I just want to learn by doing. So I drop the docs into Clicky's knowledge folder, and now it's like having a friend who already knows the software sitting next to me — I just ask, and Clicky points + explains. I learn by using the tool, not by reading about it."*
+
+Concrete demo: GrantaEdu Pack (niche materials-engineering software the user used for SUTD Chem 1D project; existing `edupack.exe.md` already has demo context).
+
+### D. Auto-learn memory verdict: marginal. Stop framing as differentiator.
+
+User pushed on this 3 times in one session. Honest answer: the auto-learn cross-session per-app transcript memory has ~5-15% hit rate (interactions where Claude actually benefits from prior context). For 85-95% of interactions, prior memory is context bloat that costs latency without changing the response. **It's technically unique (nobody else has it) but practically marginal.** Stop listing it as the headline differentiator. Keep saving transcripts (free — just append) but the value claim is honest only as "transparency / debugging aid for the user," not "Clicky remembers you in a useful way."
+
+### E. Tests are not a user-facing differentiator
+
+Stop listing "182 tests" as a differentiator in user-facing positioning. Internal engineering quality signal only. Zero users care.
+
+### F. Sprint sequence REORDERED (KB-first per user direction 2026-04-27)
+
+| Day | Sprint | Effort (Claude Code parallel) |
+|---|---|---|
+| 1 | **Phase 2: KB upload feature** — port JaySmith pattern | ~half day |
+| 2 | **Phase B1: PyInstaller + Inno Setup installer** | ~1 day (DLL bundling unknown) |
+| 3 | **Phase B1: System tray + auto-updater (PyUpdater)** + minimal API key dialog | ~half day |
+| 4 | **Phase B2: Multi-provider STT (Deepgram subclass)** + **TTS (ElevenLabs subclass)** | ~half day each |
+| 5 | **Phase B3 (was Phase 3): HIPAA mode** — whisper.cpp local STT + Windows SAPI local TTS subclasses | ~1-2 days |
+| 6 | Demo video (GrantaEdu Pack flow) + public flip + Issue #26 comment + X post | ~half day |
+
+**Total: ~3-5 focused days with Claude Code parallel pace, not 2-3 weeks.** Earlier 5-7 day per-phase estimates were solo-dev pace.
+
+**Rationale for KB-first:** ship the differentiator while motivation is high, then grind installer with the satisfaction of having the unique feature in main. Even if installer takes longer than expected, the KB feature is shippable.
+
+### G. HIPAA mode promoted from Phase 3 to Phase B3
+
+Was deferred to Phase 3 in DECISIONS 2026-04-26 (under Private Mode). Reconsidered 2026-04-27 because (a) tekram has it as a shipped feature differentiator, (b) it's an alternative for users who refuse to BYOK, (c) Phase 3 timing was indefinite. Bring forward to Phase B3 as concrete subclass drops:
+- `WhisperCppSTT(STT)` — local whisper.cpp via `whispercpp-py` or direct subprocess, ~250MB-1.5GB models
+- `Pyttsx3TTS(TTS)` or `WindowsSAPITTS(TTS)` — local Windows SAPI via `pyttsx3` lib, no model download, ~free quality
+
+Vision-LLM (Claude) stays cloud since no consumer-hardware-viable local option per DECISIONS 2026-04-26.
+
+### H. Auto-updater reconsidered (was wrongly deferred earlier today)
+
+Earlier in this same session I deferred auto-updater to "when you have 100+ users." That was wrong — with Claude Code parallel, PyUpdater integration is ~half day, not multi-week. For a real Windows app, manual re-download per release IS friction even at low user counts. Ship in Phase B1.
+
+### I. Cloudflare Worker proxy — explicitly NOT pursued for v0
+
+Both Farza's Clicky and JaySmith502 use Cloudflare Worker proxy to avoid BYOK friction (developer's API keys hidden server-side, user just installs + runs). UX win is real but operational burden is significant: developer eats API costs (~$0.02/interaction × N users × M interactions/day = real money fast), abuse risk if someone discovers the URL with no auth (JaySmith's Worker has zero auth, anyone could drain it), need rate limiting + per-user caps. For portfolio scope (target 30-100 users), BYOK with minimal first-launch keyring popup is fine. Revisit if project ever needs friction-less mass distribution.
+
+### J. Verified competitor inventories (sources of truth, refreshed 2026-04-27)
+
+**farzaa/clicky** — 5,200 ⭐, MIT, NOT archived (Farza explicitly handed open-source to community). Last meaningful commit 2026-04-27 (license + key cleanup). farzaa himself has 0 comments on Issue #26 ever. Running Chasi (YC W26) as his actual company; Clicky is now also a real product (clicky.so / heyclicky.com / @FarzaTV team integrated Gmail MCP per direct user observation).
+
+**Clicky Agents** (Farza, launched 2026-04-23) — closed-source iteration. Voice-spawn-agents on macOS only. Windows = Tally form waitlist. Same Cloudflare proxy + Claude Sonnet 4.6 + AssemblyAI + ElevenLabs stack. **NO persistent memory. NO BYOK option. Visual pointer + voice + screen-aware buddy still the front door, agents additive on top.** Launch traction: ~868 LinkedIn reactions, PH #6 (137 upvotes). Brand confusion risk for "Clicky Windows" naming = medium → 1-line README disambiguator handles it.
+
+**tekram/clicky-windows** — **46 ⭐ (was 14 three weeks ago, growing)**, MIT, 32 commits, Electron + TypeScript + Squirrel auto-updater. Active. Verified feature inventory:
+- ✅ Multi-provider STT (3): AssemblyAI cloud + OpenAI Whisper cloud + Whisper Local offline (whisper.cpp)
+- ✅ Multi-provider TTS (3): Windows SAPI offline + OpenAI TTS cloud + ElevenLabs cloud
+- ✅ Multi-provider LLM: Anthropic + OpenAI + OpenRouter (300+ models)
+- ✅ HIPAA mode (forces local STT + TTS)
+- ✅ System tray + always-on-top pinned chat + cursor buddy following mouse
+- ✅ Squirrel auto-updater + installer
+- ❌ No curated KB / NotebookLM-style upload feature
+- ❌ No persistent memory across sessions
+- ❌ No latency optimizations documented
+- ❌ Multi-language UI / clipboard copy / hide-overlay-while-typing / listening cue — NOT in README (earlier claim was wrong, retracted)
+
+**JaySmith502/clicky-win** — 4-5 ⭐, MIT, 97 commits, Python + PySide6 + qasync + Cloudflare Worker proxy. 73 tests. Last push 2026-04-12. Verified at code level via deep-dive 2026-04-27:
+- ✅ **Curated KB / NotebookLM upload feature** (the cracked underdog feature) — `_meta.toml` + `overview.md` + section files + keyword-ranked 60K-char budget, code-verified 150 LOC port path
+- ✅ Cloudflare Worker proxy (`/chat` + `/tts` + `/transcribe-token` ephemeral AssemblyAI token route — no audio proxying, saves bandwidth)
+- ✅ System tray + cursor buddy + Squirrel-equivalent installer
+- ✅ Interrupt support (re-press cancels mid-TTS)
+- ✅ 20-turn conversation deque (text-only history, images only on current turn — cheap token win pattern)
+- ❌ NO persistent auto-learn memory across sessions (KB is curated-input only)
+- ❌ Multi-LLM: Claude only (hardcoded `claude-sonnet-4-6` / `claude-opus-4-6` allowlist)
+- ❌ Multi-provider STT/TTS: AssemblyAI + ElevenLabs hardcoded
+- ❌ Latency optimizations not documented
+
+### K. Combined feature gap analysis
+
+After Phase 2 (KB) + Phase B1 (installer + tray + auto-updater) + Phase B2 (multi-provider) + Phase B3 (HIPAA) ship, the feature set is:
+
+| Feature | tekram | JaySmith | mine (after) |
+|---|---|---|---|
+| Curated KB upload (JaySmith pattern) | ❌ | ✅ | ✅ |
+| Auto-learn memory cross-session | ❌ | ❌ | ✅ (marginal value but unique) |
+| Multi-provider STT/TTS/LLM | ✅ | ❌ | ✅ |
+| HIPAA / local mode | ✅ | ❌ | ✅ |
+| Installer + tray + auto-updater | ✅ | ✅ | ✅ |
+| Latency optimization stack | ❌ | ❌ | ✅ |
+| Cloudflare Worker proxy | ❌ | ✅ | ❌ (deliberate; BYOK fine) |
+
+**Net:** matches both on shipped features + adds curated KB (vs tekram) + adds auto-learn (vs both) + adds latency stack (vs both). Defensibly the most-feature-complete Windows AI buddy by code-level comparison. Not "winning the market" — but defensible portfolio claim.
+
+**Time estimate:** ~3-5 focused days with Claude Code parallel + auto + subagents + superpowers. Earlier 5-7 day per-phase estimates were solo-dev pace and inflated.
+
+**References:**
+- Farza Clicky Agents: [LinkedIn launch](https://www.linkedin.com/posts/farza-majeed-76685612a_introducing-clicky-agents-this-is-the-simplest-activity-7454552863227285504-vQrQ), [clicky.so landing](https://www.clicky.so/), [PH listing](https://www.producthunt.com/products/clicky-2)
+- Karpathy LLM Wiki gist: `C:\Users\Abhis\OneDrive\Documents\Maritime Project\Claude Code TIPS\Andrej Karpathy KB\llm-wiki.md` — verbatim text used to verify cargo-cult error
+- tekram/clicky-windows: [README](https://github.com/tekram/clicky-windows) verified 2026-04-27 via WebFetch
+- JaySmith502/clicky-win: code-level deep-dive via Agent 2026-04-27 — `clicky-py/clicky/knowledge_base.py`, `prompts.py`, `conversation_history.py`, `config.py`, `companion_manager.py`, `clicky.spec`, `worker/src/index.ts`
+- LAUNCH.md (gitignored, internal) — has GrantaEdu Pack demo voiceover script
+
+---
+
 ## 2026-04-26: Considered fully-local stack — tiered (cloud default + Phase 3 Private Mode opt-in) chosen
 
 **Context:** User-prompted by Microsoft VibeVoice release ("local MIT-licensed STT + TTS, 90-min generation from 10s clip, 60-min transcription"). Question: should Clicky bundle local alternatives so users don't need to BYOK API keys for AssemblyAI / Cartesia / Anthropic? Three parallel research agents evaluated (1) VibeVoice specs from primary Microsoft sources, (2) real user reactions on Reddit / HN / GitHub Issues, (3) end-to-end fully-local stack feasibility on 5 consumer hardware tiers.
