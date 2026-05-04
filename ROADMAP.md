@@ -1,7 +1,18 @@
 # Clicky Windows — Roadmap
 
-**Status:** Phase 1 + Phase 1.5 + parallel-capture refactor all SHIPPED (182/182 tests). **Active sprint REORDERED 2026-04-27 (KB-first per user direction):** Phase 2 KB upload (JaySmith pattern, ~150 LOC, ~3-4hr) → Phase B1 installer (PyInstaller + Inno Setup) → Phase B1 tray + auto-updater + minimal API key dialog → Phase B2 multi-provider STT/TTS subclasses → Phase B3 HIPAA mode (whisper.cpp + Windows SAPI) → demo video (GrantaEdu Pack flow) + public flip + Issue #26 comment. **Total: ~3-5 focused days with Claude Code parallel pace.** See [DECISIONS.md 2026-04-27](DECISIONS.md) for the full strategic re-evaluation (Karpathy LLM Wiki cargo-cult retracted, Phase 2 locked as right-sized 3c, tekram/JaySmith502 corrected feature inventories).
-**Last updated:** 2026-04-27
+**Status:** Phase 1 + Phase 1.5 + parallel-capture refactor + **Sprints 0–3.6 all SHIPPED (219/219 tests, 84 MB `Clicky-Windows-Setup-v0.1.0.exe` ready, end-to-end PTT verified working in installed bundle).** Active sprint sequence (post-sync 2026-05-05): ✅ Sprint 0 hygiene → ✅ Sprint 1 KB upload → ✅ Sprint 2 PyInstaller + Inno Setup → ✅ Sprint 3 tray + keyring + 3 review fixes → ✅ Sprint 3.5 icon polish (GPT Image v2 chroma-keyed locked) → ✅ Sprint 3.6 OpenRouter sk-or- auto-routing (fixes bundled-EXE 401) → ⏳ Sprint 4 ElevenLabs opt-in TTS (~1 hr) → ⏳ Sprint 5 README + CI + repo metadata + SignPath draft + public flip. See [DECISIONS.md](DECISIONS.md) entries dated 2026-05-04 and 2026-05-05 for full ADR coverage of every sprint shipped.
+**Last updated:** 2026-05-05
+
+**Recent commits this batch (a7bdbfc → e484ca9):**
+
+| Commit | Sprint | Outcome |
+|---|---|---|
+| `697d6f6` | Sprint 0 | Pre-public hygiene — 19 historical files moved to Archive, LICENSE (MIT) added, `.gitignore` tightened, git history scanned for secrets (clean) |
+| `d34b5f2` + `b9c9f78` | Sprint 1 | KB upload feature — lean per-app `.md` (retracted JaySmith verbatim folder+TOML pattern), 12 new tests, 2nd `cache_control` system block in Anthropic + concat for Gemini |
+| `03e41f7` | Sprint 2 | PyInstaller `--onedir` + Inno Setup per-user installer; aggressive bundle excludes (1.1 GB → 275 MB; 84 MB Setup.exe after LZMA2) |
+| `fd8e476` | Sprint 3 | Tray + first-launch BYOK keyring dialog + env→keyring migration + 3 review fixes; 19 new tests; closes "no clean exit path" UX gap |
+| `981622b` `d201960` `5a26e15` `f14d59e` | Sprint 3.5 | Icon iteration journey — hand-drawn pixel-art retracted, switched to GPT Image v2 chroma-keyed multi-res ICO with aggressive transparency snap |
+| `e484ca9` | Sprint 3.6 | Auto-detect OpenRouter `sk-or-` key prefix in `create_ai_client` — fixes bundled-EXE 401 (cwd outside repo → `.env` not loaded → `ANTHROPIC_BASE_URL` unset → key sent to wrong endpoint). 3 new tests. Verified end-to-end via `~/.clicky-windows/debug/2026-05-05_05-16-19_chrome.exe/interaction.log` (CLAUDE done in 4.1s, audible response, no 401) |
 
 This doc answers **where are we now**. It combines what other projects split into PLAN.md + PROGRESS.md + TASKS.md + TESTING.md — all of that lives here in status columns and acceptance proof.
 

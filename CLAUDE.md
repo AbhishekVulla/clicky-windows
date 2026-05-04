@@ -138,21 +138,33 @@ Clicky Windows/
 ├── tts.py              ← TTS abstract + CartesiaSonicTTS (Sonic-3 streaming via iter_bytes())
 ├── hotkey.py           ← pynput Ctrl+Alt+Space PTT (suppress=False observe-only)
 ├── memory.py           ← MemoryStore — Karpathy markdown + SQLite WAL
-├── config.py           ← .env loader + constants (API keys, MODEL_ID, HOTKEY, CANDIDATE_RESOLUTIONS, MEMORY_*, CARTESIA_*, ASSEMBLYAI_*)
-├── requirements.txt    ← Phase 1 deps
+├── kb.py               ← KB recall — lean per-app `<app>.md` at `~/Documents/Clicky Wiki/`. .exe-basename match, tail-truncate. Returns ('', '') if missing. Sprint 1.
+├── tray.py             ← QSystemTrayIcon + 4-item right-click menu (Settings… / Open KB folder / Open Memory folder / Quit). Sprint 3 — closes the no-clean-exit-path UX gap.
+├── settings_dialog.py  ← Modal QDialog for first-launch / rotation BYOK keys. Saves to keyring under service "clicky-windows" (DPAPI per-user). Reusable from tray Settings. Sprint 3.
+├── config.py           ← .env loader + constants + `resolve_api_key(name)` env→keyring resolver with one-shot migration (Sprint 3). Adds KB_DIR, KB_RECALL_MAX_CHARS, KEYRING_SERVICE.
+├── clicky.spec         ← PyInstaller `--onedir` build spec (cribbed from JaySmith502, swapped PySide6→PyQt6, aggressive excludes drop bundle 1.1 GB → 275 MB). Sprint 2.
+├── installer/clicky.iss ← Inno Setup 6 script — per-user install, no UAC, optional desktop shortcut. Output: 84 MB Clicky-Windows-Setup-v0.1.0.exe. Sprint 2.
+├── assets/clicky_tray.ico ← Multi-res icon (16/32/48/64/128/256 native frames). GPT Image v2-generated PNG converted via chroma-key + LANCZOS resize + alpha-snap. Sprint 3.5.
+├── LICENSE             ← SPDX MIT, Copyright (c) 2026 Abhishek Vulla. Sprint 0.
+├── requirements.txt    ← Phase 1 deps + keyring>=25.0 (Sprint 3)
 ├── .env.example        ← key placeholders
-├── .gitignore          ← .env, API key files, debug_*.jpg, __pycache__, .superpowers/
+├── .gitignore          ← .env, API key files, debug_*.jpg, __pycache__, .superpowers/, build/, dist/, installer/Output/, Clicky Windows Archive/, LAUNCH.md
 ├── tools/
 │   ├── bench_path_a.py ← Mann-Whitney U + bootstrap CI latency benchmark (Phase 1.5 Step 2 Task 12)
 │   └── lint_memory.py  ← Step 7.5. **SKIPPED 2026-04-20** per user verdict ("B0-only, dumb"). Not shipping unless B0 writeup specifically needs it.
-├── tests/              ← ~100 tests target, mock-based, <3s full suite
+├── tests/              ← 219 tests, mock-based, ~13s full suite
 │   ├── test_capture.py
 │   ├── test_ai.py
 │   ├── test_overlay.py
 │   ├── test_stt.py
 │   ├── test_tts.py
 │   ├── test_hotkey.py
-│   └── test_memory.py
+│   ├── test_memory.py
+│   ├── test_kb.py              ← Sprint 1
+│   ├── test_app.py
+│   ├── test_tray.py            ← Sprint 3
+│   ├── test_settings_dialog.py ← Sprint 3
+│   └── test_config_keyring.py  ← Sprint 3
 └── docs/
     └── superpowers/
         └── plans/      ← per-component Superpowers plans (one combined plan doc per component)
@@ -160,7 +172,8 @@ Clicky Windows/
 
 ## Rules (load-bearing — breaking any of these breaks the project)
 
-- **API keys:** `.env` only for Phase 1. Never commit. `.gitignore` blocks `.env`, `*API*KEY*`, `*.key`, `*.pem`, `*secret*`, `Anthropic API.txt`, `STT TTS API.txt`. Phase 2 migrates to OS keychain via Python `keyring` lib.
+- **API keys:** Sprint 3 migrated from `.env`-only to `.env`-OR-keyring (Windows Credential Manager, DPAPI per-user). `config.resolve_api_key(name)` reads env first then keyring; on env-present it ALSO writes to keyring as backup so user can later delete `.env` without losing keys. First-launch modal (`settings_dialog.SettingsDialog`) prompts for missing keys + persists to keyring under service `"clicky-windows"`. Never commit `.env`. `.gitignore` blocks `.env`, `*API*KEY*`, `*.key`, `*.pem`, `*secret*`, `Anthropic API.txt`, `STT TTS API.txt`. README discloses: "DPAPI per-user encryption — better than plaintext .env but does NOT protect against malware running as your user account."
+- **OpenRouter routing for bundled EXE** (Sprint 3.6, `ai.py:635-645`): `ai.create_ai_client` auto-detects `sk-or-` API key prefix and sets `base_url=https://openrouter.ai/api` when no explicit base_url is passed. Direct `sk-ant-*` keys leave `base_url=None` so the SDK uses its default (`api.anthropic.com`), where those keys are valid. **Why:** bundled `Clicky.exe` cwd is install dir (no `.env` there) → `python-dotenv.load_dotenv()` finds nothing → `ANTHROPIC_BASE_URL` env var unset → without this prefix-detect, Anthropic SDK defaults to api.anthropic.com and OpenRouter-namespaced keys get rejected with 401 invalid x-api-key. See DECISIONS.md 2026-05-05 + `feedback_bundled_exe_dotenv_trap.md`.
 - **Screenshots sent to Claude:** `capture.pick_resolution` picks from `[(1024,768),(1280,800),(1366,768)]` by closest aspect-ratio. PIL LANCZOS resize. **`overlay.hide_for_capture()` BEFORE every `mss.grab()`** — if Claude sees our own blue cursor in its input, it tries to point at itself (infinite feedback loop).
 - **Overlay:** click-through (not focus-stealing), always-on-top, transparent background, no taskbar entry. **Per-monitor architecture** — one `QWidget` per physical monitor from `QGuiApplication.screens()`, routed via `screen_for_monitor()` metadata match. NEVER virtual-desktop-spanning (Qt 6 "islands-of-screens" gotcha on mixed-DPI Windows 11 — see DECISIONS.md 2026-04-11 "Per-monitor overlays"). Win32 layered-window flags (`WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`) applied via `ctypes` AFTER `show()`, OR'd in (never overwritten), followed by `SetWindowPos(SWP_FRAMECHANGED)`. `apply_clickthrough_styles` raises `RuntimeError` with `ctypes.WinError()` context on `SetWindowLongW` failure — no silent click-through breakage.
 - **Hotkey:** Ctrl+Alt+Space via `pynput.Listener(suppress=False)` — **observe-only, never consume**. NEVER `suppress=True` (globally destructive — disables all typing system-wide). NEVER Ctrl+Space (VS Code IntelliSense). NEVER Ctrl+Shift+Space (Excel/Sheets Select-All). Claude Desktop for Windows users must disable its Ctrl+Alt+Space binding in Settings → Keyboard Shortcuts (same pattern Raycast/Flow-Launcher users follow). Full pivot history in DECISIONS.md 2026-04-12 (morning + evening).

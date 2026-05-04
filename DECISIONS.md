@@ -10,6 +10,172 @@ For **how** → [CLAUDE.md](CLAUDE.md)
 
 ---
 
+## 2026-05-05: Sprint 3.6 — auto-detect OpenRouter `sk-or-` key prefix in `create_ai_client` (fixes bundled-EXE 401)
+
+**Context:** USER tested the installed bundled `Clicky.exe` and every PTT failed with `AuthenticationError 401: invalid x-api-key` (verified in `~/.clicky-windows/debug/2026-05-05_04-57-45_chrome.exe/interaction.log` line 14). STT worked, capture worked, KB recall worked, memory recall worked — only the Claude API call failed. Root cause: user's `.env` has `ANTHROPIC_API_KEY=sk-or-v1-...` (OpenRouter key) PLUS `ANTHROPIC_BASE_URL=https://openrouter.ai/api` to route it. In dev mode (`py -3.13 -m app` from repo root), python-dotenv reads `.env`, both env vars are set, AnthropicClient routes to OpenRouter correctly. In bundled-EXE mode, cwd is `%LOCALAPPDATA%\Programs\Clicky Windows\` — no `.env` there, python-dotenv silently finds nothing, ANTHROPIC_BASE_URL unset, Anthropic SDK falls back to `api.anthropic.com` default, OpenRouter-namespaced key is rejected. Sprint 3's keyring migration (config.resolve_api_key) handles the API KEY across env→keyring transitions but ANTHROPIC_BASE_URL has no equivalent resolution path.
+
+**Decision:** Surgical 5-LOC fix in `ai.create_ai_client`: when `api_key.startswith("sk-or-")` AND `base_url is None`, auto-set `base_url="https://openrouter.ai/api"`. Direct Anthropic keys (`sk-ant-*`) leave `base_url=None` so the SDK uses its default (which is correct for those keys). Explicit `base_url` passed by caller still wins (no override). Implementation at `ai.py:635-645`.
+
+**Alternatives considered:**
+- Store ANTHROPIC_BASE_URL in keyring + add UI field to settings dialog (more thorough but UI work; defer — prefix-detect heuristic handles 95% of real users).
+- Bundle `.env` in installer (NEVER — security disaster; user keys would land in known location on disk).
+- Check `os.environ` proactively at startup, set ANTHROPIC_BASE_URL if sk-or- key found (similar effect, more invasive than client-construction-time fix).
+
+**Consequences:**
+- Bundled EXE works end-to-end without `.env` for users with OpenRouter keys. Verified via `~/.clicky-windows/debug/2026-05-05_05-16-19_chrome.exe/interaction.log`: STT 464ms, CLAUDE done in 4.1s, audible response, no 401.
+- Direct Anthropic users unaffected (their keys keep working through SDK default endpoint).
+- 3 new tests (`test_anthropic_with_openrouter_key_auto_routes_to_openrouter`, `test_anthropic_with_direct_key_does_not_set_base_url`, `test_explicit_base_url_overrides_openrouter_auto_detect`).
+- 219/219 tests green.
+
+**References:**
+- Failing log: `~/.clicky-windows/debug/2026-05-05_04-57-45_chrome.exe/interaction.log` (401)
+- Working log: `~/.clicky-windows/debug/2026-05-05_05-16-19_chrome.exe/interaction.log` (CLAUDE done in 4.1s)
+- Implementation: commit `e484ca9`, `ai.py:635-645`
+- Lesson memory: `feedback_bundled_exe_dotenv_trap.md`
+
+---
+
+## 2026-05-05: Sprint 3.5 — Icon iteration journey (5 commits): hand-drawn pixel-art retracted → GPT Image v2 chroma-keyed locked
+
+**Context:** Sprint 3 shipped `assets/clicky_tray.ico` as a hand-drawn 16×16 pixel-art cursor. After installing in real Windows tray, user flagged the icon as "kinda weird" (head-tail neck gap visible at large sizes — rendered as two separate shapes rather than one cursor). Multi-res mechanism was ALSO wrong initially (only 16×16 frame embedded, Windows stretching to fill larger surfaces = visible blur on dialog title bars + Apps & features list). Five icon-related commits this session resolved it.
+
+**Decision:** Use user's GPT Image v2-generated PNG as source. Convert to multi-res ICO via aggressive chroma-key (RGB > 230 → fully transparent) + crop to opaque bbox + LANCZOS resize to all 6 sizes (16/32/48/64/128/256) + post-resize alpha snap (alpha < 32 → 0; alpha > 224 → 255) for clean transparency. Multi-res mechanism: pass 256×256 as base, native frames in `append_images`, with explicit `sizes=[(s,s)]` parameter so PIL embeds each size natively (not by downscaling base).
+
+Also fix EXE-resource icon (`clicky.spec icon="assets/clicky_tray.ico"` — embeds icon as Windows EXE resource for taskbar / Alt-Tab / Start Menu shortcut / Apps & features) and Qt-app icon (`qt_app.setWindowIcon(QIcon(...))` in app.py main — belt-and-suspenders for Qt-managed surfaces). Path resolution via `Path(__file__).parent / "assets" / ...` for dev/bundle parity.
+
+**Alternatives considered:**
+- Smooth squircle (Claude Design F variant) — looked good in Claude Design preview but user wanted pixel-art aesthetic.
+- 359 KB Archive ICO B variant (user-supplied alternate) — comparable quality, slightly different positioning. Kept as fallback.
+- Hand-drawn pixel-art with cleaner head-tail proportions — failed visual review at 256×256 (still looked off).
+- SVG output via Claude Design with raster conversion — overcomplicated for the scale; PNG-direct is simpler.
+
+**Consequences:**
+- Icon locked. User confirmed "the new cursor looks a lot cleaner, so that's fine."
+- In-app overlay cursor (`overlay.py` QPolygonF rendered at 60Hz) stays smooth-vector for now. Pixelating that = bigger overlay change, deferred to optional post-Sprint 4+5 polish.
+- GitHub repo hero logo (large brand statement for README) is separate concern — user generates pre-launch.
+- Lesson learned: at 16×16 native resolution, hand-drawn classic cursor proportions are genuinely hard. AI-generated source + careful chroma-key pipeline is more reliable than artisanal pixel-by-pixel grids.
+
+**References:**
+- Commits: `981622b` (multi-res mechanism), `d201960` (hand-drawn redesign attempt), `5a26e15` (GPT Image v2 + chroma-key v1), `f14d59e` (aggressive white removal + alpha snap)
+- Source PNG: `Clicky Windows Archive/ChatGPT Image May 5, 2026, 04_31_33 AM.png` (1254×1254 RGB)
+- Output: `assets/clicky_tray.ico` (~45 KB, 6 native frames)
+
+---
+
+## 2026-05-04: Sprint 3 — System tray + first-launch keyring dialog + env→keyring migration; closes "no clean exit path" UX gap
+
+**Context:** Pre-Sprint-3, the only way to close Clicky was Task Manager (Ctrl+Shift+Esc → End task). Reasons: windowed PyQt6 app with `WS_EX_TOOLWINDOW` (no taskbar entry) + `console=False` (no SIGINT path) + no menu / hotkey to quit. User flagged this as a real UX gap. Also: API keys were `.env`-only (Phase 1 BYOK pattern) — fine for dev, awkward for end users who'd need to manually edit a file.
+
+**Decision:** Three coupled features in one sprint commit (`fd8e476`):
+
+1. **`tray.py` (~110 LOC)** — `QSystemTrayIcon` with 4-item menu (Settings... / Open Knowledge Folder / Open Memory Folder / Quit Clicky). Quit callback invokes `clicky.stop()` BEFORE `qt_app.quit()` so STT WebSocket + TTS playback + hotkey listener all disconnect cleanly. Folder menu items use `mkdir(parents=True, exist_ok=True)` + `os.startfile()` to open in Explorer (auto-create-if-missing for first-launch UX). System-tray-availability check raises `RuntimeError` if Windows config has no tray (rare kiosk/VM scenarios) — caught in app.py main with `QMessageBox.critical` + `sys.exit(1)`.
+
+2. **`settings_dialog.py` (~155 LOC)** — modal `QDialog` with 3 password fields (Anthropic / AssemblyAI / Cartesia) + reveal checkbox + masked previews of existing keys (`first-5 + ****** + last-4`). Save persists each non-empty field to keyring under service name `"clicky-windows"`. Reusable: shown at first-launch when keys missing AND from tray "Settings..." menu (rotation flow).
+
+3. **`config.resolve_api_key()`** — env-then-keyring resolver with one-shot migration. On `.env`-present, the value gets written to keyring as backup so user can later delete `.env` without losing keys. All 3 module-level constants (`ANTHROPIC_API_KEY`, `ASSEMBLYAI_API_KEY`, `CARTESIA_API_KEY`) now resolve via this helper. Failures in keyring (locked vault, no backend) are swallowed — env path always works as fallback.
+
+App.py main block restructure: create QApplication FIRST → `setQuitOnLastWindowClosed(False)` (prevent overlay-close from killing app) → check `required_keys_present()`, show `SettingsDialog` if missing → re-resolve keys via `resolve_api_key()` (module-level constants captured at import time and may be stale after modal save) → construct `ClickyApp` with explicit api_key kwargs → instantiate `ClickyTray` with quit + settings callbacks.
+
+**Alternatives considered:**
+- `pystray` for tray icon — verified abandoned (last release Sept 2023). `QSystemTrayIcon` is native + zero new deps.
+- Keep `.env`-only — fails the end-user installer story (users won't manually edit a config file).
+- Auto-update keys mid-session — explicit defer; restart-required is documented in tray Settings... callback log line.
+- Storage-location wizard at first launch (offer `~/Documents/Clicky Wiki/` vs custom) — rejected per 2026-04-27 plan retraction (extra modal = friction; default is universally fine).
+
+**Consequences:**
+- Right-click tray → Quit cleanly exits Clicky. UX gap closed.
+- Keyring uses Windows Credential Manager backend (`WinVaultKeyring`, DPAPI per-user encryption). README disclosure: "API keys stored in Windows Credential Manager (DPAPI per-user encryption). Better than plaintext `.env` but does NOT protect against malware running as your user account."
+- 19 new tests across `test_config_keyring.py` (env-only / keyring-only / both / neither / set_failure_swallowed / get_failure_returns_none) + `test_settings_dialog.py` (`_mask` edge cases + `required_keys_present` probe behavior) + `test_tray.py` (menu structure + Quit/Settings callbacks + KB/Memory folder auto-create + RuntimeError on tray unavailable).
+- Multi-res ICO bundling needed `keyring.backends.Windows` as PyInstaller hidden import (dynamic entry-point loading).
+- 3 review fixes applied in same commit: settings dialog icon path uses `Path(__file__).parent` (was CWD-relative bug in bundled EXE), tray availability guard (raise RuntimeError before QSystemTrayIcon construction), wrong noqa comment removed.
+
+**References:**
+- Commit: `fd8e476`
+- Files NEW: `tray.py`, `settings_dialog.py`, `assets/clicky_tray.ico` (initial pixel-art version), `tests/test_tray.py`, `tests/test_settings_dialog.py`, `tests/test_config_keyring.py`
+- Files MODIFIED: `config.py` (KEYRING_SERVICE + resolve_api_key), `app.py` (main-block modal+tray flow), `clicky.spec` (assets data + keyring hidden imports), `requirements.txt` (`keyring>=25.0`)
+
+---
+
+## 2026-05-04: Sprint 2 — PyInstaller `--onedir` + Inno Setup per-user installer; aggressive bundle excludes (1.1 GB → 275 MB)
+
+**Context:** Phase B1 milestone — produce `Clicky-Windows-Setup.exe` so non-developer Windows users can install Clicky in one double-click without needing Python / SDKs / a `.env` file. Two-stage build pipeline needed: PyInstaller bundles Python code + deps into `dist/Clicky/` folder; Inno Setup wraps the folder into a single distributable `Setup.exe`.
+
+**Decision:** Crib JaySmith502/clicky-win's `clicky.spec` verbatim (verified via `gh api repos/JaySmith502/clicky-win/contents/clicky-py/clicky.spec`). Adapt for our stack:
+- Replace PySide6 → PyQt6 throughout (collect_data_files, hidden imports, excludes)
+- Drop `qasync` (we don't use async-Qt bridge)
+- Add explicit hidden imports for our SDKs: `anthropic`, `openai`, `cartesia`, `assemblyai`, `sounddevice`, `numpy`, `keyring`, `keyring.backends.Windows`
+- Keep platform-shim hidden imports: `pynput.keyboard._win32`, `pynput.mouse._win32`, `mss.windows`
+- `--onedir` (NOT `--onefile`) — preserves fast startup vs the 2-5s extraction penalty `--onefile` pays per launch (PyQt6 + many deps = bad UX with `--onefile`)
+- Output bundle: `dist/Clicky/Clicky.exe` (15 MB launcher) + `dist/Clicky/_internal/` (260 MB of bundled site-packages)
+
+Inno Setup `installer/clicky.iss` cribbed from `doug-101/TreeLine` v3.2.1 pattern (PyQt6 + Inno reference). Per-user install (`PrivilegesRequired=lowest`, `DefaultDirName={userpf}\Clicky Windows`) — no UAC prompt = lower friction for portfolio-tier users on locked-down machines. Files spec: `Source: "..\dist\Clicky\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs`. Optional desktop shortcut. Preserves user data on uninstall (`~/.clicky-windows/` and `~/Documents/Clicky Wiki/` not touched).
+
+**Aggressive bundle excludes** drop the bundle 1.1 GB → 275 MB (75% reduction):
+- `torch` (315 MB), `torchvision`, `torchaudio` — pulled transitively by some package's deep dep graph; never used
+- `llvmlite` (102 MB), `numba` — JIT compilers, not used
+- `pyarrow` (76 MB) — Apache Arrow, not used
+- `av` (65 MB) — PyAV / FFmpeg bindings, not used
+- `scipy` (53 MB) — scientific computing; only `tools/bench_path_a.py` uses it (dev script, NOT bundled)
+- `onnxruntime` (32 MB), `pandas` (17 MB) — not used
+- Dev-tooling: `IPython`, `jedi`, `parso`, `jupyter`, `notebook`, `matplotlib`
+
+Confirmed safe via grep: scipy is the only "excluded but project-imported" item, and only by `tools/bench_path_a.py` which is not in the EXE entry path.
+
+**Alternatives considered:**
+- `briefcase` (BeeWare) for cross-platform packaging — overkill, adds its own Qt wrapper, defer.
+- `fbs` — last shipped 2025-01-06, effectively stalled.
+- WiX MSI (Friture pattern) — heavier toolchain, makes sense only for enterprise GPO deploys; we don't need this.
+- `--onefile` + Sparkle — `--onefile` startup penalty makes PyQt6 apps feel sluggish; rejected.
+- Code-signing cert ($90-400/yr) — defer; SignPath Foundation OSS application is the long-term path. Ship unsigned with README screenshot of SmartScreen "More info → Run anyway" flow.
+
+**Consequences:**
+- 84 MB `Clicky-Windows-Setup-v0.1.0.exe` (LZMA2 compresses 275 MB onedir to ~84 MB).
+- Inno Setup installs to `%LOCALAPPDATA%\Programs\Clicky Windows\` (per-user, no admin).
+- SmartScreen "Windows protected your PC" warning appears on first install for unsigned EXE — user clicks "More info → Run anyway." Acceptable for portfolio scope; SignPath OSS application defers signing to post-launch.
+- Bundle keyring directory not visible in `dist/Clicky/_internal/` (only `keyring-25.7.0.dist-info/`) — `keyring` package is packed into PYZ archive via hidden imports. Verified at runtime via 5-second smoke test (Clicky.exe stays alive after launch = no `ImportError`).
+- Build commands: `py -3.13 -m PyInstaller clicky.spec --noconfirm --clean` (~5 min) → `iscc installer/clicky.iss` (~1 min). `iscc.exe` at user-scope path: `C:\Users\Abhis\AppData\Local\Programs\Inno Setup 6\ISCC.exe` (per-user install, not system-wide).
+
+**References:**
+- Commit: `03e41f7`
+- Files NEW: `clicky.spec`, `installer/clicky.iss`
+- Files MODIFIED: `.gitignore` (add `installer/Output/`)
+- Reference repos: `JaySmith502/clicky-win/clicky-py/clicky.spec`, `doug-101/TreeLine/win/treeline-all.iss`
+
+---
+
+## 2026-05-04: Sprint 1 — KB upload feature shipped (lean per-app `.md`, retracts JaySmith verbatim folder+TOML pattern)
+
+**Context:** Phase 2 differentiator from 2026-04-27 strategic re-eval — user-uploadable docs per app so Clicky can answer questions about obscure / company-internal software Claude doesn't already know. Original plan called for shipping JaySmith502/clicky-win's full pattern (`<app>/_meta.toml` + `overview.md` + section files + 60K-char keyword-ranked budget). After mid-session pushback from user (*"is this actually useful or just complex?"*), the JaySmith verbatim pattern was retracted as overengineered for our scale.
+
+**Decision:** Lean per-app pattern — single `.md` file per app at `~/Documents/Clicky Wiki/<app>.md`, named to match the foreground `.exe` basename (e.g. `edupack.exe.md`). Same sanitization as `memory.py` (`_sanitize_app_name`: lowercase + replace `:\\/`) so users see consistent filenames in both `~/.clicky-windows/memory/` and `~/Documents/Clicky Wiki/`. If file missing → `recall()` returns `('', '')` (graceful empty path; this is the "Claude already knows that software" case). If file > 60,000 chars → tail-truncate (mirrors `memory.recall` overflow handling).
+
+Injection: Anthropic `AnthropicClient.ask_stream` adds `kb_content` + `kb_app_name` kwargs. When non-empty, appends a SECOND `cache_control: ephemeral` system block alongside the persona block, with marker text *"app knowledge base: you are helping the user with {display_name}. here is reference documentation that you should treat as authoritative:\n\n{kb_content}"*. Within Anthropic's 4-block max (persona + KB + memory-prefix + 1 spare for auto-cache). Per-app cache hit on subsequent turns within the same app session (~50-100ms TTFT saved); cache miss on app switch (acceptable).
+
+`GeminiClient.ask_stream` mirrors the kwargs but concatenates KB into the single system string (Gemini via OpenRouter OpenAI-compat endpoint doesn't support multi-block `cache_control`).
+
+App.py `_pipeline_worker` calls `kb.recall(app_name)` after STT returns transcript, threads results to `ai.ask_stream`. Wrapped in `try/except` (KB files are user-controlled and could be malformed — bad encoding, permission errors, symlink loops; failure must not crash pipeline).
+
+**Alternatives considered:**
+- JaySmith502 verbatim folder + TOML + overview.md + ranking — code-verified at source level (`gh api repos/JaySmith502/clicky-win/contents/clicky-py/clicky/knowledge_base.py`, 160 LOC). RETRACTED mid-session as overengineered: setup friction (folder + TOML config) per app conflicts with the demo voiceover *"drop the docs into Clicky's knowledge folder"* (singular). Most users will drop one NotebookLM-converted .md per app, not multi-file curated KBs.
+- Karpathy LLM Wiki full pattern — already retracted at 2026-04-27 strategic re-eval.
+- User message injection (instead of system block) — rejected. KB is "authoritative documentation" semantically belonging to system instructions. Also, system blocks have 4-cache_control breakpoint allowance which accommodates persona + KB + memory cleanly.
+- Keyword-ranked sections with budget allocation — only matters if file > 60 KB. NotebookLM output typically 20-50 KB. YAGNI for v0; tail-truncate handles overflow.
+- Auto-create the KB folder at startup — rejected. Users discover the folder via tray menu "Open Knowledge Folder" which auto-creates on click. Empty folder at startup confuses users (looks like a missing feature).
+
+**Consequences:**
+- ~30 LOC `kb.py` (vs ~150 LOC for JaySmith pattern) + 12 tests (10 in test_kb.py, 2 in test_ai.py for Anthropic + 2 review-added in test_ai.py for Gemini). 219/219 tests at session end.
+- File location is in user's Documents folder (visible, easy to discover). Unlike `~/.clicky-windows/memory/` (hidden by `.` prefix on macOS/Linux, less discoverable on Windows but works).
+- Memory recall and KB recall are now BOTH active per PTT. Memory injects into user message text content block; KB injects into 2nd cache_control system block. Different injection points = different cache scopes (memory is per-session-tail, KB is per-file-content).
+- Code review fixes layered in (commit `b9c9f78`): try/except around `kb.recall` in app.py, 2 new Gemini KB tests closing test-coverage gap.
+
+**References:**
+- Commits: `d34b5f2` (initial), `b9c9f78` (review-fix)
+- Files NEW: `kb.py`, `tests/test_kb.py`
+- Files MODIFIED: `config.py` (KB_DIR + KB_RECALL_MAX_CHARS), `ai.py` (kb_content + 2nd cache block in AnthropicClient + concat in GeminiClient), `app.py` (kb.recall in _pipeline_worker), `tests/test_ai.py` (4 new tests covering both clients)
+- Reference: `gh api repos/JaySmith502/clicky-win/contents/clicky-py/clicky/knowledge_base.py` (the pattern we retracted)
+
+---
+
 ## 2026-04-27: Farza launched Clicky Agents → Karpathy LLM Wiki cargo-cult RETRACTED → Phase 2 locked as right-sized curated KB upload (JaySmith502 pattern) + sprint reorder
 
 **Context:** Farza Majeed launched Clicky Agents (~Apr 23, 2026) as a closed-source iteration on macOS Clicky. Voice-driven multi-agent task spawner ("clicky agent" wake phrase → background agent does research / Mac apps / Calendar updates). Same Cloudflare Worker proxy + AssemblyAI + ElevenLabs + Claude Sonnet 4.6 stack. Open-source `farzaa/clicky` repo (5,200 stars, MIT) explicitly framed as "the legacy version for those who want to hack on it." User asked "should I abandon Clicky Windows?" — triggered comprehensive strategic re-evaluation.
