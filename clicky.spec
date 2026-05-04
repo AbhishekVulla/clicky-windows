@@ -46,7 +46,12 @@ a = Analysis(
     ["app.py"],
     pathex=[],
     binaries=pyqt6_libs,
-    datas=pyqt6_data,
+    datas=pyqt6_data + [
+        # Tray icon — referenced by tray.py at runtime via Path-relative
+        # lookup. Without this entry, the .ico is missing from the
+        # bundle and the tray icon shows blank.
+        ("assets/clicky_tray.ico", "assets"),
+    ],
     hiddenimports=[
         # Qt 6 sub-modules — PyInstaller's hook misses some by default.
         "PyQt6.QtCore",
@@ -73,6 +78,11 @@ a = Analysis(
         # Image processing
         "PIL",
         "PIL.Image",
+        # Keyring — Windows Credential Manager backend is loaded
+        # dynamically via entry_points; PyInstaller's hook can miss it.
+        "keyring",
+        "keyring.backends",
+        "keyring.backends.Windows",
     ],
     hookspath=[],
     hooksconfig={},

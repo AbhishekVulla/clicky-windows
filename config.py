@@ -1,6 +1,11 @@
 """Clicky Windows configuration.
 
-Loads environment variables from .env and exposes constants used across the app.
+Loads environment variables from .env (Phase 1 BYOK pattern) AND from
+the OS keyring (Sprint 3 — Windows Credential Manager via the keyring
+package, DPAPI per-user encryption). On launch with .env present, the
+keys are auto-migrated to the keyring as a backup; user can then delete
+.env without losing the keys.
+
 See DECISIONS.md for the rationale behind each default.
 """
 
@@ -9,22 +14,62 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import keyring
 from dotenv import load_dotenv
 
 load_dotenv()
 
 
+# ── Secrets resolution (env → keyring with one-shot migration) ──────────────
+
+KEYRING_SERVICE: str = "clicky-windows"
+"""Service name for keyring entries. Both Windows Credential Manager
+and macOS Keychain treat this as the namespace key. All Clicky API
+keys live under this single service name; the ``name`` parameter is
+the env-var name (ANTHROPIC_API_KEY, etc.)."""
+
+
+def resolve_api_key(name: str) -> str | None:
+    """Resolve an API key by name, preferring env var then keyring.
+
+    On env-var-present, ALSO write the value to keyring as a backup —
+    this is the one-shot migration path from Phase 1's ``.env`` workflow
+    to Phase 2's keyring storage. Subsequent launches with no .env will
+    pick up the value from keyring transparently.
+
+    Failures in keyring (locked vault, no backend, transient errors)
+    are swallowed — the env-var path always works as a fallback. We
+    never want a credential-store glitch to block app startup when the
+    user has perfectly valid keys in their .env.
+
+    Returns None if neither source has a value (caller shows the
+    first-launch settings dialog).
+    """
+    env_value = os.getenv(name)
+    if env_value:
+        try:
+            keyring.set_password(KEYRING_SERVICE, name, env_value)
+        except Exception:
+            # Keyring backend unreachable; env value is still good.
+            pass
+        return env_value
+    try:
+        return keyring.get_password(KEYRING_SERVICE, name)
+    except Exception:
+        return None
+
+
 # ── API keys ─────────────────────────────────────────────────────────────────
 
-ANTHROPIC_API_KEY: str | None = os.getenv("ANTHROPIC_API_KEY")
+ANTHROPIC_API_KEY: str | None = resolve_api_key("ANTHROPIC_API_KEY")
 """Required. Plain vision streaming via messages.stream(). Sonnet 4.6 default."""
 
-ASSEMBLYAI_API_KEY: str | None = os.getenv("ASSEMBLYAI_API_KEY")
+ASSEMBLYAI_API_KEY: str | None = resolve_api_key("ASSEMBLYAI_API_KEY")
 """Required for Phase 1. Streaming STT via AssemblyAI u3-rt-pro WebSocket +
 ForceEndpoint for ~150ms P50 PTT finalization. $50 free credit from
 https://www.assemblyai.com/dashboard/signup, no credit card required."""
 
-CARTESIA_API_KEY: str | None = os.getenv("CARTESIA_API_KEY")
+CARTESIA_API_KEY: str | None = resolve_api_key("CARTESIA_API_KEY")
 """Required for Phase 1. Streaming TTS via Cartesia Sonic-3 WebSocket with
 ~150-250ms TTFB + expressive "buddy" voice. 20k free credits/month from
 https://play.cartesia.ai/sign-in, no credit card required."""

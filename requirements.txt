@@ -13,7 +13,8 @@ assemblyai>=0.33.0         # Streaming STT (u3-rt-pro WebSocket + ForceEndpoint 
 cartesia>=1.0.0            # Streaming TTS (Sonic-3 WebSocket, ~150-250ms TTFB, expressive "buddy" voice, async Python SDK)
 Pillow>=10.4.0             # Image resize with LANCZOS, base64 encoding
 python-dotenv>=1.0.1       # Load ANTHROPIC_API_KEY + ASSEMBLYAI_API_KEY + CARTESIA_API_KEY from .env
-scipy>=1.11                # Mann-Whitney U + bootstrap CI for tools/bench_path_a.py (Path A latency measurement)
+keyring>=25.0              # Windows Credential Manager (DPAPI per-user) for BYOK key storage post-Sprint-3 — auto-migrates from .env on first launch
+scipy>=1.11                # Mann-Whitney U + bootstrap CI for tools/bench_path_a.py (Path A latency measurement; NOT bundled in PyInstaller spec — script-only)
 
 # Dev / test
 pytest>=8.3.0              # Unit tests (target ~50-80 in Phase 1)

@@ -816,22 +816,43 @@ if __name__ == "__main__":
     print("Clicky Windows — push-to-talk AI buddy")
     print("=" * 70)
 
-    missing = []
-    if not ANTHROPIC_API_KEY:
-        missing.append("ANTHROPIC_API_KEY")
-    if not ASSEMBLYAI_API_KEY:
-        missing.append("ASSEMBLYAI_API_KEY")
-    if not CARTESIA_API_KEY:
-        missing.append("CARTESIA_API_KEY")
-    if missing:
-        print(f"\nERROR: Missing API keys in .env: {', '.join(missing)}")
-        print("Copy .env.example to .env and fill in your keys.")
-        sys.exit(1)
-
     set_dpi_awareness()
     qt_app = QApplication(sys.argv)
+    # Tray-only mode: closing the overlay (or any internal window)
+    # must NOT exit the app — only the Quit menu item should.
+    qt_app.setQuitOnLastWindowClosed(False)
 
-    clicky = ClickyApp()
+    # First-launch / missing-keys flow: show modal until all 3 keys
+    # are saved. Modal blocks the QApplication.exec() loop so this
+    # is synchronous from main()'s perspective.
+    from settings_dialog import SettingsDialog, required_keys_present
+    if not required_keys_present():
+        print("First-launch setup — showing API key dialog...")
+        dlg = SettingsDialog()
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            print("Setup cancelled by user. Exiting.")
+            sys.exit(1)
+        # Sanity check — Save was clicked AND all 3 keys are now resolvable.
+        if not required_keys_present():
+            print(
+                "ERROR: Setup completed but at least one API key still "
+                "missing. Aborting."
+            )
+            sys.exit(1)
+
+    # Resolve keys AFTER the modal has run — module-level constants
+    # were captured at import time and may not reflect newly-saved
+    # values. config.resolve_api_key() always reads fresh.
+    from config import resolve_api_key
+    api_anthropic = resolve_api_key("ANTHROPIC_API_KEY")
+    api_assemblyai = resolve_api_key("ASSEMBLYAI_API_KEY")
+    api_cartesia = resolve_api_key("CARTESIA_API_KEY")
+
+    clicky = ClickyApp(
+        ai_client=create_ai_client(model_id=MODEL_ID, api_key=api_anthropic),
+        stt_client=AssemblyAIStreamingSTT(api_key=api_assemblyai),
+        tts_client=CartesiaSonicTTS(api_key=api_cartesia),
+    )
 
     _log("Pre-opening mic + WebSocket (one-time startup cost)...")
     try:
@@ -844,6 +865,40 @@ if __name__ == "__main__":
         sys.exit(1)
 
     clicky.start()
+
+    # System tray icon — the ONLY clean exit path now that the overlay
+    # has WS_EX_TOOLWINDOW (no taskbar entry) and there's no console
+    # for Ctrl+C. Right-click tray → Quit triggers a clean shutdown.
+    from tray import ClickyTray
+
+    def _quit_via_tray() -> None:
+        _log("Quit requested via tray menu — shutting down...")
+        clicky.stop()
+        qt_app.quit()
+
+    def _show_settings() -> None:
+        dlg = SettingsDialog()
+        if dlg.exec() == dlg.DialogCode.Accepted:
+            _log(
+                "Settings saved. Restart Clicky for new keys to take effect."
+            )
+
+    # Tray construction can raise RuntimeError if the user's Windows
+    # has no system tray available (rare — kiosk mode, custom shells,
+    # certain VMs). Show a QMessageBox + exit cleanly rather than
+    # leaving an invisible app running with no quit path.
+    try:
+        tray = ClickyTray(
+            on_quit=_quit_via_tray,
+            on_settings=_show_settings,
+        )
+    except RuntimeError as exc:
+        from PyQt6.QtWidgets import QMessageBox
+        QMessageBox.critical(
+            None, "Clicky Windows -- Tray Error", str(exc)
+        )
+        clicky.stop()
+        sys.exit(1)
 
     def _shutdown(*_args):
         _log("Shutting down...")
