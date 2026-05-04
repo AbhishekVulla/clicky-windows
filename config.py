@@ -202,6 +202,33 @@ MEMORY_RECALL_MAX_CHARS: int = 1500
 our memory is the differentiator but too much context slows Claude down."""
 
 
+# ── Knowledge base (user-uploadable per-app curated docs) ────────────────────
+
+KB_DIR: Path = Path(
+    os.getenv("KB_DIR", str(Path.home() / "Documents" / "Clicky Wiki"))
+)
+"""User drops a single .md file here per app, named to match the .exe
+basename (e.g. ``edupack.exe.md`` for EduPack, ``fusion360.exe.md`` for
+Fusion 360). Clicky reads it on every PTT and injects as authoritative
+reference in Claude's system prompt.
+
+Default location is visible in File Explorer (NOT a hidden ``.``-prefixed
+folder) so users can find + edit + delete the files without terminal
+gymnastics. Mirrors memory.py's transparency contract: human-readable,
+hand-editable, no vector DB.
+
+Decided 2026-05-04 after retracting JaySmith502's folder+TOML+section
+pattern as cargo-cult for our scale. See DECISIONS.md."""
+
+KB_RECALL_MAX_CHARS: int = 60_000
+"""Max characters of curated KB content to inject per request. ~15K
+tokens, ~⅓ of Claude's context budget. Over-budget files tail-truncate
+(same behavior as memory.recall). Anthropic supports up to 4
+``cache_control`` breakpoints per request; injecting KB adds a 2nd
+system block alongside the persona block, leaving 2 slots for the
+user-message memory prefix + the implicit automatic-cache slot."""
+
+
 # ── Overlay ──────────────────────────────────────────────────────────────────
 
 POINTER_ANIMATION_MS: int = 400

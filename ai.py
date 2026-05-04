@@ -92,6 +92,21 @@ injected. Used by AnthropicClient.ask_stream to split the transcript into a
 cached memory-prefix block + an uncached current-turn block. Must match
 app.py ClickyApp._pipeline_worker's f-string exactly."""
 
+_KB_SYSTEM_PREFIX_TEMPLATE = (
+    "app knowledge base:\n"
+    "you are helping the user with {app_name}. here is reference "
+    "documentation that you should treat as authoritative:\n\n"
+)
+"""Marker prefix prepended to user-uploaded KB content before injection
+into the system prompt as a SECOND cache_control block. Caller (app.py
+_pipeline_worker → ask_stream's kb_content kwarg) supplies the raw
+markdown body; ask_stream formats this prefix in front and adds the
+ephemeral cache breakpoint. Per-app cache hit on subsequent turns within
+the same app session; cache miss on app switch (acceptable since each
+KB read is the dominant cost anyway). Empty kb_content means no second
+block — Claude proceeds with vision + memory only (the 'Claude already
+knows that software' path)."""
+
 
 # --- PointParseResult ---------------------------------------------------------
 
@@ -232,6 +247,8 @@ class AnthropicClient(AIClient):
         history: list[dict],
         system_prompt: str = _CLICKY_SYSTEM_PROMPT,
         max_tokens: int = _CLICKY_MAX_TOKENS,
+        kb_content: str = "",
+        kb_app_name: str = "",
     ):
         """Open a streaming Claude call, return a context manager.
 
@@ -245,6 +262,13 @@ class AnthropicClient(AIClient):
             history: prior turns in Anthropic SDK message format.
             system_prompt: persona + pointing instructions.
             max_tokens: token budget (1024 default, matches Clicky).
+            kb_content: optional curated KB markdown body (from
+                kb.recall). If non-empty, injected as a SECOND
+                cache_control system block alongside the persona block.
+                Empty (default) → only the persona block is sent.
+            kb_app_name: sanitized .exe basename used to format the KB
+                injection marker (e.g. "edupack.exe" → display "edupack").
+                Ignored when kb_content is empty.
 
         Usage:
             with client.ask_stream(images, transcript, history) as stream:
@@ -302,6 +326,21 @@ class AnthropicClient(AIClient):
                 "cache_control": {"type": "ephemeral"},
             }
         ]
+        # Optional second cache_control block for user-uploaded curated KB
+        # (kb.recall result). Per-app cache: hit within same app session,
+        # miss on app switch. Anthropic's 4-block limit accommodates this
+        # plus the user-message memory prefix block.
+        if kb_content:
+            display_name = kb_app_name.removesuffix(".exe") or "this software"
+            kb_text = (
+                _KB_SYSTEM_PREFIX_TEMPLATE.format(app_name=display_name)
+                + kb_content
+            )
+            system_blocks.append({
+                "type": "text",
+                "text": kb_text,
+                "cache_control": {"type": "ephemeral"},
+            })
 
         sdk_stream_mgr = self.client.messages.stream(
             model=self.model_id,
@@ -413,12 +452,19 @@ class GeminiClient(AIClient):
         history: list[dict],
         system_prompt: str = _CLICKY_SYSTEM_PROMPT,
         max_tokens: int = _CLICKY_MAX_TOKENS,
+        kb_content: str = "",
+        kb_app_name: str = "",
     ):
         """Open a streaming Gemini call. Returns a context manager with the
         same interface as AnthropicClient.ask_stream().
 
         Builds OpenAI-shaped messages:
-            - System prompt goes as messages[0] role=system
+            - System prompt goes as messages[0] role=system. If
+              ``kb_content`` is non-empty, the KB block is concatenated
+              onto the system prompt (Gemini via OpenAI-compat doesn't
+              support multiple system blocks or cache_control breakpoints,
+              so caching is best-effort via OpenRouter's prompt-caching
+              auto-detection).
             - History is converted from Anthropic content-block format to
               OpenAI plain-string content (text blocks are concatenated)
             - Current user turn gets image_url + text blocks
@@ -441,8 +487,20 @@ class GeminiClient(AIClient):
             user_content.append({"type": "text", "text": label})
         user_content.append({"type": "text", "text": transcript})
 
+        # Concat KB into system prompt for Gemini (no native multi-block
+        # support via OpenAI-compat endpoint).
+        full_system = system_prompt
+        if kb_content:
+            display_name = kb_app_name.removesuffix(".exe") or "this software"
+            full_system = (
+                system_prompt
+                + "\n\n"
+                + _KB_SYSTEM_PREFIX_TEMPLATE.format(app_name=display_name)
+                + kb_content
+            )
+
         openai_messages: list[dict] = [
-            {"role": "system", "content": system_prompt}
+            {"role": "system", "content": full_system}
         ]
         for turn in history:
             text_parts = []

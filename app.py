@@ -28,6 +28,7 @@ from ctypes import wintypes
 from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtWidgets import QApplication
 
+import kb
 from ai import create_ai_client
 from debug_log import DebugSession
 from capture import (
@@ -526,6 +527,21 @@ class ClickyApp(QObject):
                     f"{transcript}"
                 )
 
+            # Curated KB recall (user-uploaded per-app docs). Empty tuple
+            # if no .md file exists for this app — Claude proceeds with
+            # vision + memory only ("Claude already knows that software"
+            # path). When present, ask_stream injects as a 2nd
+            # cache_control system block (Anthropic) or concats into
+            # system string (Gemini).
+            kb_content, kb_app_name = kb.recall(app_name)
+            if kb_content:
+                dbg.log(
+                    f"KB: injected {len(kb_content)} chars from "
+                    f"{kb_app_name}.md"
+                )
+            else:
+                dbg.log(f"KB: no file for {app_name}, skipping")
+
             images = [(c.image, c.label) for c in captures]
             cursor_capture = captures[0]
 
@@ -551,6 +567,8 @@ class ClickyApp(QObject):
                 images=images,
                 transcript=user_text,
                 history=self._history,
+                kb_content=kb_content,
+                kb_app_name=kb_app_name,
             ) as stream:
                 for delta in stream.text_deltas():
                     if cancel.is_set():

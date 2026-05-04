@@ -374,6 +374,99 @@ class TestAnthropicClientAskStream:
             "Current-turn transcript must NOT be cached (dynamic per turn)"
         )
 
+    def test_ask_stream_with_kb_content_appends_second_system_block(self, mocker):
+        """When kb_content is provided, system_blocks must have TWO entries:
+        the persona (block 1) and the KB block (block 2), both cache_control:
+        ephemeral. KB block's text must contain the marker prefix + the
+        kb_app_name (with .exe stripped) + the raw KB content."""
+        from PIL import Image
+        from ai import AnthropicClient, _CLICKY_SYSTEM_PROMPT
+
+        fake_anthropic_class = mocker.patch("ai.Anthropic")
+        fake_client = fake_anthropic_class.return_value
+        fake_stream = mocker.MagicMock()
+        fake_stream.text_stream = iter([])
+        fake_stream.get_final_text.return_value = "ok [POINT:none]"
+        fake_stream_mgr = mocker.MagicMock()
+        fake_stream_mgr.__enter__ = mocker.MagicMock(return_value=fake_stream)
+        fake_stream_mgr.__exit__ = mocker.MagicMock(return_value=False)
+        fake_client.messages.stream.return_value = fake_stream_mgr
+
+        client = AnthropicClient(
+            api_key="test-key", model_id="anthropic/claude-sonnet-4-6"
+        )
+        img = Image.new("RGB", (1280, 800))
+        with client.ask_stream(
+            images=[(img, "label")],
+            transcript="how do I plot YM vs density",
+            history=[],
+            kb_content="# Granta EduPack KB\n\nPlot via Chart > Add...",
+            kb_app_name="edupack.exe",
+        ) as stream:
+            list(stream.text_deltas())
+
+        system_arg = fake_client.messages.stream.call_args.kwargs["system"]
+        assert isinstance(system_arg, list)
+        assert len(system_arg) == 2, (
+            "Expected 2 system blocks (persona + KB), "
+            f"got {len(system_arg)}: {[b.get('text', '')[:50] for b in system_arg]}"
+        )
+        # Block 1 = persona (unchanged)
+        assert system_arg[0]["text"] == _CLICKY_SYSTEM_PROMPT
+        assert system_arg[0]["cache_control"] == {"type": "ephemeral"}
+        # Block 2 = KB injection
+        kb_block = system_arg[1]
+        assert kb_block["type"] == "text"
+        assert kb_block["cache_control"] == {"type": "ephemeral"}
+        assert "app knowledge base" in kb_block["text"]
+        assert "edupack" in kb_block["text"], (
+            "Display name (kb_app_name with .exe stripped) must appear "
+            "in the marker"
+        )
+        assert ".exe" not in kb_block["text"].split("\n\n")[0], (
+            "The .exe suffix should be stripped from the prose marker"
+        )
+        assert "# Granta EduPack KB" in kb_block["text"], (
+            "Raw KB markdown body must be present"
+        )
+        assert "Plot via Chart > Add..." in kb_block["text"]
+
+    def test_ask_stream_without_kb_content_keeps_one_system_block(self, mocker):
+        """When kb_content is empty (default), system_blocks must have only
+        the persona block — no second KB block. This is the 'Claude already
+        knows that software' path."""
+        from PIL import Image
+        from ai import AnthropicClient
+
+        fake_anthropic_class = mocker.patch("ai.Anthropic")
+        fake_client = fake_anthropic_class.return_value
+        fake_stream = mocker.MagicMock()
+        fake_stream.text_stream = iter([])
+        fake_stream.get_final_text.return_value = "ok [POINT:none]"
+        fake_stream_mgr = mocker.MagicMock()
+        fake_stream_mgr.__enter__ = mocker.MagicMock(return_value=fake_stream)
+        fake_stream_mgr.__exit__ = mocker.MagicMock(return_value=False)
+        fake_client.messages.stream.return_value = fake_stream_mgr
+
+        client = AnthropicClient(
+            api_key="test-key", model_id="anthropic/claude-sonnet-4-6"
+        )
+        img = Image.new("RGB", (1280, 800))
+        # Call with NO kb_content / kb_app_name — should default to empty
+        with client.ask_stream(
+            images=[(img, "label")], transcript="hello", history=[],
+        ) as stream:
+            list(stream.text_deltas())
+
+        system_arg = fake_client.messages.stream.call_args.kwargs["system"]
+        assert isinstance(system_arg, list)
+        assert len(system_arg) == 1, (
+            "Expected 1 system block (persona only) when no kb_content, "
+            f"got {len(system_arg)}"
+        )
+        # Sanity: persona block has no KB marker
+        assert "app knowledge base" not in system_arg[0]["text"]
+
 
 # --- AnthropicClient.ask (batch wrapper) --------------------------------------
 
