@@ -866,6 +866,54 @@ class TestCreateAIClient:
         call_kwargs = mock_anthropic.call_args.kwargs
         assert call_kwargs.get("base_url") == "https://staging.openrouter.ai/api"
 
+    def test_anthropic_with_openrouter_key_auto_routes_to_openrouter(self, mocker):
+        """sk-or-v1-* OpenRouter key prefix triggers OpenRouter base URL
+        even when no explicit base_url is passed. Closes the bundled-EXE
+        401 bug where .env isn't loaded so ANTHROPIC_BASE_URL env var
+        is missing — without this fallback the Anthropic SDK defaults
+        to api.anthropic.com which rejects OpenRouter-namespaced keys.
+        """
+        mock_anthropic = mocker.patch("ai.Anthropic")
+        from ai import create_ai_client
+        create_ai_client(
+            model_id="anthropic/claude-sonnet-4-6",
+            api_key="sk-or-v1-d16e1d434a7808ef8fc276b09213983270952aae",
+        )
+        kwargs = mock_anthropic.call_args.kwargs
+        assert kwargs.get("base_url") == "https://openrouter.ai/api", (
+            "OpenRouter sk-or- key must auto-route to openrouter.ai endpoint"
+        )
+
+    def test_anthropic_with_direct_key_does_not_set_base_url(self, mocker):
+        """sk-ant-* direct Anthropic keys must NOT trigger any base_url
+        override — they're valid for Anthropic SDK's default endpoint
+        (api.anthropic.com). Auto-routing is opt-in via prefix."""
+        mock_anthropic = mocker.patch("ai.Anthropic")
+        from ai import create_ai_client
+        create_ai_client(
+            model_id="anthropic/claude-sonnet-4-6",
+            api_key="sk-ant-api03-real-anthropic-key",
+        )
+        kwargs = mock_anthropic.call_args.kwargs
+        # Anthropic SDK gets called without base_url — uses its default.
+        assert "base_url" not in kwargs, (
+            "Direct Anthropic keys must not have base_url overridden"
+        )
+
+    def test_explicit_base_url_overrides_openrouter_auto_detect(self, mocker):
+        """If caller passes an explicit base_url, the auto-detect logic
+        must NOT override it — explicit choice wins. This protects
+        against edge cases like staging environments or proxy services."""
+        mock_anthropic = mocker.patch("ai.Anthropic")
+        from ai import create_ai_client
+        create_ai_client(
+            model_id="anthropic/claude-sonnet-4-6",
+            api_key="sk-or-v1-test-key",  # would auto-route...
+            base_url="https://my-proxy.example.com",  # ...but explicit wins
+        )
+        kwargs = mock_anthropic.call_args.kwargs
+        assert kwargs.get("base_url") == "https://my-proxy.example.com"
+
 
 # --- GeminiClient additional coverage (post-review gaps) --------------------
 

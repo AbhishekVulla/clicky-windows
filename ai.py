@@ -633,6 +633,17 @@ def create_ai_client(
     """
     mid = model_id.lower()
     if mid.startswith("anthropic/") or mid.startswith("claude"):
+        # Auto-route OpenRouter keys (sk-or-v1-*) to OpenRouter's
+        # Anthropic-compat endpoint when no explicit base_url given.
+        # Bundled Clicky.exe has cwd outside the repo, so .env doesn't
+        # load and ANTHROPIC_BASE_URL env var is unset — without this
+        # fallback the SDK defaults to api.anthropic.com and Anthropic
+        # rejects the OpenRouter-namespaced key with 401 invalid x-api-key.
+        # Direct Anthropic keys (sk-ant-*) leave base_url=None so the
+        # SDK uses its default api.anthropic.com endpoint, where those
+        # keys are valid.
+        if base_url is None and api_key and api_key.startswith("sk-or-"):
+            base_url = "https://openrouter.ai/api"
         return AnthropicClient(
             api_key=api_key, model_id=model_id, base_url=base_url,
         )
