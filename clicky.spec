@@ -139,7 +139,13 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,  # windowed app — no console window flash on launch
-    icon=None,  # tray icon comes in Sprint 3 (assets/clicky_tray.ico)
+    icon="assets/clicky_tray.ico",  # embedded as Windows resource in
+                                    # the EXE — used by taskbar,
+                                    # Alt-Tab, Start Menu shortcut,
+                                    # Apps & features uninstall list.
+                                    # Multi-res .ico (16/32/48/64/128/256)
+                                    # so Windows picks native size for
+                                    # each surface (no blur).
 )
 
 coll = COLLECT(

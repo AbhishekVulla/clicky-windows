@@ -818,6 +818,16 @@ if __name__ == "__main__":
 
     set_dpi_awareness()
     qt_app = QApplication(sys.argv)
+    # App-level icon — used by Qt for any window that doesn't set its
+    # own (overlay, future dialogs). Belt-and-suspenders alongside
+    # clicky.spec's `icon=` (which embeds the icon as a Windows EXE
+    # resource for taskbar/Alt-Tab/etc). Path resolved via __file__
+    # so it works in both dev and bundled EXE.
+    from pathlib import Path as _Path
+    from PyQt6.QtGui import QIcon as _QIcon
+    _icon_path = _Path(__file__).parent / "assets" / "clicky_tray.ico"
+    if _icon_path.is_file():
+        qt_app.setWindowIcon(_QIcon(str(_icon_path)))
     # Tray-only mode: closing the overlay (or any internal window)
     # must NOT exit the app — only the Quit menu item should.
     qt_app.setQuitOnLastWindowClosed(False)
