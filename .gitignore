@@ -1,8 +1,6 @@
 # Secrets — never commit
 .env
 *.env.local
-Anthropic API.txt
-STT TTS API.txt
 * API.txt
 *API*
 *api*key*
@@ -12,17 +10,11 @@ STT TTS API.txt
 *_secret.*
 *.pem
 
-# Dev-session archives — local reference only, not product
-B0 projects research.txt
-Claude Code Clicky Chat.txt
-Claude Code Clicky BEFORE Compact.txt
-PLAN.txt
-STARTER_PROMPT.md
+# Internal strategy / backstage docs (kept in repo dir for active development)
 LAUNCH.md
-Aaron InspireCon Clicky feedback.txt
-Aaron InspireCon Clicky feedback.txt.m4a
-I built this thing called Clicky..txt
-memory py.txt
+
+# Defensive: if historical files ever get moved back into the repo
+Clicky Windows Archive/
 
 # Python
 __pycache__/
@@ -65,3 +57,6 @@ desktop.ini
 
 # Superpowers brainstorming visual-companion session files (mockups + events + server state)
 .superpowers/
+
+# Plan files (point-in-time, not part of project)
+.claude/plans/
