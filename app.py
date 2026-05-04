@@ -533,7 +533,19 @@ class ClickyApp(QObject):
             # path). When present, ask_stream injects as a 2nd
             # cache_control system block (Anthropic) or concats into
             # system string (Gemini).
-            kb_content, kb_app_name = kb.recall(app_name)
+            #
+            # Wrapped in try/except because KB files are user-controlled
+            # and could be malformed (bad encoding, permission errors,
+            # symlink loops, etc.). Failure here must NOT crash the
+            # pipeline — Claude can still answer with vision + memory.
+            try:
+                kb_content, kb_app_name = kb.recall(app_name)
+            except Exception as exc:
+                dbg.log(
+                    f"KB: read failed ({type(exc).__name__}: {exc}), "
+                    f"falling back to no-KB path"
+                )
+                kb_content, kb_app_name = "", ""
             if kb_content:
                 dbg.log(
                     f"KB: injected {len(kb_content)} chars from "

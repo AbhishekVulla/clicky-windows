@@ -645,6 +645,70 @@ class TestGeminiClient:
         # New user turn is still list-of-blocks (has image).
         assert isinstance(messages[3]["content"], list)
 
+    def test_ask_stream_with_kb_content_concats_into_system_string(self, mocker):
+        """Gemini via OpenRouter OpenAI-compat doesn't support multiple
+        system blocks or cache_control breakpoints, so kb_content must
+        concat onto the system prompt as a plain string. The marker
+        prefix + display_name (kb_app_name minus .exe) + raw KB body
+        must all appear in messages[0]['content']."""
+        from PIL import Image
+        client, mock_instance, _ = self._make_client(mocker)
+
+        fake_stream = mocker.MagicMock(name="openai_stream")
+        mock_instance.chat.completions.create.return_value = fake_stream
+
+        img = Image.new("RGB", (100, 60), color="white")
+        client.ask_stream(
+            images=[(img, "label")],
+            transcript="how do I plot YM vs density",
+            history=[],
+            kb_content="# Granta EduPack KB\n\nUse Chart > Add to plot.",
+            kb_app_name="edupack.exe",
+        )
+
+        kwargs = mock_instance.chat.completions.create.call_args.kwargs
+        system_msg = kwargs["messages"][0]
+        assert system_msg["role"] == "system"
+        # System content must have BOTH the persona prompt AND the KB
+        # marker + body concatenated.
+        content = system_msg["content"]
+        assert "clicky" in content.lower(), "persona prompt must be preserved"
+        assert "app knowledge base" in content, "KB marker must be present"
+        assert "edupack" in content, (
+            "Display name (kb_app_name with .exe stripped) must appear"
+        )
+        # Ensure the .exe suffix didn't leak into the prose marker line.
+        marker_line = next(
+            (line for line in content.splitlines()
+             if "you are helping the user with" in line),
+            "",
+        )
+        assert ".exe" not in marker_line, (
+            "The .exe suffix should be stripped from the prose marker"
+        )
+        assert "# Granta EduPack KB" in content, "raw KB markdown body required"
+        assert "Chart > Add" in content
+
+    def test_ask_stream_without_kb_content_uses_plain_system_prompt(self, mocker):
+        """Empty kb_content (default) → system message is just the
+        persona prompt. No marker, no KB content."""
+        from PIL import Image
+        client, mock_instance, _ = self._make_client(mocker)
+
+        fake_stream = mocker.MagicMock(name="openai_stream")
+        mock_instance.chat.completions.create.return_value = fake_stream
+
+        img = Image.new("RGB", (100, 60), color="white")
+        client.ask_stream(
+            images=[(img, "label")], transcript="hello", history=[],
+        )
+
+        kwargs = mock_instance.chat.completions.create.call_args.kwargs
+        system_msg = kwargs["messages"][0]
+        assert "app knowledge base" not in system_msg["content"], (
+            "No KB marker should appear when kb_content is empty"
+        )
+
     def test_streaming_yields_deltas_and_parses_point_tag(self, mocker):
         from ai import _GeminiStreamingResponse, PointParseResult
 
