@@ -31,6 +31,9 @@ venv/
 .venv/
 env/
 
+# Inno Setup compiled installer output (per-build artifact, not committed)
+installer/Output/
+
 # Debug / scratch files
 debug_*.jpg
 debug_*.png
