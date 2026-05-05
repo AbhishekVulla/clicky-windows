@@ -761,6 +761,79 @@ class ClickyApp(QObject):
 _T0 = __import__("time").time()
 
 
+# --- Sprint 3.8: single-instance mutex --------------------------------------
+#
+# Without this, double-clicking the installed shortcut spawns multiple
+# Clicky.exe processes. Each installs its own pynput.Listener (suppress=False
+# is observe-only — multiple listeners coexist), so one Ctrl+Alt+Space press
+# fires N parallel STT->Claude->TTS pipelines. User hears N overlapping
+# voices answering one question.
+#
+# Pattern: Win32 named mutex acquired before QApplication construction.
+# Whoever wins the kernel-level CreateMutexW race holds the mutex for their
+# process lifetime; second instance sees ERROR_ALREADY_EXISTS and exits.
+# Same pattern Spotify, Slack, Discord, Raycast all use.
+
+_MUTEX_NAME = "Local\\ClickyWindows-SingleInstance-v1"
+"""Per-logon-session namespace (Local\\) — admin and non-admin in the same
+session see the same mutex (correct), but different Windows users on the
+same machine each get their own Clicky (also correct). Global\\ would
+block second user on a shared RDP host — wrong for portfolio scope."""
+
+_ERROR_ALREADY_EXISTS = 183  # winerror.h ERROR_ALREADY_EXISTS
+
+
+def _acquire_single_instance_mutex(kernel32=None):
+    """Try to acquire the named mutex. Returns the HANDLE (truthy int) if
+    we are the first instance, ``None`` if another Clicky already owns it,
+    or the string ``"fail-open"`` on rare CreateMutexW genuine failure (in
+    which case caller should proceed with startup — better to risk a
+    duplicate than block the user with a broken installer).
+
+    The ``kernel32`` parameter is a DI hook for tests (pass a MagicMock).
+    Production passes ``None`` and the function looks up the real
+    ``ctypes.windll.kernel32`` itself, applying the explicit ``restype`` /
+    ``argtypes`` signatures that prevent x64 HANDLE truncation (without
+    them, ctypes defaults to ``c_int`` = 32-bit, which silently corrupts
+    64-bit handles on x64 Windows).
+
+    The returned handle MUST be retained for the process lifetime (a
+    module-global reference is sufficient). The Windows kernel auto-
+    releases the mutex when the process terminates — including on crash
+    or Task Manager kill — so no explicit cleanup is needed at shutdown.
+    """
+    if kernel32 is None:
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        kernel32.CreateMutexW.argtypes = [
+            ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR,
+        ]
+        kernel32.GetLastError.restype = wintypes.DWORD
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+    # bInitialOwner=False — for single-instance detection we need the
+    # kernel object's *existence* as a flag, not ownership/synchronization
+    # semantics. Setting True would make first instance pointlessly own a
+    # mutex it never releases.
+    handle = kernel32.CreateMutexW(None, False, _MUTEX_NAME)
+    # Note: ctypes maps c_void_p NULL to Python None (NOT integer 0). Test
+    # mocks use return_value=0 for convenience; both are falsy so `not handle`
+    # handles both representations safely.
+    if not handle:
+        # Genuine CreateMutexW failure (rare). Fail open — don't block startup.
+        return "fail-open"
+    # GetLastError MUST be the next Win32 call after CreateMutexW; any
+    # intervening kernel32 call could clobber the thread-local last-error.
+    # The `if not handle` branch above is pure Python — safe.
+    if kernel32.GetLastError() == _ERROR_ALREADY_EXISTS:
+        # Another Clicky owns the mutex. Close OUR handle to the same
+        # kernel object (the original mutex is still held by the first
+        # instance) so we don't leak.
+        kernel32.CloseHandle(handle)
+        return None
+    return handle
+
+
 # --- Path A Task 11: listening chime (lazy-built + async playback) ----------
 
 _CHIME_SAMPLE_RATE = 44100
@@ -811,6 +884,27 @@ if __name__ == "__main__":
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except (AttributeError, OSError):
         pass
+
+    # Single-instance check — MUST run before QApplication construction
+    # so a duplicate-launch exits fast without spinning up Qt / SDKs.
+    # The handle is assigned to a __main__-module binding to keep it
+    # alive for the process lifetime; Windows auto-releases on exit.
+    _mutex_handle = _acquire_single_instance_mutex()
+    if _mutex_handle is None:
+        # Another Clicky is already running. Show a Win32 messagebox
+        # (no Qt dependency) telling the user where to look, then exit
+        # cleanly. MB_ICONINFORMATION = 0x40.
+        ctypes.windll.user32.MessageBoxW(
+            None,
+            "Clicky Windows is already running.\n\n"
+            "Look for the blue cursor icon in your system tray "
+            "(bottom-right corner of your screen). Right-click it "
+            "for the Settings and Quit menu.",
+            "Clicky already running",
+            0x40,
+        )
+        sys.exit(0)
+    # _mutex_handle == "fail-open" or a real handle: proceed with startup.
 
     print("=" * 70)
     print("Clicky Windows — push-to-talk AI buddy")

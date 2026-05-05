@@ -683,3 +683,71 @@ class TestClickyApp:
         )
         # Worker must always push a result to the queue (never hang).
         assert not result_queue.empty(), "worker did not push result to queue"
+
+
+# --- Sprint 3.8: single-instance mutex ---------------------------------------
+
+class TestSingleInstanceMutex:
+    """Tests for app._acquire_single_instance_mutex.
+
+    Bug fixed: clicking the installed Clicky shortcut multiple times spawned
+    multiple Clicky processes. Each had its own pynput Listener, so one
+    Ctrl+Alt+Space press fired N independent STT->Claude->TTS pipelines and
+    the user heard N overlapping voice responses.
+
+    Fix: Win32 named mutex acquired before QApplication construction. First
+    process gets the mutex; second sees ERROR_ALREADY_EXISTS=183 and exits
+    with a MessageBox telling the user to look in the system tray.
+    """
+
+    def test_first_instance_returns_handle(self, mocker):
+        """First launch: CreateMutexW returns a handle, GetLastError is 0.
+        Function returns the handle for module-global retention (kernel
+        auto-releases on process exit)."""
+        mock_kernel32 = mocker.MagicMock(name="kernel32")
+        mock_kernel32.CreateMutexW.return_value = 12345  # fake HANDLE
+        mock_kernel32.GetLastError.return_value = 0
+        from app import _acquire_single_instance_mutex
+        result = _acquire_single_instance_mutex(kernel32=mock_kernel32)
+        assert result == 12345
+        # CloseHandle MUST NOT be called — we keep the mutex alive.
+        mock_kernel32.CloseHandle.assert_not_called()
+
+    def test_second_instance_returns_none_and_closes_handle(self, mocker):
+        """Second launch: CreateMutexW returns valid handle but GetLastError
+        is ERROR_ALREADY_EXISTS=183. Function closes its handle (so we don't
+        leak a kernel object) and returns None so caller can show messagebox
+        and exit cleanly."""
+        mock_kernel32 = mocker.MagicMock(name="kernel32")
+        mock_kernel32.CreateMutexW.return_value = 67890
+        mock_kernel32.GetLastError.return_value = 183
+        from app import _acquire_single_instance_mutex
+        result = _acquire_single_instance_mutex(kernel32=mock_kernel32)
+        assert result is None
+        mock_kernel32.CloseHandle.assert_called_once_with(67890)
+
+    def test_create_mutex_failure_returns_fail_open_for_none(self, mocker):
+        """If CreateMutexW genuinely fails it returns NULL — and ctypes maps
+        c_void_p NULL to Python None (NOT integer 0) when restype is HANDLE.
+        Fail open: don't block startup, accept the small risk of duplicates
+        over leaving the user with a broken installer."""
+        mock_kernel32 = mocker.MagicMock(name="kernel32")
+        mock_kernel32.CreateMutexW.return_value = None  # ctypes NULL → None
+        from app import _acquire_single_instance_mutex
+        result = _acquire_single_instance_mutex(kernel32=mock_kernel32)
+        assert result == "fail-open"
+        # GetLastError must NOT be checked when CreateMutexW failed —
+        # the handle is invalid, no point asking why.
+        mock_kernel32.GetLastError.assert_not_called()
+
+    def test_create_mutex_failure_returns_fail_open_for_zero(self, mocker):
+        """Defensive: even if a future ctypes change or a different DI mock
+        passes integer 0 instead of None for NULL, the `not handle` check
+        must still trip the fail-open branch. Belt-and-suspenders against
+        contributor confusion about which falsy NULL representation to use."""
+        mock_kernel32 = mocker.MagicMock(name="kernel32")
+        mock_kernel32.CreateMutexW.return_value = 0
+        from app import _acquire_single_instance_mutex
+        result = _acquire_single_instance_mutex(kernel32=mock_kernel32)
+        assert result == "fail-open"
+        mock_kernel32.GetLastError.assert_not_called()
