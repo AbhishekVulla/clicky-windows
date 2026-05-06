@@ -192,3 +192,61 @@ class TestSettingsDialogRender:
         llm_dropdown = dlg._dropdowns["LLM"]
         assert llm_dropdown.count() == 1
         assert llm_dropdown.itemText(0) == "Anthropic"
+
+
+class TestSettingsDialogDropdownSwap:
+    """Switching the TTS dropdown from Cartesia → ElevenLabs must:
+    (a) update the key field's placeholder to mention ELEVENLABS_API_KEY
+    (b) load the existing ElevenLabs key from keyring (if any)
+    (c) NOT carry the previously-displayed Cartesia key into the field
+    """
+
+    def test_switching_provider_loads_new_providers_existing_key(
+        self, qapp, mocker, monkeypatch
+    ):
+        # Pre-populate keyring with both Cartesia and ElevenLabs keys.
+        store = {
+            ("clicky-windows", "CARTESIA_API_KEY"): "sk_car_existing",
+            ("clicky-windows", "ELEVENLABS_API_KEY"): "eleven_existing",
+        }
+        monkeypatch.setattr(
+            "settings_dialog.keyring.get_password",
+            lambda service, name: store.get((service, name)),
+        )
+
+        from settings_dialog import SettingsDialog
+        dlg = SettingsDialog()
+
+        # Initially TTS dropdown selects Cartesia → key field shows that key.
+        tts_input = dlg._key_inputs["TTS"]
+        assert tts_input.text() == "sk_car_existing"
+
+        # Switch dropdown to ElevenLabs (index 1).
+        dlg._dropdowns["TTS"].setCurrentIndex(1)
+
+        # Key field now shows the ElevenLabs key.
+        assert tts_input.text() == "eleven_existing"
+
+    def test_switching_provider_with_no_existing_key_clears_field(
+        self, qapp, mocker, monkeypatch
+    ):
+        store = {
+            ("clicky-windows", "CARTESIA_API_KEY"): "sk_car_existing",
+            # No ElevenLabs key stored.
+        }
+        monkeypatch.setattr(
+            "settings_dialog.keyring.get_password",
+            lambda service, name: store.get((service, name)),
+        )
+
+        from settings_dialog import SettingsDialog
+        dlg = SettingsDialog()
+        tts_input = dlg._key_inputs["TTS"]
+        assert tts_input.text() == "sk_car_existing"
+
+        dlg._dropdowns["TTS"].setCurrentIndex(1)
+
+        # No previous ElevenLabs key — field cleared.
+        assert tts_input.text() == ""
+        # Placeholder mentions the new env-var name.
+        assert "ELEVENLABS_API_KEY" in tts_input.placeholderText()

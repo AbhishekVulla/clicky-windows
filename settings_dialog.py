@@ -293,7 +293,16 @@ class SettingsDialog(QDialog):
             key_input.setEchoMode(mode)
 
     def _update_save_enabled(self) -> None:
-        """Save enabled when every category's key field has non-empty content."""
+        """Save enabled when every category's key field has non-empty content.
+
+        Defensively no-op if self._buttons isn't constructed yet — the
+        textChanged signal can fire during initial _build_category_row
+        (when the keyring already has a key, setText(existing) fires
+        before the QDialogButtonBox is added to the dialog at the end of
+        _build_ui).
+        """
+        if not hasattr(self, "_buttons"):
+            return
         all_filled = all(
             key_input.text().strip()
             for key_input in self._key_inputs.values()
