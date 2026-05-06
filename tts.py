@@ -40,6 +40,9 @@ from config import (
     CARTESIA_MODEL_ID,
     CARTESIA_OUTPUT_SAMPLE_RATE,
     CARTESIA_VOICE_ID,
+    ELEVENLABS_MODEL_ID,
+    ELEVENLABS_OUTPUT_SAMPLE_RATE,
+    ELEVENLABS_VOICE_ID,
 )
 
 
@@ -430,6 +433,268 @@ class CartesiaSonicTTS(TTS):
         Returns (play_fn, stream) so the caller can close the stream in a
         finally block. Tests inject player_factory returning (MagicMock, None).
         """
+        if self._player_factory is not None:
+            return self._player_factory(sample_rate=self.sample_rate)
+        import sounddevice as sd
+
+        stream = sd.OutputStream(
+            samplerate=self.sample_rate,
+            channels=1,
+            dtype="float32",
+        )
+        stream.start()
+
+        def _play(samples: np.ndarray) -> None:
+            stream.write(samples)
+
+        return _play, stream
+
+
+# --- ElevenLabsTTS (Sprint 4 — opt-in alternative to Cartesia) ---------------
+
+
+class ElevenLabsTTS(TTS):
+    """ElevenLabs Flash v2.5 streaming TTS as an opt-in alternative to
+    Cartesia. Mirrors CartesiaSonicTTS Option B prefetch+playback
+    architecture with three deliberate divergences:
+
+    1. ``_generate_response`` calls ``client.text_to_speech.stream(...)``
+       which returns an ``Iterator[bytes]`` DIRECTLY (true streaming, no
+       body pre-fetch). Cartesia's ``generate(...)`` blocks for the full
+       body before returning a response with ``.iter_bytes()``.
+    2. ``_play_response`` converts each int16 PCM chunk to float32 inline:
+       ``samples = np.frombuffer(chunk, np.int16).astype(np.float32) / 32768.0``.
+       Cartesia emits float32 directly so no conversion needed.
+    3. ``stop()`` is 5-pronged (not 6): no ``response.close()`` — the
+       elevenlabs SDK doesn't expose one. Cancellation = break the for
+       loop via cancel event. Python GC closes the underlying httpx
+       connection. Functionally equivalent kill latency to Cartesia's
+       6-pronged stop because the cancel event check fires once per chunk
+       and chunks arrive at <50ms intervals.
+
+    Default sample rate is 22050 (NOT 44.1k) because ElevenLabs free tier
+    doesn't include 44.1kHz PCM (Pro tier feature). Each TTS subclass owns
+    its own sample_rate — sounddevice OutputStream is constructed
+    per-instance via ``_build_player``.
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        voice_id: str = ELEVENLABS_VOICE_ID,
+        model_id: str = ELEVENLABS_MODEL_ID,
+        sample_rate: int = ELEVENLABS_OUTPUT_SAMPLE_RATE,
+        client_factory: Callable | None = None,
+        player_factory: Callable | None = None,
+    ) -> None:
+        self.api_key = api_key
+        self.voice_id = voice_id
+        self.model_id = model_id
+        self.sample_rate = sample_rate
+        self._client_factory = client_factory
+        self._player_factory = player_factory
+
+        self._cancel_event = threading.Event()
+        self._current_thread: threading.Thread | None = None
+        self._active_audio_stream = None  # sounddevice stream, aborted by stop()
+
+        # Option B: prefetch+playback two-thread architecture, mirrors
+        # CartesiaSonicTTS verbatim except no _active_response (elevenlabs
+        # has no response.close()).
+        self._sentence_queue: queue.Queue = queue.Queue()
+        self._prefetch_queue: queue.Queue = queue.Queue(maxsize=1)
+        self._epoch: int = 0
+        self._prefetch_thread = threading.Thread(
+            target=self._prefetch_worker,
+            name="ElevenLabsTTS-prefetch",
+            daemon=True,
+        )
+        self._playback_thread = threading.Thread(
+            target=self._playback_worker,
+            name="ElevenLabsTTS-playback",
+            daemon=True,
+        )
+        self._prefetch_thread.start()
+        self._playback_thread.start()
+
+    def speak(self, text: str) -> None:
+        """One-shot speak path. Cancels any in-progress playback."""
+        if not text or not text.strip():
+            return
+        self._cancel_event.set()
+        old = self._current_thread
+        if old and old.is_alive():
+            old.join(timeout=0.5)
+        self._cancel_event = threading.Event()
+        cancel = self._cancel_event
+        self._current_thread = threading.Thread(
+            target=self._do_speak,
+            args=(text, cancel),
+            name=f"ElevenLabsTTS-speak-{id(text)}",
+            daemon=True,
+        )
+        self._current_thread.start()
+
+    def speak_sentence(self, sentence: str) -> None:
+        if not sentence or not sentence.strip():
+            return
+        self._sentence_queue.put(sentence)
+
+    def _prefetch_worker(self) -> None:
+        while True:
+            sentence = self._sentence_queue.get()
+            if sentence is _SHUTDOWN_SENTINEL:
+                break
+            my_epoch = self._epoch
+            try:
+                response = self._generate_response(sentence)
+            except Exception as exc:
+                print(f"[tts] elevenlabs prefetch error for {sentence!r}: {exc}", flush=True)
+                response = None
+            try:
+                self._prefetch_queue.put((my_epoch, sentence, response))
+            finally:
+                self._sentence_queue.task_done()
+
+    def _playback_worker(self) -> None:
+        while True:
+            item = self._prefetch_queue.get()
+            if item is _SHUTDOWN_SENTINEL:
+                break
+            my_epoch, sentence, response = item
+            if my_epoch != self._epoch or response is None:
+                # Stale or failed — skip without playing. No response.close()
+                # to call (elevenlabs SDK iterator has no explicit close).
+                continue
+            try:
+                cancel = threading.Event()
+                self._cancel_event = cancel
+                self._play_response(sentence, response, cancel)
+            except Exception as exc:
+                print(f"[tts] elevenlabs playback error for {sentence!r}: {exc}", flush=True)
+
+    def stop(self) -> None:
+        """5-pronged kill (no response.close vs Cartesia's 6-pronged):
+        1. Bump _epoch — any in-flight prefetch becomes stale at playback time
+        2. Drain _sentence_queue — pending sentences never start
+        3. Drain _prefetch_queue — prefetched iterators dropped
+        4. Set cancel event — currently-playing sentence's loop exits
+        5. Abort sounddevice stream — stops audio output mid-sample
+        """
+        self._epoch += 1
+
+        while not self._sentence_queue.empty():
+            try:
+                self._sentence_queue.get_nowait()
+                self._sentence_queue.task_done()
+            except queue.Empty:
+                break
+
+        while not self._prefetch_queue.empty():
+            try:
+                self._prefetch_queue.get_nowait()
+                # No response.close — elevenlabs iterator has no explicit close.
+                # Python GC will close the underlying httpx connection.
+            except queue.Empty:
+                break
+
+        self._cancel_event.set()
+        stream = self._active_audio_stream
+        if stream is not None:
+            try:
+                stream.abort()
+            except Exception:
+                pass
+
+    def _generate_response(self, text: str):
+        """Call ElevenLabs streaming endpoint. Returns Iterator[bytes]
+        directly — TRUE streaming, no body pre-fetch.
+        """
+        client = self._build_client()
+        return client.text_to_speech.stream(
+            text=text,
+            voice_id=self.voice_id,
+            model_id=self.model_id,
+            output_format=f"pcm_{self.sample_rate}",
+        )
+
+    def _play_response(self, text: str, response, cancel: threading.Event) -> None:
+        """Iterate the int16 PCM chunk stream, convert to float32 inline,
+        play via sounddevice. Sets _active_audio_stream so stop() can abort.
+        """
+        if cancel.is_set():
+            return
+
+        import time as _t
+        _tts_start = _t.time()
+        print(f"[tts] elevenlabs _play_response START: {len(text)} chars", flush=True)
+        audio_stream = None
+        try:
+            play, audio_stream = self._build_player()
+            self._active_audio_stream = audio_stream
+            for chunk in response:
+                if cancel.is_set():
+                    return
+                if not chunk:
+                    continue
+                # int16 → float32 in [-1, 1]
+                samples = (
+                    np.frombuffer(chunk, dtype=np.int16).astype(np.float32)
+                    / 32768.0
+                )
+                if samples.size == 0:
+                    continue
+                play(samples)
+        except Exception as exc:
+            if cancel.is_set():
+                return
+            raise RuntimeError(
+                "ElevenLabs TTS playback failed. Diagnostic checklist:\n"
+                "  1. Is ELEVENLABS_API_KEY set + valid?\n"
+                "  2. Is your free-tier quota exhausted? (10k chars/month)\n"
+                "  3. Is your internet connection up?\n"
+                "  4. Is ElevenLabs up? (https://status.elevenlabs.io)\n"
+                f"Underlying error: {type(exc).__name__}: {exc}"
+            ) from exc
+        finally:
+            self._active_audio_stream = None
+            duration_ms = (_t.time() - _tts_start) * 1000
+            cancelled = cancel.is_set()
+            print(f"[tts] elevenlabs _play_response END: {duration_ms:.0f}ms, cancelled={cancelled}", flush=True)
+            if audio_stream is not None:
+                try:
+                    audio_stream.abort()
+                    audio_stream.close()
+                except Exception:
+                    pass
+
+    def _do_speak(self, text: str, cancel: threading.Event) -> None:
+        """One-shot speak path: get the iterator + play. Used by speak().
+        speak_sentence uses the prefetch+playback workers instead.
+        """
+        if cancel.is_set():
+            return
+        try:
+            response = self._generate_response(text)
+        except Exception as exc:
+            if cancel.is_set():
+                return
+            raise RuntimeError(
+                "ElevenLabs TTS request failed. Diagnostic checklist:\n"
+                "  1. Is ELEVENLABS_API_KEY set in keyring or .env?\n"
+                "  2. Is your free-tier quota exhausted?\n"
+                "  3. Is your internet connection up?\n"
+                f"Underlying error: {type(exc).__name__}: {exc}"
+            ) from exc
+        self._play_response(text, response, cancel)
+
+    def _build_client(self):
+        if self._client_factory is not None:
+            return self._client_factory(api_key=self.api_key)
+        from elevenlabs import ElevenLabs
+        return ElevenLabs(api_key=self.api_key)
+
+    def _build_player(self):
         if self._player_factory is not None:
             return self._player_factory(sample_rate=self.sample_rate)
         import sounddevice as sd

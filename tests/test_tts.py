@@ -418,3 +418,228 @@ class TestCartesiaSonicTTSSpeak:
             f"Playback deadlocked: expected 2 good sentences to play around "
             f"the failing one, got {final}"
         )
+
+
+# --- ElevenLabs TTS (Sprint 4) -------------------------------------------------
+
+
+class TestElevenLabsTTSSpeak:
+    """Mirrors TestCartesiaSonicTTSSpeak — same speak/stop/cancel
+    semantics. Differences: stream() returns Iterator[bytes] directly
+    (no .iter_bytes()); chunks are int16 PCM, converted to float32 in
+    the playback loop."""
+
+    def _make_tts(self, chunks=None):
+        from unittest.mock import MagicMock
+        from tts import ElevenLabsTTS
+
+        fake_client = MagicMock(name="fake_elevenlabs_client")
+        # ElevenLabs streaming method: client.text_to_speech.stream(...)
+        # returns an Iterator[bytes] directly (true streaming, no body fetch)
+        fake_client.text_to_speech.stream.return_value = iter(
+            chunks if chunks is not None
+            else [b"\x00\x00" * 8, b"\x00\x00" * 8]  # int16 zeros
+        )
+        fake_play = MagicMock(name="fake_play")
+
+        def client_factory(*, api_key):
+            return fake_client
+
+        def player_factory(*, sample_rate):
+            return fake_play, None
+
+        tts_obj = ElevenLabsTTS(
+            api_key="test-key",
+            client_factory=client_factory,
+            player_factory=player_factory,
+        )
+        return tts_obj, fake_client, fake_play
+
+    def test_speak_dispatches_to_background_thread_non_blocking(self):
+        tts_obj, fake_client, fake_play = self._make_tts()
+
+        t0 = time.perf_counter()
+        tts_obj.speak("hello")
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        assert elapsed_ms < 50
+
+        if tts_obj._current_thread:
+            tts_obj._current_thread.join(timeout=5)
+
+        fake_client.text_to_speech.stream.assert_called_once()
+        call_kwargs = fake_client.text_to_speech.stream.call_args.kwargs
+        assert call_kwargs["text"] == "hello"
+        assert call_kwargs["model_id"] == "eleven_flash_v2_5"
+        assert call_kwargs["voice_id"] == "21m00Tcm4TlvDq8ikWAM"
+        assert call_kwargs["output_format"] == "pcm_22050"
+        assert fake_play.call_count >= 1
+
+    def test_speak_empty_string_skips_thread(self):
+        from unittest.mock import MagicMock
+        from tts import ElevenLabsTTS
+
+        client_factory = MagicMock(name="client_factory")
+        player_factory = MagicMock(name="player_factory")
+        tts_obj = ElevenLabsTTS(
+            api_key="test-key",
+            client_factory=client_factory,
+            player_factory=player_factory,
+        )
+
+        tts_obj.speak("")
+        tts_obj.speak("   \t\n")
+
+        assert tts_obj._current_thread is None
+        client_factory.assert_not_called()
+        player_factory.assert_not_called()
+
+    def test_play_response_converts_int16_to_float32(self):
+        """ElevenLabs PCM chunks are int16 little-endian. The playback
+        loop must convert each chunk to float32 in [-1, 1] range before
+        passing to sounddevice (which expects float32 per OutputStream
+        config). This is the load-bearing divergence from Cartesia which
+        emits float32 directly."""
+        import struct
+        import threading
+        from unittest.mock import MagicMock
+        from tts import ElevenLabsTTS
+        import numpy as np
+
+        # Build a chunk of 4 int16 samples at +0.5 amplitude.
+        max_int16 = 32767
+        amplitude = int(0.5 * max_int16)
+        chunk_bytes = struct.pack("<hhhh", amplitude, -amplitude, amplitude, 0)
+
+        fake_client = MagicMock()
+        fake_client.text_to_speech.stream.return_value = iter([chunk_bytes])
+        captured_samples = []
+
+        def fake_play(samples):
+            captured_samples.append(samples.copy())
+
+        tts_obj = ElevenLabsTTS(
+            api_key="test-key",
+            client_factory=lambda *, api_key: fake_client,
+            player_factory=lambda *, sample_rate: (fake_play, None),
+        )
+
+        cancel = threading.Event()
+        response = tts_obj._generate_response("hi")
+        tts_obj._play_response("hi", response, cancel)
+
+        assert len(captured_samples) == 1
+        arr = captured_samples[0]
+        assert arr.dtype == np.float32
+        # 0.5 amplitude after divide by 32768 ≈ 0.4999... — assert close
+        assert abs(float(arr[0]) - 0.5) < 0.001
+        assert abs(float(arr[1]) + 0.5) < 0.001
+        assert abs(float(arr[3])) < 0.001
+
+
+class TestElevenLabsTTSSentenceQueue:
+    """Mirrors TestCartesiaSonicTTSSpeak::test_speak_sentence_queues_and_plays_sequentially.
+    Multiple speak_sentence calls play sequentially via the prefetch+playback
+    two-thread architecture (Option B), NOT cancelling each other."""
+
+    def test_speak_sentence_queues_and_plays_sequentially(self):
+        import time as _t
+        from unittest.mock import MagicMock
+        from tts import ElevenLabsTTS
+
+        played_count = [0]
+
+        def fake_play(samples):
+            played_count[0] += 1
+
+        def client_factory(*, api_key):
+            client = MagicMock(name="multi-sentence-elevenlabs-client")
+
+            def gen_iterator(**kwargs):
+                # Each stream() call must return a fresh iterator
+                return iter([b"\x00\x00" * 8])
+
+            client.text_to_speech.stream.side_effect = gen_iterator
+            return client
+
+        def player_factory(*, sample_rate):
+            return fake_play, None
+
+        tts_obj = ElevenLabsTTS(
+            api_key="test-key",
+            client_factory=client_factory,
+            player_factory=player_factory,
+        )
+
+        tts_obj.speak_sentence("first sentence.")
+        tts_obj.speak_sentence("second sentence.")
+        tts_obj.speak_sentence("third sentence.")
+
+        for _ in range(100):
+            if played_count[0] >= 3:
+                break
+            _t.sleep(0.02)
+
+        assert played_count[0] >= 3, (
+            f"Expected >=3 sentences played, got {played_count[0]} — "
+            "queue worker may not be consuming sequentially"
+        )
+
+
+class TestElevenLabsTTSStop:
+    """5-pronged kill (NOT 6 — no response.close, since elevenlabs SDK
+    doesn't expose one). Order: epoch++ → drain sentence queue → drain
+    prefetch queue → cancel event → sounddevice abort."""
+
+    def test_stop_drains_pending_sentences(self):
+        import time as _t
+        from unittest.mock import MagicMock
+        from tts import ElevenLabsTTS
+
+        def client_factory(*, api_key):
+            client = MagicMock()
+
+            def slow_iter(**kwargs):
+                def _gen():
+                    for _ in range(10):
+                        _t.sleep(0.05)
+                        yield b"\x00\x00" * 8
+
+                return _gen()
+
+            client.text_to_speech.stream.side_effect = slow_iter
+            return client
+
+        def player_factory(*, sample_rate):
+            return MagicMock(), None
+
+        tts_obj = ElevenLabsTTS(
+            api_key="test-key",
+            client_factory=client_factory,
+            player_factory=player_factory,
+        )
+
+        tts_obj.speak_sentence("pending-1.")
+        tts_obj.speak_sentence("pending-2.")
+        tts_obj.speak_sentence("pending-3.")
+
+        _t.sleep(0.02)
+
+        tts_obj.stop()
+        assert tts_obj._sentence_queue.empty(), (
+            "stop() must drain queued sentences"
+        )
+
+    def test_stop_sets_cancel_event_and_bumps_epoch(self):
+        from unittest.mock import MagicMock
+        from tts import ElevenLabsTTS
+
+        tts_obj = ElevenLabsTTS(
+            api_key="test-key",
+            client_factory=lambda *, api_key: MagicMock(),
+            player_factory=lambda *, sample_rate: (MagicMock(), None),
+        )
+        old_epoch = tts_obj._epoch
+        old_cancel = tts_obj._cancel_event
+        tts_obj.stop()
+        assert tts_obj._epoch == old_epoch + 1
+        assert old_cancel.is_set()
