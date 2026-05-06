@@ -10,6 +10,150 @@ For **how** → [CLAUDE.md](CLAUDE.md)
 
 ---
 
+## 2026-05-06: Sprint 4 — Multi-provider settings UX + privacy framing + ElevenLabs TTS (planning ADR; not yet shipped)
+
+**Context:** USER pushback after Sprint 3.8 verification revealed three coupled UX problems that the original Sprint 4 plan ("drop a 4th OPTIONAL `ELEVENLABS_API_KEY` field next to the existing 3 required fields") would have compounded:
+
+1. HTML rendering bug in current settings dialog — `<a href="...">...</a>` displayed as literal escaped text in QLabel rows because `setTextFormat(RichText)` was never called. Visible in USER's post-Sprint-3.8 screenshot.
+2. 6 input fields = onboarding-abandonment cliff. The dialog already had 3 required keys; adding ElevenLabs as a flat 4th + future Deepgram = 6 password boxes on first-launch dialog. >3 fields hits documented onboarding abandonment.
+3. Privacy framing too quiet — single buried sentence about Windows Credential Manager wasn't sufficient reassurance for users pasting API keys into an unsigned `.exe`. But a wall of reassurance starts to sound suspicious.
+
+**Decision:** Restructure the settings dialog around a **3-category dropdown UX with progressive disclosure** matching the pattern shipped by tekram/clicky-windows + Cursor + OpenInterpreter. Each category (LLM / STT / TTS) gets a single dropdown row + key field for the SELECTED provider only. Dropdown change handler swaps the keyring slot the key field reads/writes. ElevenLabs ships as the second TTS provider in the same sprint to demonstrate the dropdown architecture works with ≥2 options.
+
+Concrete decisions locked 2026-05-06 via USER answers:
+
+1. **ONE provider per category at any time** — no saved fallbacks. Switching provider = re-enter dialog, change dropdown, re-paste new key. Power-user multi-key UX deferred indefinitely (not a v0 portfolio concern).
+2. **LLM dropdown shows Anthropic only** — GeminiClient infrastructure stays in `ai.py` (Phase 1.5 Step 1) but doesn't appear in the dropdown. Verified A/B data from 2026-04-19 shows Gemini 2.5 Flash 230px miss + 340ms slower than Claude on identical workload; Gemini 3 Flash returns coords in [0,1000] normalized space (not pixel space). Re-benchmark when Gemini 4 ships or when normalized-coord issue closes.
+3. **Lean privacy line** — ONE sentence in the dialog ("🔒 Stored locally, encrypted via Windows Credential Manager. No server, no telemetry."). NO separate first-launch privacy splash. Source-code link deferred to Sprint 6 post-public-flip (link 404s while repo private).
+4. **Tray menu stays at 4 items** — NO TTS Provider submenu. Two choice points (tray submenu + Settings dropdown) = confusion. Settings dialog is the single source of truth for provider selection.
+5. **Sprint 4 ships dropdown UX + ElevenLabs together** (not staged across two sprints) — half the value of a dropdown is showing it works with multiple options.
+6. **Deepgram STT parked for post-launch** — keeps Sprint 4 scope tight, validates dropdown architecture with one second-option (ElevenLabs in TTS) before adding more.
+
+**ElevenLabs SDK choices (verified 2026-05-06 research pass via official docs + GitHub SDK README + DeepWiki):**
+
+- Streaming method: `client.text_to_speech.stream(text=..., voice_id=..., model_id=..., output_format=...)` returns `Iterator[bytes]` directly (TRUE streaming — chunks arrive incrementally; no body pre-fetch like Cartesia)
+- Low-latency model: `eleven_flash_v2_5` (~75ms model TTFB, ElevenLabs official recommendation over Turbo)
+- Default voice: Rachel `21m00Tcm4TlvDq8ikWAM` (American female, conversational — matches Cartesia "Brooke" warmth)
+- Output format: `pcm_22050` (int16 PCM, broadly free-tier-available; 44.1kHz requires Pro tier — NOT float32 like Cartesia, so playback path converts inline via `np.frombuffer(chunk, np.int16).astype(np.float32) / 32768.0`)
+- No `response.close()` exposed — cancellation = break the for-loop (cancel event already drives this in our existing pattern)
+- Env var: `ELEVENLABS_API_KEY` (matches our keyring slot convention)
+
+**Architecture mirror:** `ElevenLabsTTS(TTS)` mirrors `CartesiaSonicTTS` Option B prefetch+playback two-thread architecture verbatim with three deliberate divergences:
+- `_generate_response` calls `client.text_to_speech.stream(...)` returning iterator directly
+- `_play_response` converts each int16 chunk to float32 inline
+- `stop()` is 5-pronged (epoch++, drain sentence queue, drain prefetch queue, set cancel event, abort sounddevice) — NOT 6-pronged because no `response.close()` exists. Cancel event check at each chunk + Python GC of httpx connection on iterator drop is functionally equivalent kill latency.
+
+Sample rate becomes per-provider (Cartesia 44100, ElevenLabs 22050) — each TTS subclass owns its own `sample_rate` attribute, each constructs its own `sounddevice.OutputStream` via existing `_build_player` lazy hook. No global state change.
+
+**Provider-selection persistence:** `LLM_PROVIDER` / `STT_PROVIDER` / `TTS_PROVIDER` constants resolved via new `config.resolve_setting(name, default)` helper (sibling to `resolve_api_key`, env→keyring with one-shot migration; returns string with default fallback rather than None). Required per Sprint 3.6 dotenv-trap lesson — env-only would silently fall back to defaults in bundled EXE.
+
+**Tray menu:** stays at 4 items (Settings... / Open Knowledge Folder / Open Memory Folder / Quit Clicky). NO TTS Provider submenu added. Single choice point in Settings dialog only.
+
+**Alternatives considered:**
+
+1. *Drop ElevenLabs key as 4th flat field next to existing 3* — original Sprint 4 plan. Rejected because it compounds the >3-fields onboarding cliff + doesn't fix the underlying scaling problem (Deepgram + future providers would just keep adding flat fields).
+2. *Add tray submenu for TTS provider AS WELL AS Settings dropdown* — original Sprint 4 plan included this. Rejected — two choice points = user confusion ("did I save the right one?"). Single source of truth.
+3. *First-launch privacy splash screen* — considered as belt-and-suspenders for trust. Rejected per USER lean preference: a wall of reassurance starts to sound suspicious. One sentence in dialog is enough; users can verify via source code post-public-flip.
+4. *Source-code link in privacy line right now* — would 404 because repo is still private until Sprint 6 public flip. Self-defeating. Defer to Sprint 6 README + dialog update batch.
+5. *Multi-key save (both Cartesia AND ElevenLabs persisted simultaneously)* — power-user feature. Rejected for v0 portfolio scope per USER decision (simpler UX wins for the target audience).
+6. *Brainstorming skill + writing-plans skill ceremony* — Brainstorming skipped (we already discussed inline + USER answered the locked-decisions clarifying questions). Writing-plans WAS used to produce the executable plan at `docs/superpowers/plans/2026-05-06-sprint-4-multi-provider.md` per the ceremony rule (multi-file architecture + threading silent-failure mode + integration mirroring).
+
+**Consequences (planned, will be verified post-Sprint-4-ship):**
+
+- 12 TDD tasks → ~31 net new tests (223 → ~254 expected)
+- 4 source files modified (settings_dialog, config, tts, app), 2 build files (requirements.txt, clicky.spec). NO new files (factory + helper live in existing modules).
+- Bundle size grows ~5-10MB from elevenlabs SDK
+- Manual gate adds dropdown UX test + audible-voice-swap test to existing PTT acceptance flow
+- Sprint 4.7 doc-sync (this commit + post-Sprint-4 follow-up) consolidates all ADRs
+
+**Execution mode:** Option 2 — inline `superpowers:executing-plans` with USER checkpoints at end of Task 5 (backend done), end of Task 9 (UI done), before Task 12 (ship gate). Per USER selection 2026-05-06.
+
+**References:**
+
+- Plan doc: `docs/superpowers/plans/2026-05-06-sprint-4-multi-provider.md`
+- Strategic narrative: `C:\Users\Abhis\.claude\plans\streamed-tumbling-sunbeam.md` Sprint 4 (REVISED 2026-05-06) section
+- ElevenLabs SDK: https://elevenlabs.io/docs/api-reference/streaming, https://github.com/elevenlabs/elevenlabs-python
+- Voice catalog: https://elevenlabs.io/app/voice-library
+- Free-tier signup: https://elevenlabs.io/app/sign-up (10k chars/month, no credit card)
+- Lesson memory: `feedback_ceremony_vs_lean.md` (full ceremony was right call for Sprint 4)
+- Architecture pattern reference: `tts.CartesiaSonicTTS` Option B prefetch+playback (commit `4291401`)
+
+---
+
+## 2026-05-05: Sprint 3.8 — Single-instance mutex prevents multiple Clicky processes spawning on shortcut multi-click
+
+**Context:** USER reported via screenshot that double-clicking the installed Start Menu shortcut spawned multiple `Clicky.exe` processes — visible as 3 stacked blue cursor icons in the Windows system tray overflow popup. Worse symptom: all instances reacted to the same `Ctrl+Alt+Space` press in unison, so one PTT triggered N parallel STT→Claude→TTS pipelines and the user heard N overlapping Cartesia voices answering one question.
+
+Diagnosis (line-by-line read of `app.py:809-923` main block): zero process-uniqueness check. Each shortcut click unconditionally constructs its own `QApplication`, `ClickyApp`, `AssemblyAIStreamingSTT` (with its own WebSocket), `pynput.keyboard.Listener(suppress=False)` (which is observe-only — multiple listeners coexist as independent Win32 `WH_KEYBOARD_LL` hooks; Windows broadcasts every keypress to every installed hook), and `QSystemTrayIcon`. N callbacks fire per keypress → N parallel `_pipeline_worker` threads spawn → N independent Claude API calls + N TTS playbacks.
+
+Alternatives ruled out via diagnosis:
+- Single Clicky misbehaving (re-entrancy): rejected — `_handle_release` explicitly cancels prior worker via `_cancel_event` + `tts.stop()` before spawning new. Within a single process, re-press kills in-flight pipeline. Multiple voices ⇒ multiple processes.
+- Tray icon ghosts (process died but icon lingered): rejected — ghosts are inert, can't react to hotkeys. User's "all of them react" rules this out.
+- Multiple `Clicky.exe` binaries from botched install: rejected — all shortcuts point to the one binary at `%LOCALAPPDATA%\Programs\Clicky Windows\Clicky.exe`.
+- PyInstaller bootloader leaking child processes: rejected — `--onedir` mode launches Python in-process, no subprocess fan-out.
+
+**Decision:** Win32 named-mutex single-instance guard acquired BEFORE `QApplication` construction. First instance gets the mutex; second sees `ERROR_ALREADY_EXISTS` (183), shows a Win32 `MessageBoxW` directing the user to the existing tray icon, and exits with `sys.exit(0)`. Same canonical pattern Spotify, Slack, Discord, Raycast all use.
+
+Implementation at `app.py:761-833` (helper) + `app.py:885-901` (main-block wiring):
+
+```python
+_MUTEX_NAME = "Local\\ClickyWindows-SingleInstance-v1"
+_ERROR_ALREADY_EXISTS = 183
+
+def _acquire_single_instance_mutex(kernel32=None):
+    if kernel32 is None:
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        kernel32.CreateMutexW.argtypes = [
+            ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR,
+        ]
+        kernel32.GetLastError.restype = wintypes.DWORD
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel32.CreateMutexW(None, False, _MUTEX_NAME)
+    if not handle:
+        return "fail-open"  # rare CreateMutexW failure — don't block startup
+    if kernel32.GetLastError() == _ERROR_ALREADY_EXISTS:
+        kernel32.CloseHandle(handle)
+        return None
+    return handle
+```
+
+Critical implementation details (caught by pre-commit Boris #5 review via `superpowers:code-reviewer`):
+
+- Explicit ctypes `restype` / `argtypes` — without these, ctypes defaults to `c_int` (32-bit) which silently truncates the 64-bit HANDLE on x64 Windows.
+- `bInitialOwner=False` — single-instance detection wants the kernel object's *existence* as a flag, not ownership/synchronization semantics. Setting True would make first instance pointlessly own a mutex it never releases.
+- `Local\` namespace prefix scopes per-logon-session — admin and non-admin in same session see the same mutex (correct), but different Windows users on the same machine each get their own Clicky (also correct). `Global\` would block second user on shared RDP host (wrong for portfolio scope).
+- `"fail-open"` string return for rare `CreateMutexW` genuine failure — better to risk a duplicate than block the user with a broken installer.
+- Kernel auto-releases mutex on `ExitProcess` regardless of how the process terminates (clean exit, crash, Task Manager kill) — no explicit cleanup needed at shutdown.
+- Test mock fidelity: the pre-commit review caught that real ctypes c_void_p NULL maps to Python `None` (NOT integer `0`). Test was updated to model `None` as the primary case + a defensive 4th test covers `0` for belt-and-suspenders.
+
+**Alternatives considered:**
+
+- *Lock file with PID*: rejected. Fragile under app crash (stale lock files); requires explicit cleanup on shutdown; cross-process race conditions on lock-file-create.
+- *TCP socket bind on localhost port*: rejected. Requires a free port; firewall warnings; overkill for a presence flag.
+- *Qt's `QSharedMemory`*: rejected. Native Win32 mutex is more reliable across Windows configurations and matches the canonical industry pattern.
+- *Spotify-style "surface existing tray + exit silently" instead of messagebox*: deferred to post-Sprint-4 polish. Current messagebox tells the user where to look. Surface-existing-tray would need IPC or a `RegisterWindowMessage` round-trip (heavier).
+- *Cross-platform port guard (`if sys.platform == "win32"`)*: deferred. Phase 1 is Windows-only; the guard is cheap to add when Phase 2 ports to Linux/Mac.
+
+**Consequences:**
+
+- Bug eliminated: multi-clicking the shortcut now shows a messagebox + exits cleanly. Tray contains exactly one Clicky icon. One Ctrl+Alt+Space press = one Claude response.
+- 4 new unit tests in `TestSingleInstanceMutex` class (DI-mocked kernel32). Test count 219 → 223.
+- Pre-commit `/review` (Boris #5) gate flagged 1 must-fix (T1.1 mock fidelity) + 1 inline-comment recommendation (T1.2 GetLastError ordering) + 1 nit (T3.4 NULL representation comment). All applied before commit.
+- Bundle rebuilt + Setup.exe recompiled (84 MB at `installer/Output/Clicky-Windows-Setup-v0.1.0.exe`).
+- Trade-off accepted: cannot run two Clickys simultaneously for testing (e.g. different MODEL_ID + voice for A/B). Trivial to add `--no-single-instance` CLI flag later if needed; not requested for v0.
+- USER manual gate verified post-install: messagebox fires, second instance exits, tray contains one icon.
+
+**References:**
+
+- Commit: `e457905`
+- Files NEW: tests in `tests/test_app.py` `TestSingleInstanceMutex` class
+- Files MODIFIED: `app.py` (helper + main-block wiring)
+- Microsoft Learn: [CreateMutexW](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createmutexw), [Object Namespaces](https://learn.microsoft.com/en-us/windows/win32/termserv/kernel-object-namespaces) (Local\ vs Global\ scope)
+- USER acceptance screenshot 2026-05-05 — messagebox fired, second-instance exited, tray showed exactly one cursor
+
+---
+
 ## 2026-05-05: Sprint 3.6 — auto-detect OpenRouter `sk-or-` key prefix in `create_ai_client` (fixes bundled-EXE 401)
 
 **Context:** USER tested the installed bundled `Clicky.exe` and every PTT failed with `AuthenticationError 401: invalid x-api-key` (verified in `~/.clicky-windows/debug/2026-05-05_04-57-45_chrome.exe/interaction.log` line 14). STT worked, capture worked, KB recall worked, memory recall worked — only the Claude API call failed. Root cause: user's `.env` has `ANTHROPIC_API_KEY=sk-or-v1-...` (OpenRouter key) PLUS `ANTHROPIC_BASE_URL=https://openrouter.ai/api` to route it. In dev mode (`py -3.13 -m app` from repo root), python-dotenv reads `.env`, both env vars are set, AnthropicClient routes to OpenRouter correctly. In bundled-EXE mode, cwd is `%LOCALAPPDATA%\Programs\Clicky Windows\` — no `.env` there, python-dotenv silently finds nothing, ANTHROPIC_BASE_URL unset, Anthropic SDK falls back to `api.anthropic.com` default, OpenRouter-namespaced key is rejected. Sprint 3's keyring migration (config.resolve_api_key) handles the API KEY across env→keyring transitions but ANTHROPIC_BASE_URL has no equivalent resolution path.

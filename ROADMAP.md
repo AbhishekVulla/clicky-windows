@@ -1,9 +1,9 @@
 # Clicky Windows — Roadmap
 
-**Status:** Phase 1 + Phase 1.5 + parallel-capture refactor + **Sprints 0–3.6 all SHIPPED (219/219 tests, 84 MB `Clicky-Windows-Setup-v0.1.0.exe` ready, end-to-end PTT verified working in installed bundle).** Active sprint sequence (post-sync 2026-05-05): ✅ Sprint 0 hygiene → ✅ Sprint 1 KB upload → ✅ Sprint 2 PyInstaller + Inno Setup → ✅ Sprint 3 tray + keyring + 3 review fixes → ✅ Sprint 3.5 icon polish (GPT Image v2 chroma-keyed locked) → ✅ Sprint 3.6 OpenRouter sk-or- auto-routing (fixes bundled-EXE 401) → ⏳ Sprint 4 ElevenLabs opt-in TTS (~1 hr) → ⏳ Sprint 5 README + CI + repo metadata + SignPath draft + public flip. See [DECISIONS.md](DECISIONS.md) entries dated 2026-05-04 and 2026-05-05 for full ADR coverage of every sprint shipped.
-**Last updated:** 2026-05-05
+**Status:** Phase 1 + Phase 1.5 + parallel-capture refactor + **Sprints 0–3.8 all SHIPPED (223/223 tests, 85 MB `Clicky-Windows-Setup-v0.1.0.exe` ready, end-to-end PTT + single-instance guard verified in installed bundle).** **Sprint 4 plan LOCKED** at [`docs/superpowers/plans/2026-05-06-sprint-4-multi-provider.md`](docs/superpowers/plans/2026-05-06-sprint-4-multi-provider.md) (12 TDD tasks, ~31 net new tests, ~5-6 hours; execution mode = inline `superpowers:executing-plans` with USER checkpoints at Tasks 5/9/12). Active sprint sequence: ✅ 0–3.6 → ✅ Sprint 3.7 docs → ✅ Sprint 3.8 single-instance mutex → ⏳ Sprint 4 multi-provider settings UX + ElevenLabs TTS (planned, not yet executed) → ⏳ Sprint 4.7 doc-sync + ⏳ Sprint 5/6 README + CI + repo metadata + SignPath + public flip. See [DECISIONS.md](DECISIONS.md) entries dated 2026-05-04, 2026-05-05, and 2026-05-06 for full ADR coverage.
+**Last updated:** 2026-05-06
 
-**Recent commits this batch (a7bdbfc → e484ca9):**
+**Recent commits this batch (a7bdbfc → e457905):**
 
 | Commit | Sprint | Outcome |
 |---|---|---|
@@ -12,7 +12,10 @@
 | `03e41f7` | Sprint 2 | PyInstaller `--onedir` + Inno Setup per-user installer; aggressive bundle excludes (1.1 GB → 275 MB; 84 MB Setup.exe after LZMA2) |
 | `fd8e476` | Sprint 3 | Tray + first-launch BYOK keyring dialog + env→keyring migration + 3 review fixes; 19 new tests; closes "no clean exit path" UX gap |
 | `981622b` `d201960` `5a26e15` `f14d59e` | Sprint 3.5 | Icon iteration journey — hand-drawn pixel-art retracted, switched to GPT Image v2 chroma-keyed multi-res ICO with aggressive transparency snap |
-| `e484ca9` | Sprint 3.6 | Auto-detect OpenRouter `sk-or-` key prefix in `create_ai_client` — fixes bundled-EXE 401 (cwd outside repo → `.env` not loaded → `ANTHROPIC_BASE_URL` unset → key sent to wrong endpoint). 3 new tests. Verified end-to-end via `~/.clicky-windows/debug/2026-05-05_05-16-19_chrome.exe/interaction.log` (CLAUDE done in 4.1s, audible response, no 401) |
+| `e484ca9` | Sprint 3.6 | Auto-detect OpenRouter `sk-or-` key prefix in `create_ai_client` — fixes bundled-EXE 401 (cwd outside repo → `.env` not loaded → `ANTHROPIC_BASE_URL` unset → key sent to wrong endpoint). 3 new tests. Verified end-to-end via debug log |
+| `ceed095` | Sprint 3.7 | Comprehensive doc-sync after Sprint 0-3.6 (DECISIONS / ROADMAP / MEMORY / project_phase1_current_state / new feedback memory file for the dotenv-trap lesson) |
+| `e457905` | Sprint 3.8 | Win32 named-mutex single-instance guard — fixes "multi-clicking shortcut spawns N parallel Clicky processes that all answer the same Ctrl+Alt+Space in unison." Pre-commit `/review` (Boris #5) caught + fixed test mock-fidelity issue (real ctypes c_void_p NULL → Python None, not 0). 4 new tests. USER manual gate verified — messagebox fires, second instance exits, tray contains exactly one cursor |
+| `<pending Sprint 3.7+4-plan-lock doc commit>` | Sprint 4.0 docs | Sprint 4 plan written (`docs/superpowers/plans/2026-05-06-sprint-4-multi-provider.md`). DECISIONS.md gets Sprint 3.8 + Sprint 4 plan-lock ADRs. ROADMAP / MEMORY / project_phase1_current_state / CLAUDE / PRD / LAUNCH refreshed |
 
 This doc answers **where are we now**. It combines what other projects split into PLAN.md + PROGRESS.md + TASKS.md + TESTING.md — all of that lives here in status columns and acceptance proof.
 
