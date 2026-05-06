@@ -250,3 +250,65 @@ class TestSettingsDialogDropdownSwap:
         assert tts_input.text() == ""
         # Placeholder mentions the new env-var name.
         assert "ELEVENLABS_API_KEY" in tts_input.placeholderText()
+
+
+class TestSettingsDialogSave:
+    """Save persists (a) the selected provider per category as
+    {LLM,STT,TTS}_PROVIDER in keyring, AND (b) the API key field's
+    contents to that provider's keyring slot."""
+
+    def test_save_persists_provider_selection_to_keyring(
+        self, qapp, mocker, monkeypatch
+    ):
+        saved: dict[tuple[str, str], str] = {}
+        monkeypatch.setattr(
+            "settings_dialog.keyring.get_password",
+            lambda service, name: None,
+        )
+        monkeypatch.setattr(
+            "settings_dialog.keyring.set_password",
+            lambda service, name, value: saved.update({(service, name): value}),
+        )
+
+        from settings_dialog import SettingsDialog
+        dlg = SettingsDialog()
+        # Switch TTS to ElevenLabs and enter a key.
+        dlg._dropdowns["TTS"].setCurrentIndex(1)
+        dlg._key_inputs["LLM"].setText("sk-llm-key")
+        dlg._key_inputs["STT"].setText("stt-key")
+        dlg._key_inputs["TTS"].setText("eleven-key")
+
+        dlg._on_save()
+
+        assert saved[("clicky-windows", "LLM_PROVIDER")] == "anthropic"
+        assert saved[("clicky-windows", "STT_PROVIDER")] == "assemblyai"
+        assert saved[("clicky-windows", "TTS_PROVIDER")] == "elevenlabs"
+        assert saved[("clicky-windows", "ANTHROPIC_API_KEY")] == "sk-llm-key"
+        assert saved[("clicky-windows", "ASSEMBLYAI_API_KEY")] == "stt-key"
+        assert saved[("clicky-windows", "ELEVENLABS_API_KEY")] == "eleven-key"
+
+    def test_save_only_persists_to_currently_selected_providers_slot(
+        self, qapp, mocker, monkeypatch
+    ):
+        """If TTS dropdown is on Cartesia, save MUST write to
+        CARTESIA_API_KEY, NOT ELEVENLABS_API_KEY."""
+        saved: dict[tuple[str, str], str] = {}
+        monkeypatch.setattr(
+            "settings_dialog.keyring.get_password",
+            lambda service, name: None,
+        )
+        monkeypatch.setattr(
+            "settings_dialog.keyring.set_password",
+            lambda service, name, value: saved.update({(service, name): value}),
+        )
+
+        from settings_dialog import SettingsDialog
+        dlg = SettingsDialog()
+        # Stay on Cartesia (default index 0).
+        dlg._key_inputs["LLM"].setText("a")
+        dlg._key_inputs["STT"].setText("a")
+        dlg._key_inputs["TTS"].setText("sk_car_value")
+        dlg._on_save()
+
+        assert ("clicky-windows", "CARTESIA_API_KEY") in saved
+        assert ("clicky-windows", "ELEVENLABS_API_KEY") not in saved
