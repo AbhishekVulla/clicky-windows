@@ -70,6 +70,7 @@ a = Analysis(
         "anthropic",
         "openai",
         "cartesia",
+        "elevenlabs",  # Sprint 4 — opt-in alternative TTS
         "assemblyai",
         # HTTP / networking deps used transitively by the SDKs
         "websockets",
