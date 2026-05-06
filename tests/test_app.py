@@ -751,3 +751,40 @@ class TestSingleInstanceMutex:
         result = _acquire_single_instance_mutex(kernel32=mock_kernel32)
         assert result == "fail-open"
         mock_kernel32.GetLastError.assert_not_called()
+
+
+# --- Sprint 4: TTS factory dispatch -----------------------------------------
+
+
+class TestTTSProviderDispatch:
+    """The main block must construct the right TTS subclass based on
+    config.TTS_PROVIDER. This test mocks the helper's dependencies +
+    verifies it returns the right (provider, api_key) tuple.
+
+    The main block is gated by ``if __name__ == "__main__"`` so we test
+    the helper (a small extracted function) directly, not the full
+    main-block flow."""
+
+    def test_resolve_tts_credentials_for_cartesia(self, mocker):
+        """Helper returns (provider, api_key) tuple — Cartesia path."""
+        mocker.patch("app.resolve_setting", return_value="cartesia")
+        mocker.patch("app.resolve_api_key", side_effect=lambda name: {
+            "CARTESIA_API_KEY": "sk_car_test",
+            "ELEVENLABS_API_KEY": None,
+        }[name])
+        from app import _resolve_tts_credentials
+        provider, api_key = _resolve_tts_credentials()
+        assert provider == "cartesia"
+        assert api_key == "sk_car_test"
+
+    def test_resolve_tts_credentials_for_elevenlabs(self, mocker):
+        """Helper returns (provider, api_key) tuple — ElevenLabs path."""
+        mocker.patch("app.resolve_setting", return_value="elevenlabs")
+        mocker.patch("app.resolve_api_key", side_effect=lambda name: {
+            "CARTESIA_API_KEY": None,
+            "ELEVENLABS_API_KEY": "eleven_test",
+        }[name])
+        from app import _resolve_tts_credentials
+        provider, api_key = _resolve_tts_credentials()
+        assert provider == "elevenlabs"
+        assert api_key == "eleven_test"

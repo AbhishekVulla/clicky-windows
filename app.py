@@ -44,6 +44,8 @@ from config import (
     ASSEMBLYAI_API_KEY,
     CARTESIA_API_KEY,
     MODEL_ID,
+    resolve_api_key,
+    resolve_setting,
 )
 from hotkey import PushToTalkHotkey
 from memory import MemoryStore
@@ -877,6 +879,25 @@ def _log(msg: str) -> None:
     print(f"[clicky {ts} +{elapsed:.0f}ms] {msg}", flush=True)
 
 
+# --- Sprint 4: TTS provider resolution --------------------------------------
+
+
+def _resolve_tts_credentials() -> tuple[str, str | None]:
+    """Resolve (TTS_PROVIDER, api_key_for_that_provider) at startup.
+
+    Reads TTS_PROVIDER via config.resolve_setting (env→keyring→default)
+    then resolves the right API key via config.resolve_api_key based on
+    the selected provider. Returned to __main__ which dispatches via
+    tts.create_tts_client(provider, api_key).
+    """
+    provider = resolve_setting("TTS_PROVIDER", default="cartesia")
+    if provider == "elevenlabs":
+        api_key = resolve_api_key("ELEVENLABS_API_KEY")
+    else:
+        api_key = resolve_api_key("CARTESIA_API_KEY")
+    return provider, api_key
+
+
 # --- Manual entry point -------------------------------------------------------
 
 if __name__ == "__main__":
@@ -947,15 +968,30 @@ if __name__ == "__main__":
     # Resolve keys AFTER the modal has run — module-level constants
     # were captured at import time and may not reflect newly-saved
     # values. config.resolve_api_key() always reads fresh.
-    from config import resolve_api_key
     api_anthropic = resolve_api_key("ANTHROPIC_API_KEY")
     api_assemblyai = resolve_api_key("ASSEMBLYAI_API_KEY")
-    api_cartesia = resolve_api_key("CARTESIA_API_KEY")
+
+    # Sprint 4: dispatch TTS subclass based on TTS_PROVIDER setting.
+    # Cartesia (default) and ElevenLabs (opt-in) are both supported;
+    # user picks via Settings dialog dropdown which writes to keyring
+    # under "TTS_PROVIDER" + the provider's key under e.g. "ELEVENLABS_API_KEY".
+    tts_provider, tts_api_key = _resolve_tts_credentials()
+    if not tts_api_key:
+        ctypes.windll.user32.MessageBoxW(
+            None,
+            f"Clicky needs an API key for {tts_provider.title()} TTS.\n\n"
+            "Right-click the tray icon → Settings... to set it.",
+            f"{tts_provider.title()} key missing",
+            0x40,
+        )
+        sys.exit(1)
+    from tts import create_tts_client
+    tts_instance = create_tts_client(provider=tts_provider, api_key=tts_api_key)
 
     clicky = ClickyApp(
         ai_client=create_ai_client(model_id=MODEL_ID, api_key=api_anthropic),
         stt_client=AssemblyAIStreamingSTT(api_key=api_assemblyai),
-        tts_client=CartesiaSonicTTS(api_key=api_cartesia),
+        tts_client=tts_instance,
     )
 
     _log("Pre-opening mic + WebSocket (one-time startup cost)...")
