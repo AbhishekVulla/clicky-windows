@@ -106,3 +106,52 @@ class TestResolveApiKey:
         monkeypatch.setattr(config.keyring, "get_password", boom)
         from config import resolve_api_key
         assert resolve_api_key(KEY) is None
+
+
+# --- Sprint 4: resolve_setting (env→keyring→default for non-secret config) ---
+
+
+class TestResolveSetting:
+    """resolve_setting is a sibling to resolve_api_key for non-secret
+    config. Same env→keyring semantics, plus a default fallback when
+    neither env nor keyring has a value (since settings always have a
+    sensible default, unlike API keys which require explicit entry)."""
+
+    def test_returns_env_value_when_present(self, monkeypatch, fake_keyring):
+        monkeypatch.setenv("TTS_PROVIDER", "elevenlabs")
+        from config import resolve_setting
+        assert resolve_setting("TTS_PROVIDER", default="cartesia") == "elevenlabs"
+
+    def test_migrates_env_to_keyring_on_resolve(self, monkeypatch, fake_keyring):
+        """When env is present, the value MUST also land in keyring so the
+        user can later delete .env without losing the choice."""
+        monkeypatch.setenv("TTS_PROVIDER", "elevenlabs")
+        from config import resolve_setting, KEYRING_SERVICE
+        resolve_setting("TTS_PROVIDER", default="cartesia")
+        assert fake_keyring[(KEYRING_SERVICE, "TTS_PROVIDER")] == "elevenlabs"
+
+    def test_falls_back_to_keyring_when_env_absent(self, monkeypatch, fake_keyring):
+        monkeypatch.delenv("TTS_PROVIDER", raising=False)
+        from config import resolve_setting, KEYRING_SERVICE
+        fake_keyring[(KEYRING_SERVICE, "TTS_PROVIDER")] = "elevenlabs"
+        assert resolve_setting("TTS_PROVIDER", default="cartesia") == "elevenlabs"
+
+    def test_returns_default_when_neither_source_has_value(self, monkeypatch, fake_keyring):
+        """First-launch state: no env, empty keyring → default. Distinct from
+        resolve_api_key which returns None (settings always have a default)."""
+        monkeypatch.delenv("TTS_PROVIDER", raising=False)
+        from config import resolve_setting
+        assert resolve_setting("TTS_PROVIDER", default="cartesia") == "cartesia"
+
+    def test_keyring_failures_do_not_block_env_path(self, monkeypatch):
+        """Keyring backend errors swallowed — env value still returned + default
+        still works as final fallback."""
+        monkeypatch.setenv("TTS_PROVIDER", "elevenlabs")
+
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("simulated keyring failure")
+
+        import config
+        monkeypatch.setattr(config.keyring, "set_password", boom)
+        from config import resolve_setting
+        assert resolve_setting("TTS_PROVIDER", default="cartesia") == "elevenlabs"

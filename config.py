@@ -59,6 +59,37 @@ def resolve_api_key(name: str) -> str | None:
         return None
 
 
+def resolve_setting(name: str, default: str) -> str:
+    """Resolve a non-secret setting by name with env→keyring→default fallback.
+
+    Sibling to ``resolve_api_key`` for config knobs (TTS_PROVIDER,
+    LLM_PROVIDER, STT_PROVIDER, etc.) that need keyring persistence so
+    bundled-EXE startup doesn't silently fall back to defaults when the
+    user's `.env` doesn't load (cwd is install dir, not repo root — see
+    DECISIONS.md 2026-05-05 Sprint 3.6).
+
+    Differs from resolve_api_key in that it always returns a string —
+    callers pass the right default for the setting (e.g. "cartesia" for
+    TTS_PROVIDER) rather than handling None.
+
+    Failures in keyring (locked vault, no backend) are swallowed in both
+    directions: env path always returns successfully even if keyring write
+    fails; keyring read errors fall through to the default.
+    """
+    env_value = os.getenv(name)
+    if env_value:
+        try:
+            keyring.set_password(KEYRING_SERVICE, name, env_value)
+        except Exception:
+            pass
+        return env_value
+    try:
+        stored = keyring.get_password(KEYRING_SERVICE, name)
+    except Exception:
+        stored = None
+    return stored if stored else default
+
+
 # ── API keys ─────────────────────────────────────────────────────────────────
 
 ANTHROPIC_API_KEY: str | None = resolve_api_key("ANTHROPIC_API_KEY")
