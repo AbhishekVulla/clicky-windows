@@ -643,3 +643,34 @@ class TestElevenLabsTTSStop:
         tts_obj.stop()
         assert tts_obj._epoch == old_epoch + 1
         assert old_cancel.is_set()
+
+
+class TestCreateTTSClient:
+    """Tests for tts.create_tts_client factory — routes provider string
+    to right TTS subclass. Constructing the subclass is safe without
+    mocks: __init__ stores api_key + factories but doesn't touch the
+    real SDK (lazy import inside _build_client only fires on first speak)."""
+
+    def test_routes_cartesia_to_cartesia_sonic_tts(self):
+        from tts import create_tts_client, CartesiaSonicTTS
+        client = create_tts_client(provider="cartesia", api_key="test-key")
+        assert isinstance(client, CartesiaSonicTTS)
+
+    def test_routes_elevenlabs_to_elevenlabs_tts(self):
+        from tts import create_tts_client, ElevenLabsTTS
+        client = create_tts_client(provider="elevenlabs", api_key="test-key")
+        assert isinstance(client, ElevenLabsTTS)
+
+    def test_unknown_provider_raises_value_error(self):
+        from tts import create_tts_client
+        with pytest.raises(ValueError) as excinfo:
+            create_tts_client(provider="googletts", api_key="x")
+        msg = str(excinfo.value)
+        assert "googletts" in msg
+        assert "cartesia" in msg
+        assert "elevenlabs" in msg
+
+    def test_provider_string_is_case_insensitive(self):
+        from tts import create_tts_client, CartesiaSonicTTS
+        client = create_tts_client(provider="Cartesia", api_key="x")
+        assert isinstance(client, CartesiaSonicTTS)

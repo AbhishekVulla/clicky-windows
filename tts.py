@@ -712,6 +712,39 @@ class ElevenLabsTTS(TTS):
         return _play, stream
 
 
+# --- Factory: route provider string to the right TTS subclass ----------------
+
+
+def create_tts_client(provider: str, api_key: str) -> TTS:
+    """Construct the right TTS subclass based on a provider string.
+
+    Mirrors ai.create_ai_client's factory pattern. Used by app.py main
+    block to dispatch on the TTS_PROVIDER constant (resolved from env or
+    keyring via config.resolve_setting).
+
+    Args:
+        provider: "cartesia" or "elevenlabs". Case-insensitive.
+        api_key: provider-specific API key (CARTESIA_API_KEY or
+            ELEVENLABS_API_KEY).
+
+    Returns:
+        A concrete TTS subclass ready for speak_sentence() / speak() calls.
+
+    Raises:
+        ValueError: if provider is not recognized.
+    """
+    p = provider.lower()
+    if p == "cartesia":
+        return CartesiaSonicTTS(api_key=api_key)
+    if p == "elevenlabs":
+        return ElevenLabsTTS(api_key=api_key)
+    raise ValueError(
+        f"Unsupported TTS provider: {provider!r}. "
+        f"Supported: 'cartesia', 'elevenlabs'. To add a new provider, "
+        f"subclass TTS in tts.py and extend create_tts_client() with a new branch."
+    )
+
+
 # --- Manual live-API verification entry point --------------------------------
 
 if __name__ == "__main__":
