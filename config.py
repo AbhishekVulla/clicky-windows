@@ -259,6 +259,51 @@ OutputStream. Cartesia supports 22.05k / 44.1k / 48k — 44.1k is the most
 natural for buddy voice without oversampling cost."""
 
 
+# ── Provider selection (which subclass app.py constructs at startup) ────────
+
+LLM_PROVIDER: str = resolve_setting("LLM_PROVIDER", default="anthropic")
+"""Which AIClient subclass to construct. Sprint 4 ships only "anthropic"
+in the dropdown; GeminiClient infrastructure stays in ai.py for opt-in
+via env override (MODEL_ID=google/...) but is not user-selectable in the
+settings dialog. See DECISIONS.md 2026-04-19 (late-evening) for the
+empirical A/B that rejected Gemini on coordinate accuracy."""
+
+STT_PROVIDER: str = resolve_setting("STT_PROVIDER", default="assemblyai")
+"""Which STT subclass to construct. Sprint 4 ships only "assemblyai".
+Deepgram is parked for post-launch."""
+
+TTS_PROVIDER: str = resolve_setting("TTS_PROVIDER", default="cartesia")
+"""Which TTS subclass to construct. Sprint 4 ships "cartesia" (default)
+and "elevenlabs" (opt-in). User switches via Settings dialog dropdown."""
+
+
+# ── ElevenLabs TTS (opt-in alternative to Cartesia) ─────────────────────────
+
+ELEVENLABS_API_KEY: str | None = resolve_api_key("ELEVENLABS_API_KEY")
+"""Optional. Required only when TTS_PROVIDER='elevenlabs'. 10k chars/month
+free tier at https://elevenlabs.io/app/sign-up — no credit card."""
+
+ELEVENLABS_MODEL_ID: str = os.getenv("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5")
+"""ElevenLabs Flash v2.5 — ~75ms model TTFB. ElevenLabs officially
+recommends Flash over Turbo v2.5 for low-latency voice agents."""
+
+ELEVENLABS_VOICE_ID: str = os.getenv(
+    "ELEVENLABS_VOICE_ID",
+    "21m00Tcm4TlvDq8ikWAM",  # Rachel — American female, conversational
+)
+"""ElevenLabs voice ID for the buddy persona. Default Rachel matches
+Cartesia "Brooke - Big Sister" warmth (conversational adult female).
+Catalog: https://elevenlabs.io/app/voice-library."""
+
+ELEVENLABS_OUTPUT_SAMPLE_RATE: int = int(
+    os.getenv("ELEVENLABS_OUTPUT_SAMPLE_RATE", "22050")
+)
+"""ElevenLabs PCM sample rate. Defaulted to 22050 because 44.1kHz PCM
+requires Pro tier. ElevenLabs PCM is int16 (NOT float32 like Cartesia),
+so playback path converts inline: np.frombuffer(chunk, np.int16).astype(
+np.float32) / 32768.0."""
+
+
 # ── Memory ───────────────────────────────────────────────────────────────────
 
 _DEFAULT_MEMORY_DIR = Path.home() / ".clicky-windows"
