@@ -87,3 +87,42 @@ class TestRequiredKeysPresent:
             monkeypatch.delenv(k, raising=False)
         from settings_dialog import required_keys_present
         assert required_keys_present() is False
+
+
+# --- Sprint 4: provider category data model ---------------------------------
+
+
+class TestProviderCategoriesData:
+    """The _PROVIDER_CATEGORIES data drives dialog rendering. Each
+    category has: a label, a list of provider options, a default
+    provider key, the keyring slot prefix (env-var name root). Each
+    provider has: display name, env-var name (= keyring slot), signup URL."""
+
+    def test_three_categories_in_correct_order(self):
+        from settings_dialog import _PROVIDER_CATEGORIES
+        assert [c.category_key for c in _PROVIDER_CATEGORIES] == ["LLM", "STT", "TTS"]
+
+    def test_llm_category_has_only_anthropic(self):
+        from settings_dialog import _PROVIDER_CATEGORIES
+        llm = next(c for c in _PROVIDER_CATEGORIES if c.category_key == "LLM")
+        assert [p.provider_id for p in llm.providers] == ["anthropic"]
+        assert llm.default_index == 0
+
+    def test_stt_category_has_only_assemblyai(self):
+        from settings_dialog import _PROVIDER_CATEGORIES
+        stt = next(c for c in _PROVIDER_CATEGORIES if c.category_key == "STT")
+        assert [p.provider_id for p in stt.providers] == ["assemblyai"]
+
+    def test_tts_category_has_cartesia_and_elevenlabs(self):
+        from settings_dialog import _PROVIDER_CATEGORIES
+        tts = next(c for c in _PROVIDER_CATEGORIES if c.category_key == "TTS")
+        assert [p.provider_id for p in tts.providers] == ["cartesia", "elevenlabs"]
+        assert tts.default_index == 0  # Cartesia default
+
+    def test_each_provider_has_env_var_and_signup_url(self):
+        from settings_dialog import _PROVIDER_CATEGORIES
+        for category in _PROVIDER_CATEGORIES:
+            for provider in category.providers:
+                assert provider.api_key_env_var.endswith("_API_KEY")
+                assert provider.signup_url.startswith("https://")
+                assert provider.display_name  # non-empty

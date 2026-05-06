@@ -22,6 +22,7 @@ on Windows DPAPI — no async needed.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import keyring
@@ -41,25 +42,86 @@ from PyQt6.QtWidgets import (
 from config import KEYRING_SERVICE
 
 
-# Tuples of (env-var name, friendly label, signup URL).
-# Order is the same order shown in the dialog top-to-bottom.
-_KEY_FIELDS: list[tuple[str, str, str]] = [
-    (
-        "ANTHROPIC_API_KEY",
-        "Anthropic (Claude vision)",
-        "https://console.anthropic.com/settings/keys",
+# --- Sprint 4: provider category data model ---------------------------------
+#
+# Drives 3-row progressive-disclosure UX in the dialog: pick provider per
+# category (LLM/STT/TTS) from a dropdown, only that provider's API key field
+# is visible. Fixes the previous flat 3-required-field layout that would
+# have grown to 6 fields with ElevenLabs (and 7+ with Deepgram).
+
+
+@dataclass(frozen=True)
+class _Provider:
+    """Single provider in a category. ``provider_id`` is the lowercase
+    string used as the value of LLM_PROVIDER / STT_PROVIDER / TTS_PROVIDER
+    config + the dropdown's data slot. ``api_key_env_var`` is BOTH the
+    env-var name AND the keyring slot name (they share namespace by
+    convention — see config.resolve_api_key)."""
+
+    provider_id: str            # e.g. "anthropic", "elevenlabs"
+    display_name: str           # e.g. "Anthropic", "ElevenLabs"
+    api_key_env_var: str        # e.g. "ANTHROPIC_API_KEY"
+    signup_url: str
+
+
+@dataclass(frozen=True)
+class _ProviderCategory:
+    """A row group in the dialog. ``category_key`` is the prefix of
+    the provider-selection config (e.g. "LLM" → LLM_PROVIDER setting)."""
+
+    category_key: str           # "LLM", "STT", "TTS"
+    label: str                  # "LLM (vision)", etc.
+    providers: tuple[_Provider, ...]
+    default_index: int
+
+
+_PROVIDER_CATEGORIES: tuple[_ProviderCategory, ...] = (
+    _ProviderCategory(
+        category_key="LLM",
+        label="LLM (vision)",
+        providers=(
+            _Provider(
+                provider_id="anthropic",
+                display_name="Anthropic",
+                api_key_env_var="ANTHROPIC_API_KEY",
+                signup_url="https://console.anthropic.com/settings/keys",
+            ),
+        ),
+        default_index=0,
     ),
-    (
-        "ASSEMBLYAI_API_KEY",
-        "AssemblyAI (speech-to-text)",
-        "https://www.assemblyai.com/dashboard/signup",
+    _ProviderCategory(
+        category_key="STT",
+        label="STT (speech-to-text)",
+        providers=(
+            _Provider(
+                provider_id="assemblyai",
+                display_name="AssemblyAI",
+                api_key_env_var="ASSEMBLYAI_API_KEY",
+                signup_url="https://www.assemblyai.com/dashboard/signup",
+            ),
+        ),
+        default_index=0,
     ),
-    (
-        "CARTESIA_API_KEY",
-        "Cartesia (text-to-speech)",
-        "https://play.cartesia.ai/sign-in",
+    _ProviderCategory(
+        category_key="TTS",
+        label="TTS (text-to-speech)",
+        providers=(
+            _Provider(
+                provider_id="cartesia",
+                display_name="Cartesia",
+                api_key_env_var="CARTESIA_API_KEY",
+                signup_url="https://play.cartesia.ai/sign-in",
+            ),
+            _Provider(
+                provider_id="elevenlabs",
+                display_name="ElevenLabs",
+                api_key_env_var="ELEVENLABS_API_KEY",
+                signup_url="https://elevenlabs.io/app/sign-up",
+            ),
+        ),
+        default_index=0,
     ),
-]
+)
 
 
 def _mask(value: str | None) -> str:
@@ -182,15 +244,24 @@ class SettingsDialog(QDialog):
 
 
 def required_keys_present() -> bool:
-    """Probe — does every required key resolve to a non-empty value?
+    """Probe — does every required-provider's API key resolve?
 
-    Used by the launcher to decide whether to show the modal at start.
-    Lives here (next to the dialog) so the launcher only needs one
-    import. Reads via ``config.resolve_api_key`` so env-then-keyring
-    semantics match the rest of the app.
+    Sprint 4: "required" = the currently-SELECTED provider per category
+    (resolved via resolve_setting on LLM_PROVIDER / STT_PROVIDER /
+    TTS_PROVIDER). The probe is what the launcher uses to decide whether
+    to show the modal at start.
     """
-    from config import resolve_api_key
+    from config import resolve_api_key, resolve_setting
 
-    return all(
-        bool(resolve_api_key(name)) for name, _, _ in _KEY_FIELDS
-    )
+    for category in _PROVIDER_CATEGORIES:
+        provider_id = resolve_setting(
+            f"{category.category_key}_PROVIDER",
+            default=category.providers[category.default_index].provider_id,
+        )
+        provider = next(
+            (p for p in category.providers if p.provider_id == provider_id),
+            category.providers[category.default_index],  # fallback if stored value invalid
+        )
+        if not resolve_api_key(provider.api_key_env_var):
+            return False
+    return True
