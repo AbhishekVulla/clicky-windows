@@ -986,7 +986,22 @@ if __name__ == "__main__":
         )
         sys.exit(1)
     from tts import create_tts_client
-    tts_instance = create_tts_client(provider=tts_provider, api_key=tts_api_key)
+    try:
+        tts_instance = create_tts_client(provider=tts_provider, api_key=tts_api_key)
+    except ValueError as exc:
+        # Stale provider_id in keyring (e.g. user downgraded after a future
+        # version added a new provider that no longer exists). Show a
+        # friendly MessageBox instead of dumping a traceback into the
+        # bundled-EXE void. Per Sprint 4 review T2-1.
+        ctypes.windll.user32.MessageBoxW(
+            None,
+            f"Clicky's TTS configuration is invalid: {exc}\n\n"
+            "Right-click the tray icon → Settings... to choose a "
+            "supported provider.",
+            "TTS provider not supported",
+            0x40,
+        )
+        sys.exit(1)
 
     clicky = ClickyApp(
         ai_client=create_ai_client(model_id=MODEL_ID, api_key=api_anthropic),

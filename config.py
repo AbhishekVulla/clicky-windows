@@ -285,7 +285,10 @@ free tier at https://elevenlabs.io/app/sign-up — no credit card."""
 
 ELEVENLABS_MODEL_ID: str = os.getenv("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5")
 """ElevenLabs Flash v2.5 — ~75ms model TTFB. ElevenLabs officially
-recommends Flash over Turbo v2.5 for low-latency voice agents."""
+recommends Flash over Turbo v2.5 for low-latency voice agents.
+Verified 2026-05-06 against ElevenLabs Python SDK 2.45.0 (
+``client.text_to_speech.stream`` accepts ``model_id="eleven_flash_v2_5"``).
+"""
 
 ELEVENLABS_VOICE_ID: str = os.getenv(
     "ELEVENLABS_VOICE_ID",
@@ -293,7 +296,10 @@ ELEVENLABS_VOICE_ID: str = os.getenv(
 )
 """ElevenLabs voice ID for the buddy persona. Default Rachel matches
 Cartesia "Brooke - Big Sister" warmth (conversational adult female).
-Catalog: https://elevenlabs.io/app/voice-library."""
+Verified 2026-05-06 against ElevenLabs voice catalog
+(https://elevenlabs.io/app/voice-library) — Rachel's official voice ID
+is ``21m00Tcm4TlvDq8ikWAM``. If swapping to a different voice via env
+override, copy the ID from the voice library page (NOT the URL slug)."""
 
 ELEVENLABS_OUTPUT_SAMPLE_RATE: int = int(
     os.getenv("ELEVENLABS_OUTPUT_SAMPLE_RATE", "22050")
