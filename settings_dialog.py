@@ -27,16 +27,19 @@ from pathlib import Path
 
 import keyring
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QIcon
+from PyQt6.QtCore import QUrl
+from PyQt6.QtGui import QDesktopServices, QIcon
 from PyQt6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
-    QFormLayout,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPushButton,
     QVBoxLayout,
+    QWidget,
 )
 
 from config import KEYRING_SERVICE
@@ -161,7 +164,9 @@ class SettingsDialog(QDialog):
         except Exception:
             pass  # icon missing in dev install; not critical
 
-        self._inputs: dict[str, QLineEdit] = {}
+        self._dropdowns: dict[str, QComboBox] = {}
+        self._key_inputs: dict[str, QLineEdit] = {}
+        self._signup_buttons: dict[str, QPushButton] = {}
         self._build_ui()
 
     # ---------- UI construction -----------------------------------------
@@ -169,39 +174,20 @@ class SettingsDialog(QDialog):
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
 
-        intro = QLabel(
-            "Clicky needs three API keys to run. Keys are stored in "
-            "Windows Credential Manager (DPAPI per-user encryption) — "
-            "they never touch a remote server.\n\n"
-            "Sign-up links are free-tier with no credit card required."
+        # Lean privacy framing — one sentence (USER decision 2026-05-06,
+        # rejected the multi-line splash version as too loud / suspicious).
+        privacy = QLabel(
+            "🔒 Stored locally, encrypted via Windows Credential Manager. "
+            "No server, no telemetry."
         )
-        intro.setWordWrap(True)
-        outer.addWidget(intro)
+        privacy.setWordWrap(True)
+        privacy.setStyleSheet("color: gray; padding-bottom: 4px;")
+        outer.addWidget(privacy)
 
-        form = QFormLayout()
-        form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
-        )
-        for name, label, url in _KEY_FIELDS:
-            existing = keyring.get_password(KEYRING_SERVICE, name) or ""
-            edit = QLineEdit()
-            edit.setEchoMode(QLineEdit.EchoMode.Password)
-            edit.setPlaceholderText(
-                _mask(existing) if existing else f"paste {name} here"
-            )
-            edit.setText(existing)
-            edit.textChanged.connect(self._update_save_enabled)
-            self._inputs[name] = edit
-            row_label = QLabel(f'{label}\n<a href="{url}">{url}</a>')
-            row_label.setOpenExternalLinks(True)
-            row_label.setTextInteractionFlags(
-                Qt.TextInteractionFlag.TextBrowserInteraction
-            )
-            form.addRow(row_label, edit)
-        outer.addLayout(form)
+        for category in _PROVIDER_CATEGORIES:
+            category_widget = self._build_category_row(category)
+            outer.addWidget(category_widget)
 
-        # Reveal checkbox — flip all 3 password fields to plain text +
-        # back. Useful for paste-verify of long tokens.
         self._reveal = QCheckBox("Show keys in plain text (paste-verify)")
         self._reveal.toggled.connect(self._on_reveal_toggled)
         outer.addWidget(self._reveal)
@@ -215,31 +201,127 @@ class SettingsDialog(QDialog):
         outer.addWidget(self._buttons)
         self._update_save_enabled()
 
+    def _build_category_row(self, category: _ProviderCategory) -> QWidget:
+        """Build one (label + dropdown + Get-key + key-field) row group."""
+        from config import resolve_setting
+
+        container = QWidget()
+        v = QVBoxLayout(container)
+        v.setContentsMargins(0, 4, 0, 8)
+
+        label = QLabel(f"<b>{category.label}</b>")
+        v.addWidget(label)
+
+        # Resolve currently-selected provider for this category.
+        selected_provider_id = resolve_setting(
+            f"{category.category_key}_PROVIDER",
+            default=category.providers[category.default_index].provider_id,
+        )
+        try:
+            selected_index = next(
+                i for i, p in enumerate(category.providers)
+                if p.provider_id == selected_provider_id
+            )
+        except StopIteration:
+            selected_index = category.default_index
+
+        # Dropdown + Get-key button on one horizontal row.
+        h = QHBoxLayout()
+        dropdown = QComboBox()
+        for provider in category.providers:
+            dropdown.addItem(provider.display_name, provider.provider_id)
+        dropdown.setCurrentIndex(selected_index)
+        dropdown.currentIndexChanged.connect(
+            lambda idx, c=category: self._on_provider_changed(c, idx)
+        )
+        self._dropdowns[category.category_key] = dropdown
+        h.addWidget(dropdown, stretch=1)
+
+        signup_button = QPushButton("Get key →")
+        signup_button.clicked.connect(
+            lambda _checked=False, c=category: self._on_signup_clicked(c)
+        )
+        self._signup_buttons[category.category_key] = signup_button
+        h.addWidget(signup_button)
+        v.addLayout(h)
+
+        # API key field.
+        key_input = QLineEdit()
+        key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        key_input.textChanged.connect(self._update_save_enabled)
+        self._key_inputs[category.category_key] = key_input
+        v.addWidget(key_input)
+
+        # Pre-populate the key field with masked existing value (if any).
+        self._refresh_key_field_for_category(category)
+
+        return container
+
+    def _refresh_key_field_for_category(self, category: _ProviderCategory) -> None:
+        """Read the keyring slot for the dropdown's currently-selected
+        provider, set the key field's text + placeholder accordingly.
+        Called on dialog construction AND on dropdown change."""
+        dropdown = self._dropdowns[category.category_key]
+        provider = category.providers[dropdown.currentIndex()]
+        existing = keyring.get_password(KEYRING_SERVICE, provider.api_key_env_var) or ""
+        key_input = self._key_inputs[category.category_key]
+        key_input.setText(existing)
+        key_input.setPlaceholderText(
+            _mask(existing) if existing else f"paste {provider.api_key_env_var} here"
+        )
+
     # ---------- Slots ----------------------------------------------------
+
+    def _on_provider_changed(self, category: _ProviderCategory, _index: int) -> None:
+        """Dropdown changed — swap the key field's contents to the newly-
+        selected provider's stored key + update placeholder + Save state."""
+        self._refresh_key_field_for_category(category)
+        self._update_save_enabled()
+
+    def _on_signup_clicked(self, category: _ProviderCategory) -> None:
+        """User clicked 'Get key →' — open selected provider's signup URL
+        in default browser via QDesktopServices."""
+        dropdown = self._dropdowns[category.category_key]
+        provider = category.providers[dropdown.currentIndex()]
+        QDesktopServices.openUrl(QUrl(provider.signup_url))
 
     def _on_reveal_toggled(self, checked: bool) -> None:
         mode = (
-            QLineEdit.EchoMode.Normal
-            if checked
-            else QLineEdit.EchoMode.Password
+            QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
         )
-        for edit in self._inputs.values():
-            edit.setEchoMode(mode)
+        for key_input in self._key_inputs.values():
+            key_input.setEchoMode(mode)
 
     def _update_save_enabled(self) -> None:
+        """Save enabled when every category's key field has non-empty content."""
         all_filled = all(
-            edit.text().strip() for edit in self._inputs.values()
+            key_input.text().strip()
+            for key_input in self._key_inputs.values()
         )
         self._buttons.button(
             QDialogButtonBox.StandardButton.Save
         ).setEnabled(all_filled)
 
     def _on_save(self) -> None:
-        """Persist non-empty fields to keyring and accept the dialog."""
-        for name, edit in self._inputs.items():
-            value = edit.text().strip()
-            if value:
-                keyring.set_password(KEYRING_SERVICE, name, value)
+        """Persist provider selection + currently-selected provider's key
+        for each category to keyring."""
+        for category in _PROVIDER_CATEGORIES:
+            dropdown = self._dropdowns[category.category_key]
+            provider = category.providers[dropdown.currentIndex()]
+
+            # 1. Persist provider selection (e.g. "TTS_PROVIDER" → "elevenlabs")
+            keyring.set_password(
+                KEYRING_SERVICE,
+                f"{category.category_key}_PROVIDER",
+                provider.provider_id,
+            )
+
+            # 2. Persist the API key for the selected provider.
+            key_value = self._key_inputs[category.category_key].text().strip()
+            if key_value:
+                keyring.set_password(
+                    KEYRING_SERVICE, provider.api_key_env_var, key_value,
+                )
         self.accept()
 
 

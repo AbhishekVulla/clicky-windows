@@ -126,3 +126,69 @@ class TestProviderCategoriesData:
                 assert provider.api_key_env_var.endswith("_API_KEY")
                 assert provider.signup_url.startswith("https://")
                 assert provider.display_name  # non-empty
+
+
+# --- Sprint 4: dialog render tests (qapp fixture) ---------------------------
+
+
+@pytest.fixture(scope="session")
+def qapp():
+    """Session-shared QApplication. Mirrors test_tray.py fixture."""
+    from PyQt6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    yield app
+
+
+class TestSettingsDialogRender:
+    """Verify the dialog renders the expected widgets in the expected
+    structure. Inspects internal state (self._dropdowns, self._key_inputs,
+    self._signup_buttons) rather than simulating user clicks — the
+    `qapp` fixture provides a QApplication but no event loop runs."""
+
+    def test_dialog_has_privacy_line(self, qapp, mocker):
+        mocker.patch("settings_dialog.keyring.get_password", return_value=None)
+        from settings_dialog import SettingsDialog
+        dlg = SettingsDialog()
+        from PyQt6.QtWidgets import QLabel
+        labels = [w for w in dlg.findChildren(QLabel)]
+        privacy_texts = [
+            l.text() for l in labels
+            if "encrypted" in l.text() or "telemetry" in l.text()
+        ]
+        assert len(privacy_texts) >= 1, "Privacy line not rendered"
+        privacy = privacy_texts[0]
+        assert "no server" in privacy.lower() or "no telemetry" in privacy.lower()
+
+    def test_dialog_has_three_dropdowns(self, qapp, mocker):
+        mocker.patch("settings_dialog.keyring.get_password", return_value=None)
+        from settings_dialog import SettingsDialog
+        dlg = SettingsDialog()
+        assert set(dlg._dropdowns.keys()) == {"LLM", "STT", "TTS"}
+
+    def test_dialog_has_three_key_inputs(self, qapp, mocker):
+        mocker.patch("settings_dialog.keyring.get_password", return_value=None)
+        from settings_dialog import SettingsDialog
+        dlg = SettingsDialog()
+        assert set(dlg._key_inputs.keys()) == {"LLM", "STT", "TTS"}
+
+    def test_dialog_has_three_signup_buttons(self, qapp, mocker):
+        mocker.patch("settings_dialog.keyring.get_password", return_value=None)
+        from settings_dialog import SettingsDialog
+        dlg = SettingsDialog()
+        assert set(dlg._signup_buttons.keys()) == {"LLM", "STT", "TTS"}
+
+    def test_tts_dropdown_has_two_options(self, qapp, mocker):
+        mocker.patch("settings_dialog.keyring.get_password", return_value=None)
+        from settings_dialog import SettingsDialog
+        dlg = SettingsDialog()
+        tts_dropdown = dlg._dropdowns["TTS"]
+        items = [tts_dropdown.itemText(i) for i in range(tts_dropdown.count())]
+        assert items == ["Cartesia", "ElevenLabs"]
+
+    def test_llm_dropdown_has_one_option(self, qapp, mocker):
+        mocker.patch("settings_dialog.keyring.get_password", return_value=None)
+        from settings_dialog import SettingsDialog
+        dlg = SettingsDialog()
+        llm_dropdown = dlg._dropdowns["LLM"]
+        assert llm_dropdown.count() == 1
+        assert llm_dropdown.itemText(0) == "Anthropic"
