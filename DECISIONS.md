@@ -10,6 +10,16 @@ For **how** → [CLAUDE.md](CLAUDE.md)
 
 ---
 
+## 2026-05-08: GPT-Realtime trio (Realtime-2 / Translate / Whisper) evaluated, declined for Phase 1
+
+**Context:** OpenAI announced 2026-05-07 — GPT-Realtime-2 (GPT-5-class voice agent), GPT-Realtime-Translate (70 → 13 languages), GPT-Realtime-Whisper (streaming STT). USER asked whether to migrate Clicky's stack.
+
+**Decision:** Decline migration. Cost regression (~9× per turn vs current AssemblyAI U3 + Sonnet 4.6 + Cartesia stack: $0.15 vs $0.016 per typical 30s interaction) + architecture mismatch with vision-tag pointing differentiator (Realtime API value-prop is speech-to-speech without intermediate text; Clicky needs intermediate `[POINT:x,y:label]` structured output anchored to a screenshot) + would undo Sprint 4 multi-provider abstraction (collapse to single OpenAI vendor right after shipping the dropdown UX). GPT-Realtime-Translate ($0.034/min, 70 input languages, no Cartesia/ElevenLabs equivalent) flagged for Phase 2 "translation buddy" mode evaluation only.
+
+**References:** Research brief in 2026-05-08 chat session (general-purpose agent dispatch). OpenAI announcement coverage: TheTechPortal, 9to5Mac, SQ Magazine, The Decoder. Pricing: openai.com/api/pricing.
+
+---
+
 ## 2026-05-07: Sprint 4 ship-gate UX refinements (first-audible-word log + plain-English privacy line)
 
 **Context:** Two USER-driven refinements after the Sprint 4 manual UX verification:
