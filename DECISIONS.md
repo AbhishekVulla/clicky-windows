@@ -10,6 +10,58 @@ For **how** → [CLAUDE.md](CLAUDE.md)
 
 ---
 
+## 2026-05-07: Sprint 4 ship-gate UX refinements (first-audible-word log + plain-English privacy line)
+
+**Context:** Two USER-driven refinements after the Sprint 4 manual UX verification:
+
+1. USER's bundled-EXE per-interaction debug log showed `[+13307ms] CLAUDE: done` and reasonably read it as "13s latency." That timestamp is the END of the Claude stream, NOT the moment the user actually hears something — TTS streams sentence-by-sentence and starts speaking on the first `.`/`!`/`?` boundary, ~1.7s after release per [DECISIONS.md 2026-04-20]. But the per-interaction `interaction.log` had no log line for first-audible-word, so the real perceived latency was invisible. USER asked: *"just add the log bruh."*
+2. USER tested the Settings dialog from the bundled install and flagged `"No server, no telemetry."` as jargon — non-technical users don't know what telemetry means. Locked replacement (USER pick from 3 candidates 2026-05-07): `"Nothing leaves your machine."`
+
+**Decision:** One combined commit (`3d3f5a0`) covering both. 5 files, +157/−3.
+
+**(1) First-audible-word log via one-shot armed callback.** New `arm_first_chunk_callback(cb)` method on the `TTS` abstract base, default-implemented as `self._first_chunk_callback = cb`. Both `CartesiaSonicTTS.__init__` and `ElevenLabsTTS.__init__` add a `_first_chunk_callback: Callable[[], None] | None = None` slot. In each `_play_response` chunk loop, AFTER the first successful `play(samples)`, fire-and-clear:
+
+```python
+play(samples)
+cb = self._first_chunk_callback
+if cb is not None:
+    self._first_chunk_callback = None
+    try:
+        cb()
+    except Exception:
+        pass  # never let a logging error break audio
+```
+
+`app.py:_pipeline_worker` arms the callback once per interaction, just before entering the Claude streaming context: `self._tts.arm_first_chunk_callback(lambda: dbg.log("TTS: first audible chunk played"))`. `dbg` captures by reference; `DebugSession.log` prepends elapsed-ms automatically. Slot clears after firing → subsequent sentences in the same interaction don't re-fire; next interaction re-arms.
+
+3 new tests cover Cartesia + ElevenLabs callback firing + slot-clearing + exception-resilience (a callback that raises must NOT break audio playback). Test count 255 → 258.
+
+**(2) Privacy line:** `"No server, no telemetry."` → `"Nothing leaves your machine."` at `settings_dialog.py:180-186`. Test `TestSettingsDialogRender::test_dialog_has_privacy_line` updated to tolerate both old and new wording — asserts on `"encrypted"` (stable) AND any of `"leaves your machine"` / `"no telemetry"` / `"no server"` so a future copy tweak doesn't break the test silently.
+
+**Alternatives considered:**
+
+1. *pyqtSignal from TTS thread → main thread → log via dbg* — more thread-safe than direct `dbg.log` call from playback thread. Rejected: `DebugSession.log` is a single-line file-IO append (atomic in CPython), and we never read the log from another thread within the same interaction. Overkill for a diagnostic log.
+2. *Console `print()` instead of `dbg.log()`* — would land in stdout, not the per-interaction debug folder. Rejected: defeats the diagnostic purpose; user wants the timing in the same `interaction.log` they were already reading.
+3. *Three privacy-line candidates: "Nothing leaves your machine." / "Clicky doesn't track or upload anything." / "We don't collect or send any data."* — USER picked option 1 as cleanest. Locked.
+4. *Reusing the existing `tts.stop()` to know when audio kicked in* — semantically wrong; `stop()` is for cancellation, not for "audio just started." First-chunk-callback is the right primitive.
+
+**Consequences:**
+
+- Per-interaction debug log now surfaces first-audible-word timing directly. Closes the measurement gap that prompted the latency confusion. Future debugging of perceived-latency complaints can read this number without instrumentation work.
+- Privacy line is plain English with the same no-egress assurance — no jargon, no "what is telemetry?" friction.
+- Test suite: 255 → 258 (+3). Bundle still 280 MB, Setup.exe still 87 MB (no new SDK deps, only logic + UI tweaks).
+- The one-shot armed-callback pattern is reusable for future per-interaction TTS-event hooks (e.g. "first-sentence-finished," "playback-complete") without further breaking changes to the TTS abstract base.
+
+**References:**
+
+- Commit `3d3f5a0`
+- TTS callback pattern: `tts.py` — `arm_first_chunk_callback` on the `TTS` abstract base + `_first_chunk_callback` slot in `CartesiaSonicTTS` + `ElevenLabsTTS`
+- `app.py:566-577` — arming site (just before `with self._ai.ask_stream(...)` block)
+- `settings_dialog.py:180-186` — privacy QLabel text
+- USER decisions recorded in plan file `streamed-tumbling-sunbeam.md` "STATUS (2026-05-07 ship-gate punch list)" section
+
+---
+
 ## 2026-05-06: Sprint 4 — Multi-provider settings UX + privacy framing + ElevenLabs TTS (planning ADR; not yet shipped)
 
 **Context:** USER pushback after Sprint 3.8 verification revealed three coupled UX problems that the original Sprint 4 plan ("drop a 4th OPTIONAL `ELEVENLABS_API_KEY` field next to the existing 3 required fields") would have compounded:
@@ -77,6 +129,8 @@ Sample rate becomes per-provider (Cartesia 44100, ElevenLabs 22050) — each TTS
 - Free-tier signup: https://elevenlabs.io/app/sign-up (10k chars/month, no credit card)
 - Lesson memory: `feedback_ceremony_vs_lean.md` (full ceremony was right call for Sprint 4)
 - Architecture pattern reference: `tts.CartesiaSonicTTS` Option B prefetch+playback (commit `4291401`)
+
+**Sprint 4 SHIPPED 2026-05-07** — 11 TDD-task commits + 1 review-feedback commit landed (`e1d84f9..a6d1ecf`). Final test count came in at 255/255 (plan estimate ~254, came in +1 because Task 3 had 6 ElevenLabsTTS tests not the planned 5). `/review` (`superpowers:code-reviewer`) cleared with 0 T1 issues; T2-1 (stale provider_id MessageBox) + T2-3 (dated voice/model verification anchors) applied as commit `a6d1ecf`. Bundle grew 275 MB → 280 MB (+5 MB elevenlabs SDK + transitive deps); Setup.exe 84 MB → 87 MB (+3 MB compressed). Construction-order Qt-signal hang caught + fixed in-flight at commit `d8c6390` — `_update_save_enabled` got a `hasattr(self, "_buttons")` guard because `setText()` during `_refresh_key_field_for_category` was firing `textChanged` BEFORE the QDialogButtonBox was constructed (Qt swallowed the AttributeError → tests hung). USER manual UX gate verified the dialog renders correctly + "Get key →" buttons open the right URLs; live voice-swap test (Task 11 step 5-7) deferred — USER doesn't have an ElevenLabs key, locked decision was to ship now since 10 mock + factory tests cover the contract.
 
 ---
 
