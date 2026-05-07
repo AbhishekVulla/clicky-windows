@@ -565,6 +565,16 @@ class ClickyApp(QObject):
             dbg.log("CLAUDE: streaming started...")
             _log("Asking Claude...")
 
+            # Arm one-shot first-audible-word log. Fires on the first
+            # successful sounddevice.play(samples) in the TTS playback
+            # worker — closes the gap between "CLAUDE: streaming started"
+            # (when we open the HTTP connection) and the actual moment
+            # the user hears something. Per-interaction (slot clears
+            # after firing once); next interaction re-arms.
+            self._tts.arm_first_chunk_callback(
+                lambda: dbg.log("TTS: first audible chunk played")
+            )
+
             # Sentence-level TTS streaming (Path A Task 6). Flush complete
             # sentences from the buffer as each .!? boundary arrives, so TTS
             # starts on sentence 1 (~1200ms into Claude stream) instead of

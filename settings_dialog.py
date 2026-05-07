@@ -176,9 +176,11 @@ class SettingsDialog(QDialog):
 
         # Lean privacy framing — one sentence (USER decision 2026-05-06,
         # rejected the multi-line splash version as too loud / suspicious).
+        # Wording revised 2026-05-07 from "No server, no telemetry." after
+        # USER feedback that "telemetry" is jargon for non-tech users.
         privacy = QLabel(
             "🔒 Stored locally, encrypted via Windows Credential Manager. "
-            "No server, no telemetry."
+            "Nothing leaves your machine."
         )
         privacy.setWordWrap(True)
         privacy.setStyleSheet("color: gray; padding-bottom: 4px;")

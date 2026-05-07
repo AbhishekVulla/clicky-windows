@@ -153,11 +153,18 @@ class TestSettingsDialogRender:
         labels = [w for w in dlg.findChildren(QLabel)]
         privacy_texts = [
             l.text() for l in labels
-            if "encrypted" in l.text() or "telemetry" in l.text()
+            if "encrypted" in l.text()
         ]
         assert len(privacy_texts) >= 1, "Privacy line not rendered"
         privacy = privacy_texts[0]
-        assert "no server" in privacy.lower() or "no telemetry" in privacy.lower()
+        # Tolerate the historical phrasings ("No server, no telemetry") and
+        # the current plain-English one ("Nothing leaves your machine.") so
+        # a future copy tweak doesn't break the test silently.
+        assert (
+            "leaves your machine" in privacy.lower()
+            or "no telemetry" in privacy.lower()
+            or "no server" in privacy.lower()
+        ), f"privacy line does not assert no-egress; got: {privacy!r}"
 
     def test_dialog_has_three_dropdowns(self, qapp, mocker):
         mocker.patch("settings_dialog.keyring.get_password", return_value=None)

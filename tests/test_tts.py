@@ -674,3 +674,102 @@ class TestCreateTTSClient:
         from tts import create_tts_client, CartesiaSonicTTS
         client = create_tts_client(provider="Cartesia", api_key="x")
         assert isinstance(client, CartesiaSonicTTS)
+
+
+# --- First-audible-word callback (Sprint 4 ship-gate UX) --------------------
+
+
+class TestFirstChunkCallback:
+    """``arm_first_chunk_callback`` arms a one-shot callback that fires
+    on the first successful sounddevice.play(samples) per interaction.
+    Used by app.py to log first-audible-word latency. Slot must clear
+    after firing so subsequent sentences in the same interaction do NOT
+    re-fire — the next interaction re-arms a fresh callback."""
+
+    def test_cartesia_first_chunk_callback_fires_once_then_clears(self):
+        from unittest.mock import MagicMock
+        from tts import CartesiaSonicTTS
+
+        fake_client = MagicMock(name="fake_cartesia_client")
+        fake_client.tts.generate.return_value.iter_bytes.return_value = iter(
+            [b"\x00" * 16, b"\x00" * 16, b"\x00" * 16]  # 3 chunks
+        )
+        fake_play = MagicMock(name="fake_play")
+        tts_obj = CartesiaSonicTTS(
+            api_key="test-key",
+            client_factory=lambda *, api_key: fake_client,
+            player_factory=lambda *, sample_rate: (fake_play, None),
+        )
+        calls = []
+        tts_obj.arm_first_chunk_callback(lambda: calls.append("fired"))
+
+        tts_obj.speak("hello")
+        if tts_obj._current_thread:
+            tts_obj._current_thread.join(timeout=5)
+
+        assert calls == ["fired"], (
+            f"Expected callback to fire exactly once across 3 chunks, got {calls}"
+        )
+        assert tts_obj._first_chunk_callback is None, (
+            "Callback slot must clear after firing"
+        )
+
+    def test_elevenlabs_first_chunk_callback_fires_once_then_clears(self):
+        from unittest.mock import MagicMock
+        from tts import ElevenLabsTTS
+
+        fake_client = MagicMock(name="fake_elevenlabs_client")
+        # 3 int16 PCM chunks (each 8 samples = 16 bytes)
+        fake_client.text_to_speech.stream.return_value = iter(
+            [b"\x00\x00" * 8, b"\x00\x00" * 8, b"\x00\x00" * 8]
+        )
+        fake_play = MagicMock(name="fake_play")
+        tts_obj = ElevenLabsTTS(
+            api_key="test-key",
+            client_factory=lambda *, api_key: fake_client,
+            player_factory=lambda *, sample_rate: (fake_play, None),
+        )
+        calls = []
+        tts_obj.arm_first_chunk_callback(lambda: calls.append("fired"))
+
+        tts_obj.speak("hello")
+        if tts_obj._current_thread:
+            tts_obj._current_thread.join(timeout=5)
+
+        assert calls == ["fired"], (
+            f"Expected callback to fire exactly once across 3 chunks, got {calls}"
+        )
+        assert tts_obj._first_chunk_callback is None, (
+            "Callback slot must clear after firing"
+        )
+
+    def test_cartesia_callback_exception_does_not_break_playback(self):
+        """If the callback raises, the playback loop must continue
+        (e.g. dbg.log failing must not silence the user)."""
+        from unittest.mock import MagicMock
+        from tts import CartesiaSonicTTS
+
+        fake_client = MagicMock()
+        fake_client.tts.generate.return_value.iter_bytes.return_value = iter(
+            [b"\x00" * 16, b"\x00" * 16]
+        )
+        fake_play = MagicMock(name="fake_play")
+        tts_obj = CartesiaSonicTTS(
+            api_key="test-key",
+            client_factory=lambda *, api_key: fake_client,
+            player_factory=lambda *, sample_rate: (fake_play, None),
+        )
+
+        def boom():
+            raise RuntimeError("simulated dbg.log failure")
+
+        tts_obj.arm_first_chunk_callback(boom)
+        tts_obj.speak("hello")
+        if tts_obj._current_thread:
+            tts_obj._current_thread.join(timeout=5)
+
+        # Both chunks should have played despite the callback raising.
+        assert fake_play.call_count >= 2, (
+            f"Expected >=2 play() calls; callback exception should not break "
+            f"playback. Got {fake_play.call_count}"
+        )

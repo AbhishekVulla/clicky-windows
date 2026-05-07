@@ -95,6 +95,20 @@ class TTS(ABC):
         """
         ...
 
+    def arm_first_chunk_callback(self, cb: Callable[[], None]) -> None:
+        """Arm a one-shot callback that fires when the next audible chunk
+        starts playing.
+
+        Used by ``app.py:_pipeline_worker`` to log the first-audible-word
+        timestamp per interaction — closes the measurement gap between
+        ``CLAUDE: streaming started`` and the moment the user actually
+        hears something. Subclasses override only if they need custom
+        slot semantics; the default stores the callback on
+        ``self._first_chunk_callback`` and the playback loop consumes +
+        clears it.
+        """
+        self._first_chunk_callback = cb
+
 
 # --- CartesiaSonicTTS concrete implementation --------------------------------
 
@@ -150,6 +164,7 @@ class CartesiaSonicTTS(TTS):
         self._current_thread: threading.Thread | None = None
         self._active_response = None  # Cartesia HTTP response, closed by stop()
         self._active_audio_stream = None  # sounddevice stream, aborted by stop()
+        self._first_chunk_callback: Callable[[], None] | None = None  # one-shot, armed by app.py
 
         # Option B: HTTP double-buffer. _sentence_queue feeds the prefetch
         # worker which calls generate() (blocks for full audio body download,
@@ -370,6 +385,18 @@ class CartesiaSonicTTS(TTS):
                 if samples.size == 0:
                     continue
                 play(samples)
+                # Fire one-shot first-chunk callback after the first
+                # successful play() — this is the moment the user actually
+                # hears something. Used by app.py to log first-audible-word
+                # latency per interaction. Subsequent sentences in the same
+                # interaction don't re-fire (callback slot cleared).
+                cb = self._first_chunk_callback
+                if cb is not None:
+                    self._first_chunk_callback = None
+                    try:
+                        cb()
+                    except Exception:
+                        pass  # never let a logging error break audio
         except Exception as exc:
             if cancel.is_set():
                 return
@@ -497,6 +524,7 @@ class ElevenLabsTTS(TTS):
         self._cancel_event = threading.Event()
         self._current_thread: threading.Thread | None = None
         self._active_audio_stream = None  # sounddevice stream, aborted by stop()
+        self._first_chunk_callback: Callable[[], None] | None = None  # one-shot, armed by app.py
 
         # Option B: prefetch+playback two-thread architecture, mirrors
         # CartesiaSonicTTS verbatim except no _active_response (elevenlabs
@@ -645,6 +673,14 @@ class ElevenLabsTTS(TTS):
                 if samples.size == 0:
                     continue
                 play(samples)
+                # Fire one-shot first-chunk callback (mirrors Cartesia path).
+                cb = self._first_chunk_callback
+                if cb is not None:
+                    self._first_chunk_callback = None
+                    try:
+                        cb()
+                    except Exception:
+                        pass  # never let a logging error break audio
         except Exception as exc:
             if cancel.is_set():
                 return
