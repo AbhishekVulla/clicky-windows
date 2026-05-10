@@ -11,10 +11,16 @@
 <p align="center">
   <a href="https://github.com/AbhishekVulla/clicky-windows/actions/workflows/test.yml"><img src="https://github.com/AbhishekVulla/clicky-windows/actions/workflows/test.yml/badge.svg" alt="tests" /></a>
   <img src="https://img.shields.io/badge/license-MIT-f4d35e" alt="MIT" />
-  <img src="https://img.shields.io/badge/python-3.13-2563eb" alt="Python 3.13" />
-  <img src="https://img.shields.io/badge/tests-258%20passing-22c55e" alt="258 tests passing" />
-  <img src="https://img.shields.io/badge/installer-87%20MB-7c3aed" alt="87 MB installer" />
   <img src="https://img.shields.io/badge/platform-Windows%2010%2F11-0078d4" alt="Windows 10/11" />
+</p>
+
+<p align="center">
+  <a href="https://github.com/AbhishekVulla/clicky-windows/releases/latest">Download</a> &middot;
+  <a href="#what-it-does">What it does</a> &middot;
+  <a href="#how-it-works">How it works</a> &middot;
+  <a href="#engineering-decisions-worth-highlighting">Engineering</a> &middot;
+  <a href="#privacy">Privacy</a> &middot;
+  <a href="#license-and-support">License</a>
 </p>
 
 > *"I just want to learn by doing."*
@@ -22,20 +28,24 @@
 
 The #1 community request on [Farza's Clicky](https://github.com/farzaa/clicky) was a Windows version. I shipped it, plus the two features users asked for that the original does not have: persistent per-app memory, and a drop-in knowledge folder so Clicky understands obscure or company-internal software Claude does not already know about.
 
-<!-- TODO: replace this placeholder with the YouTube demo link or assets/demo.gif once recorded -->
 <p align="center">
-  <em>Demo video coming soon. In the meantime, the section below walks through what it does.</em>
+  <a href="https://youtu.be/ajIO6p7pR6M">
+    <img src="assets/screenshots/demo-thumbnail.jpg" alt="Watch the 90-second demo on YouTube" width="640" />
+  </a>
+</p>
+<p align="center">
+  <em>90 seconds. Me trying to navigate Granta EduPack for a class project — Clicky knows my project, sees my screen, points at where to click.</em>
 </p>
 
 ## What it does
 
-You are working in some app. Excel, Fusion 360, Blender, Photoshop, a niche piece of materials engineering software you have never opened before. You hit a wall. You hold `Ctrl+Alt+Space`, ask a question out loud, release. Within about 1.7 seconds you hear the answer, and a blue cursor lands on the exact button or menu item you needed to click.
+You are working in some app. You hit a wall. You hold `Ctrl+Alt+Space`, ask a question out loud, release. Within about 1.7 seconds you hear the answer, and a blue cursor lands on the exact button or menu item you needed to click.
 
-Three concrete examples:
+Three real ways people are using it:
 
-- **In Excel.** Hold the hotkey, say *"how do I make this a pivot table"*, release. Clicky sees your spreadsheet, walks you through Insert → PivotTable, and points at the menu while it talks.
-- **In Fusion 360.** Same thing. *"How do I extrude this sketch?"* Clicky sees the sketch, points at the Extrude tool in the ribbon, narrates the steps.
-- **In Granta EduPack** (or any niche/proprietary software Claude has never seen training data for). Drop a markdown file with the docs into `~/Documents/Clicky Wiki/edupack.exe.md`. Clicky reads it on every interaction and now knows your software better than a generic AI assistant ever could.
+- **Live chart analysis on TradingView.** *"What's this MACD divergence telling me?"* Clicky reads the chart and walks you through the indicator, pointing at the relevant peaks.
+- **Niche or company-internal software the AI does not know.** Drop a markdown file with the docs into `~/Documents/Clicky Wiki/<app>.exe.md` and Clicky becomes an expert. I do this for Granta EduPack, a materials-engineering tool I had to use for an SUTD class. Clicky now points at things in EduPack like a TA who already read the manual.
+- **Building a first app on Lovable, Bolt, Replit, or a similar AI-coding platform.** Don't know what a state hook is? Hit the hotkey, ask, Clicky reads your editor and explains what is broken and where to click.
 
 Everything else, including your screenshots and your voice, runs through your own API keys and goes directly to Anthropic / AssemblyAI / Cartesia or ElevenLabs. Nothing routes through me.
 
@@ -51,7 +61,11 @@ Everything else, including your screenshots and your voice, runs through your ow
 
 Free tier signups exist for all three. Total cost for a typical 30-second interaction is around $0.016.
 
-<!-- TODO: USER to add screenshots: assets/screenshots/installer.png, assets/screenshots/settings-dialog.png -->
+<p align="center">
+  <img src="assets/screenshots/settings-dialog.png" alt="First-launch API keys dialog" width="520" />
+  <br />
+  <em>First-launch dialog. Three keys, one provider per category.</em>
+</p>
 
 ## How it works
 
@@ -116,7 +130,8 @@ The hotkey listener observes Ctrl+Alt+Space without consuming the keys. On relea
 
 The interesting parts. Each of these is a problem I hit, the gotcha I had to figure out, and the measured win.
 
-### 1. Sub-2s first-audible-word despite three sequential APIs
+<details>
+<summary><strong>1. Sub-2s first-audible-word despite three sequential APIs</strong> — parallel kick-off + sentence streaming + Cartesia double-buffer. ~3.7s naive → ~1.7s measured. Click to expand.</summary>
 
 The naive pipeline is hotkey → STT (wait) → screenshot (wait) → Claude vision (wait) → TTS (wait). That is roughly 3.7 seconds of latency for a one-sentence response. Unusable.
 
@@ -128,7 +143,34 @@ What fixed it:
 
 Measured first-audible-word for a multi-sentence response: about 1.7 seconds. For a single-sentence response it is closer to 4-6 seconds because the first-sentence TTFB dominates and there is nothing to overlap.
 
-### 2. Win32 layered click-through overlay, per-monitor DPI-aware
+```text
+NAIVE SERIAL (~3.7s)                          OPTIMIZED (~1.7s)
+
+t=0     STT finalize       (500ms)            t=0     STT finalize       (466ms)  ─┐
+        │                                             │                            │
+t=500   Screen capture     (50ms)             t=0     Screen capture     (50ms)    │
+        │                                             │                            │ parallel
+t=550   Claude vision FULL (2000ms)           t=0     Memory recall      (10ms)    │ kick-off
+        │                                             │                            │
+t=2550  TTS first sentence (1000ms)           t=0     KB lookup          (10ms)   ─┘
+        │                                             │
+t=3550  🔊  first audible word                t=466   Claude streams s1  (800ms)
+                                                      │
+                                              t=1266  TTS prefetch s1    (200ms)
+                                                      │
+                                              t=1466  🔊  first audible word
+
+
+Three wins stacked:
+  (1) parallel kick-off  → 4 tasks start at t=0, wait for slowest (STT 466ms), not the sum
+  (2) sentence streaming → TTS begins on sentence 1 while Claude generates sentence 2+
+  (3) Option B buffer    → prefetch + playback worker threads, inter-sentence gap ≈ 0
+```
+
+</details>
+
+<details>
+<summary><strong>2. Win32 layered click-through overlay, per-monitor DPI-aware</strong> — one QWidget per physical screen sidesteps Qt 6's mixed-DPI gotcha; ctypes flags applied AFTER show(). Click to expand.</summary>
 
 The blue cursor that points at things has to do four things at once:
 - always on top
@@ -140,7 +182,10 @@ Qt 6 has a known gotcha here. If you make one giant overlay that spans the virtu
 
 The click-through behavior comes from Win32 layered-window flags applied via `ctypes` (`WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`). They have to be applied AFTER `show()`, OR'd in (never overwritten), and followed by `SetWindowPos(SWP_FRAMECHANGED)`. Get any of those wrong and the overlay either disappears, eats clicks, or starts blocking the taskbar.
 
-### 3. A hotkey that does not break your typing
+</details>
+
+<details>
+<summary><strong>3. A hotkey that does not break your typing</strong> — observe-only pynput Listener (suppress=False is load-bearing); three-step pivot to find an Excel-safe combo. Click to expand.</summary>
 
 `pynput.Listener(suppress=False)` is observe-only. It sees keypresses, the OS still delivers them to whatever app is focused. This is load-bearing. Setting `suppress=True` installs a `WH_KEYBOARD_LL` hook that globally blocks every keystroke from reaching anything. Your typing breaks system-wide. Do not do this.
 
@@ -152,7 +197,10 @@ The hotkey choice itself was a three-step pivot:
 
 A clean solution for Alt+Space exists: Win32 `RegisterHotKey` claims the combo at the OS level so other apps never see it. That is a Phase 1.5 drop-in replacement.
 
-### 4. Multi-provider TTS via progressive-disclosure UX
+</details>
+
+<details>
+<summary><strong>4. Multi-provider TTS via progressive-disclosure UX</strong> — 3-category dropdown (LLM/STT/TTS) instead of 6 password fields; ElevenLabsTTS mirrors Cartesia with 3 deliberate divergences. Click to expand.</summary>
 
 The naive way to add a second TTS provider is to add another field to the settings dialog. Three required keys becomes four. Then you add a second STT provider and it becomes five. By the time you have one option per category you are at six required password fields on a first-launch dialog. That is well past the documented onboarding-abandonment cliff.
 
@@ -166,7 +214,10 @@ The `ElevenLabsTTS` class mirrors `CartesiaSonicTTS` Option B prefetch+playback 
 
 Sample rate is per-provider (Cartesia 44.1kHz, ElevenLabs 22.05kHz) because ElevenLabs free tier only ships 22.05kHz PCM. Each subclass owns its own `sample_rate` attribute and constructs its own `sounddevice.OutputStream`. Switching providers in the dialog requires a Clicky restart but no code change.
 
-### 5. Single-instance mutex preventing the multi-PTT chaos
+</details>
+
+<details>
+<summary><strong>5. Single-instance mutex preventing the multi-PTT chaos</strong> — observe-only hook means N processes = N overlapping voices; canonical Win32 named-mutex (Spotify/Slack/Discord pattern) acquired before QApplication. Click to expand.</summary>
 
 A user reported double-clicking the installed Start Menu shortcut and seeing three blue cursor icons stacked in the system tray. Worse, every Ctrl+Alt+Space press triggered three overlapping voice responses to the same question.
 
@@ -182,7 +233,10 @@ Three ctypes details that all matter:
 
 Implementation in [`app.py`](app.py).
 
-### 6. Markdown memory and a drop-in knowledge folder
+</details>
+
+<details>
+<summary><strong>6. Markdown memory and a drop-in knowledge folder</strong> — two stores, plain-text .md per app, no vector DB; auto-learned memory tail + user-uploadable KB at second cache_control breakpoint. Click to expand.</summary>
 
 Two stores, both human-readable markdown, no vector DB.
 
@@ -190,7 +244,15 @@ Two stores, both human-readable markdown, no vector DB.
 
 **User-uploadable KB.** One `.md` file per app at `~/Documents/Clicky Wiki/<app>.exe.md`. Up to 60K characters get injected as a second `cache_control` breakpoint in the system prompt, marked as "authoritative reference for this app." This is how you teach Clicky niche or company-internal software Claude has never seen.
 
-The pattern is in the lineage of [Andrej Karpathy's LLM Wiki idea](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f). Deliberately simplified for runtime context injection rather than long-form synthesis. I considered shipping the full three-layer wiki + ingest + lint pipeline pattern early on and retracted it as overengineered for this use case. Per-app files do the job.
+<p align="center">
+  <img src="assets/screenshots/memory-graph.png" alt="Per-app memory files viewed as an Obsidian graph" width="560" />
+  <br />
+  <em>The memory folder viewed in Obsidian — one node per app Clicky has been used in. Each node is a plain-text Markdown file you can read or edit.</em>
+</p>
+
+The pattern is in the lineage of [Andrej Karpathy's LLM Wiki idea](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f). Deliberately simplified for runtime context injection rather than long-form synthesis.
+
+</details>
 
 ## Privacy
 
