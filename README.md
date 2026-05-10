@@ -9,6 +9,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/AbhishekVulla/clicky-windows/actions/workflows/test.yml"><img src="https://github.com/AbhishekVulla/clicky-windows/actions/workflows/test.yml/badge.svg" alt="tests" /></a>
   <img src="https://img.shields.io/badge/license-MIT-f4d35e" alt="MIT" />
   <img src="https://img.shields.io/badge/python-3.13-2563eb" alt="Python 3.13" />
   <img src="https://img.shields.io/badge/tests-258%20passing-22c55e" alt="258 tests passing" />
