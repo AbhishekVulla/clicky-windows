@@ -13,6 +13,13 @@
 # Internal strategy / backstage docs (kept in repo dir for active development)
 LAUNCH.md
 
+# Internal project docs (kept locally for active development, not pushed to public repo)
+CLAUDE.md
+DECISIONS.md
+ROADMAP.md
+PRD.md
+docs/superpowers/
+
 # Defensive: if historical files ever get moved back into the repo
 Clicky Windows Archive/
 
