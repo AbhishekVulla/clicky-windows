@@ -12,6 +12,7 @@
   <a href="https://github.com/AbhishekVulla/clicky-windows/actions/workflows/test.yml"><img src="https://github.com/AbhishekVulla/clicky-windows/actions/workflows/test.yml/badge.svg" alt="tests" /></a>
   <img src="https://img.shields.io/badge/license-MIT-f4d35e" alt="MIT" />
   <img src="https://img.shields.io/badge/platform-Windows%2010%2F11-0078d4" alt="Windows 10/11" />
+  <a href="https://github.com/AbhishekVulla/clicky-windows/releases"><img src="https://img.shields.io/github/downloads/AbhishekVulla/clicky-windows/total?label=installs&color=ed8936" alt="installs" /></a>
 </p>
 
 <p align="center">
@@ -19,6 +20,7 @@
   <a href="#what-it-does">What it does</a> &middot;
   <a href="#how-it-works">How it works</a> &middot;
   <a href="#engineering-decisions-worth-highlighting">Engineering</a> &middot;
+  <a href="#faq">FAQ</a> &middot;
   <a href="#privacy">Privacy</a> &middot;
   <a href="#license-and-support">License</a>
 </p>
@@ -47,19 +49,19 @@ Three real ways people are using it:
 - **Niche or company-internal software the AI does not know.** Drop a markdown file with the docs into `~/Documents/Clicky Wiki/<app>.exe.md` and Clicky becomes an expert. I do this for Granta EduPack, a materials-engineering tool I had to use for an SUTD class. Clicky now points at things in EduPack like a TA who already read the manual.
 - **Building a first app on Lovable, Bolt, Replit, or a similar AI-coding platform.** Don't know what a state hook is? Hit the hotkey, ask, Clicky reads your editor and explains what is broken and where to click.
 
-Everything else, including your screenshots and your voice, runs through your own API keys and goes directly to Anthropic / AssemblyAI / Cartesia or ElevenLabs. Nothing routes through me.
+Everything runs through your own API keys. Nothing routes through a proxy server. See [Privacy](#privacy) for the specifics.
 
 ## Quick install
 
 1. Download `Clicky-Windows-Setup-v0.1.0.exe` from the [Releases](https://github.com/AbhishekVulla/clicky-windows/releases) page (~87 MB).
 2. Run it. Windows SmartScreen will warn you (the EXE is unsigned for v0; SignPath OSS application is in flight). Click **More info** → **Run anyway**.
 3. Launch Clicky from the Start Menu. A modal asks for three API keys:
-   - [Anthropic](https://console.anthropic.com/settings/keys) for Claude Sonnet 4.6 (vision and reasoning)
+   - [Anthropic](https://console.anthropic.com/settings/keys) for Claude Sonnet 4.6 (vision and reasoning). v0.2.0+ users can pick **Ollama (local)** from the dropdown instead — see [FAQ](#faq) for the trade-offs.
    - [AssemblyAI](https://www.assemblyai.com/dashboard/signup) for Universal-3 streaming speech-to-text
    - [Cartesia](https://play.cartesia.ai/sign-in) for Sonic-3 voice output (or pick ElevenLabs from the dropdown)
 4. Hit `Ctrl+Alt+Space`, ask something, release.
 
-Free tier signups exist for all three. Total cost for a typical 30-second interaction is around $0.016.
+Free tier signups exist for all three cloud providers. Total cost for a typical 30-second interaction with the default Anthropic + AssemblyAI + Cartesia stack is around $0.016. Ollama (local) is free but slower and less accurate at pixel-pointing — see FAQ.
 
 <p align="center">
   <img src="assets/screenshots/settings-dialog.png" alt="First-launch API keys dialog" width="520" />
@@ -254,6 +256,28 @@ The pattern is in the lineage of [Andrej Karpathy's LLM Wiki idea](https://gist.
 
 </details>
 
+## FAQ
+
+<details>
+<summary><strong>Does Ollama work?</strong> — yes, via a two-stage grid locator. ~30-50px accuracy vs Claude's ~5px. Click to expand for setup steps.</summary>
+
+Select **Ollama (local)** from the LLM dropdown in Settings. Default Ollama host is `http://localhost:11434`. Default vision model is `llama3.2-vision`.
+
+Local vision models can't return precise pixel coordinates directly, so Clicky uses a **two-stage grid** when pointing: it draws a numbered 12×8 grid on the screenshot, asks the model "which cell?", then zooms into that area with a 6×6 sub-grid and asks again. Accuracy is roughly ±30-50 px vs Claude's ~5 px. Plenty for buttons, menus, links, icons. Worse for tightly-packed UIs (small text, dense toolbars).
+
+Tested with: `llama3.2-vision`, `qwen2.5-vl`, `llava`. Other vision-capable Ollama models should work but may need their own tuning.
+
+**Prerequisites:**
+
+1. Install Ollama from [ollama.com/download](https://ollama.com/download)
+2. Pull a vision model: `ollama pull llama3.2-vision`
+3. Make sure Ollama is running: `ollama serve` (usually auto-starts on install)
+4. In Clicky: open Settings → LLM dropdown → switch to **Ollama (local)**, save, restart Clicky
+
+The grid-locator pattern was directly inspired by [Bitshank-2338/clicky-windows](https://github.com/Bitshank-2338/clicky-windows) (MIT-licensed). Original implementation lives in their `ai/universal_locator.py`.
+
+</details>
+
 ## Privacy
 
 Nothing leaves your machine, except the things you explicitly send to your own APIs.
@@ -263,14 +287,6 @@ Nothing leaves your machine, except the things you explicitly send to your own A
 - Per-app memory and the KB folder live on your local disk in plain markdown. You can read them, edit them, delete them.
 
 This is the BYOK model from day 1, by deliberate contrast with the upstream Clicky which uses a Cloudflare Worker proxy that holds the API keys server-side.
-
-## Limitations
-
-- **Unsigned EXE.** Windows SmartScreen will warn the first time you run the installer. Click "More info" → "Run anyway". A SignPath Foundation OSS application is in flight; once approved, the warning will go away.
-- **Windows-only.** Per-monitor DPI awareness, layered click-through windows, and Win32 mutex are all Windows APIs. A Tauri rewrite for cross-platform is on the long-term roadmap, not this version.
-- **No auto-updater.** Check the Releases page for new versions. Auto-update is a Phase 2 add if real demand emerges.
-- **Multi-monitor works but my dev box is single-monitor.** The per-monitor architecture is correct in principle and tested via `tests/test_overlay.py`. End-to-end multi-monitor verification at scale is on the testing backlog.
-- **BYOK costs money.** A typical 30-second interaction is around $0.016. Free tiers exist for all three providers but you will eventually have to pay if you use it heavily.
 
 ## Acknowledgments
 

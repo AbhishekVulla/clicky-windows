@@ -1092,3 +1092,459 @@ class TestGeminiClientExtraCoverage:
         assert "preview" in msg.lower() or "gemini-2.5-flash" in msg.lower()
         # Original should be chained for debugging.
         assert isinstance(exc_info.value.__cause__, ConnectionError)
+
+
+# --- OllamaClient (v0.2.0 local LLM support) --------------------------------
+
+class TestOllamaClient:
+    """Tests for ai.OllamaClient — local LLM via Ollama /api/chat.
+
+    Mirrors the DI-mock pattern from TestGeminiClient: mock httpx.Client,
+    drive a fake streaming JSON-per-line response, assert on request shape
+    and emitted text deltas.
+
+    Interface contract (must match AnthropicClient + GeminiClient):
+        ask_stream(images=[(PIL.Image, label)], transcript, history, ...)
+        returns a context manager with .text_deltas() generator + .final_result()
+        method returning PointParseResult.
+    """
+
+    def _make_client_with_stream(self, mocker, json_lines):
+        """Build OllamaClient whose httpx stream yields the given JSON-encoded lines.
+
+        json_lines: list of dicts. Each dict is JSON-serialized + bytes-encoded
+        into the fake response's iter_lines() output. Last dict should have
+        {"done": True} to terminate cleanly.
+        """
+        from ai import OllamaClient
+
+        # Mock the response object yielded by httpx.Client.stream() context manager
+        mock_response = mocker.MagicMock(name="ollama_response")
+        mock_response.status_code = 200
+        mock_response.raise_for_status = mocker.MagicMock()
+
+        # iter_lines() yields the encoded JSON lines
+        import json as _json
+        encoded_lines = [_json.dumps(d).encode("utf-8") for d in json_lines]
+        mock_response.iter_lines = mocker.MagicMock(return_value=iter(encoded_lines))
+
+        # Context manager wrapping the response
+        mock_stream_cm = mocker.MagicMock(name="stream_cm")
+        mock_stream_cm.__enter__ = mocker.MagicMock(return_value=mock_response)
+        mock_stream_cm.__exit__ = mocker.MagicMock(return_value=None)
+
+        # httpx.Client() instance with .stream() method
+        mock_httpx_instance = mocker.MagicMock(name="httpx_client")
+        mock_httpx_instance.__enter__ = mocker.MagicMock(return_value=mock_httpx_instance)
+        mock_httpx_instance.__exit__ = mocker.MagicMock(return_value=None)
+        mock_httpx_instance.stream = mocker.MagicMock(return_value=mock_stream_cm)
+
+        # Patch httpx.Client at the call site
+        mocker.patch("ai.httpx.Client", return_value=mock_httpx_instance)
+
+        client = OllamaClient(host="http://localhost:11434", model_id="ollama/llama3.2-vision")
+        return client, mock_httpx_instance, mock_response
+
+    def test_construction_stores_host_and_strips_ollama_prefix(self, mocker):
+        from ai import OllamaClient
+        client = OllamaClient(host="http://localhost:11434", model_id="ollama/llama3.2-vision")
+        # Internally strips "ollama/" prefix because Ollama API wants just the model name
+        assert client.model_id == "llama3.2-vision"
+        assert client.host == "http://localhost:11434"
+
+    def test_construction_strips_trailing_slash_from_host(self, mocker):
+        from ai import OllamaClient
+        client = OllamaClient(host="http://localhost:11434/", model_id="ollama/llama3.2-vision")
+        assert client.host == "http://localhost:11434"
+
+    def test_construction_keeps_bare_model_name_unchanged(self, mocker):
+        """If user sets MODEL_ID=llama3.2-vision (bare, no prefix), keep as-is."""
+        from ai import OllamaClient
+        client = OllamaClient(host="http://localhost:11434", model_id="llama3.2-vision")
+        assert client.model_id == "llama3.2-vision"
+
+    def test_ask_stream_returns_context_manager_with_text_deltas(self, mocker):
+        """Happy path: streaming yields the model's text chunks via text_deltas()."""
+        from PIL import Image
+
+        client, mock_httpx, _ = self._make_client_with_stream(mocker, [
+            {"message": {"content": "click "}, "done": False},
+            {"message": {"content": "the save "}, "done": False},
+            {"message": {"content": "button."}, "done": False},
+            {"message": {"content": ""}, "done": True},
+        ])
+
+        img = Image.new("RGB", (100, 60), color="white")
+        with client.ask_stream(
+            images=[(img, "primary focus")],
+            transcript="where is save",
+            history=[],
+        ) as stream:
+            deltas = list(stream.text_deltas())
+
+        assert "".join(deltas) == "click the save button."
+
+    def test_ask_stream_sends_base64_images_in_user_message(self, mocker):
+        """Verify request payload contains base64-encoded JPEG in user.images."""
+        from PIL import Image
+
+        client, mock_httpx, _ = self._make_client_with_stream(mocker, [
+            {"message": {"content": "ok"}, "done": True},
+        ])
+
+        img = Image.new("RGB", (100, 60), color="white")
+        with client.ask_stream(
+            images=[(img, "primary focus (image dimensions: 100x60 pixels)")],
+            transcript="point at something",
+            history=[],
+        ) as stream:
+            list(stream.text_deltas())
+
+        # httpx.Client.stream(...) was called with the right payload
+        mock_httpx.stream.assert_called_once()
+        call_args = mock_httpx.stream.call_args
+        method = call_args.args[0] if call_args.args else call_args.kwargs.get("method")
+        url = call_args.args[1] if len(call_args.args) > 1 else call_args.kwargs.get("url")
+        payload = call_args.kwargs.get("json", {})
+
+        assert method == "POST"
+        assert url == "http://localhost:11434/api/chat"
+        assert payload["model"] == "llama3.2-vision"   # ollama/ prefix stripped
+        assert payload["stream"] is True
+
+        messages = payload["messages"]
+        # First message: Clicky system prompt
+        assert messages[0]["role"] == "system"
+        assert "clicky" in messages[0]["content"].lower()
+        # Last message: user with content text + images list (base64-encoded JPEGs)
+        user_msg = messages[-1]
+        assert user_msg["role"] == "user"
+        assert user_msg["content"] == "point at something"
+        assert "images" in user_msg
+        assert len(user_msg["images"]) == 1
+        # First (and only) image: base64 string, not bytes
+        assert isinstance(user_msg["images"][0], str)
+        # Sanity: looks like base64 (alphanumeric + / + =)
+        import re as _re
+        assert _re.match(r"^[A-Za-z0-9+/=]+$", user_msg["images"][0])
+
+    def test_ask_stream_404_raises_friendly_runtime_error(self, mocker):
+        """If Ollama returns 404, error message should tell user to ollama pull."""
+        from ai import OllamaClient
+        from PIL import Image
+
+        mock_response = mocker.MagicMock(name="ollama_404")
+        mock_response.status_code = 404
+        mock_response.raise_for_status = mocker.MagicMock()
+
+        mock_stream_cm = mocker.MagicMock()
+        mock_stream_cm.__enter__ = mocker.MagicMock(return_value=mock_response)
+        mock_stream_cm.__exit__ = mocker.MagicMock(return_value=None)
+
+        mock_httpx_instance = mocker.MagicMock()
+        mock_httpx_instance.__enter__ = mocker.MagicMock(return_value=mock_httpx_instance)
+        mock_httpx_instance.__exit__ = mocker.MagicMock(return_value=None)
+        mock_httpx_instance.stream = mocker.MagicMock(return_value=mock_stream_cm)
+        mocker.patch("ai.httpx.Client", return_value=mock_httpx_instance)
+
+        client = OllamaClient(host="http://localhost:11434", model_id="ollama/qwen2.5-vl")
+        img = Image.new("RGB", (50, 50))
+        with pytest.raises(RuntimeError) as exc_info:
+            with client.ask_stream(
+                images=[(img, "x")],
+                transcript="?",
+                history=[],
+            ) as stream:
+                list(stream.text_deltas())
+
+        msg = str(exc_info.value)
+        assert "qwen2.5-vl" in msg
+        assert "ollama pull" in msg.lower()
+
+    def test_ask_stream_skips_empty_content_chunks(self, mocker):
+        """Ollama emits metadata-only chunks with empty content — don't yield empties."""
+        from PIL import Image
+
+        client, _, _ = self._make_client_with_stream(mocker, [
+            {"message": {"content": ""}, "done": False},     # skip — empty
+            {"message": {"content": "hi"}, "done": False},
+            {"message": {"content": ""}, "done": True},      # skip + stop
+        ])
+
+        img = Image.new("RGB", (50, 50))
+        with client.ask_stream(
+            images=[(img, "x")],
+            transcript="?",
+            history=[],
+        ) as stream:
+            deltas = list(stream.text_deltas())
+
+        assert deltas == ["hi"]
+
+    def test_ask_stream_final_result_parses_point_tag(self, mocker):
+        """After streaming, final_result() returns PointParseResult with [POINT:x,y] extracted."""
+        from PIL import Image
+
+        client, _, _ = self._make_client_with_stream(mocker, [
+            {"message": {"content": "click the save button. "}, "done": False},
+            {"message": {"content": "[POINT:640,400:save]"}, "done": True},
+        ])
+
+        img = Image.new("RGB", (100, 60))
+        with client.ask_stream(
+            images=[(img, "primary focus")],
+            transcript="where is save",
+            history=[],
+        ) as stream:
+            list(stream.text_deltas())
+            result = stream.final_result()
+
+        assert result.coordinate == (640, 400)
+        assert result.element_label == "save"
+        assert result.spoken_text == "click the save button."
+
+    def test_ask_stream_history_converted_to_plain_strings(self, mocker):
+        """History stored in Anthropic content-block format must be flattened
+        to plain strings for Ollama's OpenAI-style messages array."""
+        from PIL import Image
+
+        client, mock_httpx, _ = self._make_client_with_stream(mocker, [
+            {"message": {"content": "ok"}, "done": True},
+        ])
+
+        history = [
+            {"role": "user", "content": [{"type": "text", "text": "what is html"}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "the skeleton."}]},
+        ]
+        img = Image.new("RGB", (100, 60))
+        with client.ask_stream(
+            images=[(img, "x")],
+            transcript="what about css",
+            history=history,
+        ) as stream:
+            list(stream.text_deltas())
+
+        payload = mock_httpx.stream.call_args.kwargs["json"]
+        messages = payload["messages"]
+        # system + 2 history + 1 new user = 4 messages
+        assert len(messages) == 4
+        assert messages[0]["role"] == "system"
+        assert messages[1] == {"role": "user", "content": "what is html"}
+        assert messages[2] == {"role": "assistant", "content": "the skeleton."}
+        assert messages[3]["role"] == "user"
+        assert messages[3]["content"] == "what about css"
+
+    def test_ask_stream_with_kb_content_concats_into_system(self, mocker):
+        """Ollama doesn't support multi-block cache_control; concat KB into system."""
+        from PIL import Image
+
+        client, mock_httpx, _ = self._make_client_with_stream(mocker, [
+            {"message": {"content": "ok"}, "done": True},
+        ])
+
+        img = Image.new("RGB", (50, 50))
+        with client.ask_stream(
+            images=[(img, "x")],
+            transcript="how do I plot Young's modulus",
+            history=[],
+            kb_content="GrantaEduPack docs: use the Chart Stage menu...",
+            kb_app_name="edupack.exe",
+        ) as stream:
+            list(stream.text_deltas())
+
+        payload = mock_httpx.stream.call_args.kwargs["json"]
+        system_msg = payload["messages"][0]
+        assert system_msg["role"] == "system"
+        # System prompt + KB block concatenated
+        assert "clicky" in system_msg["content"].lower()
+        assert "edupack" in system_msg["content"].lower()
+        assert "GrantaEduPack docs" in system_msg["content"]
+
+
+# --- Regression tests for superpowers:code-reviewer findings (v0.2.0) -------
+
+class TestOllamaClientReviewerFixes:
+    """Regression tests for the 3 blockers caught by superpowers:code-reviewer
+    on 2026-06-05 (the v0.2.0 sprint pre-handoff review)."""
+
+    def test_blocker1_closes_httpx_client_when_stream_raises(self, mocker):
+        """BLOCKER 1 regression: if httpx.Client.stream() raises (Ollama down,
+        DNS failure, ECONNREFUSED), the previously-opened httpx_client must
+        be closed — caller's `with` block never enters, so __exit__ won't
+        fire. Without the fix, every Ollama-unreachable interaction would
+        leak a connection pool.
+        """
+        from ai import OllamaClient, _OllamaStreamingResponse
+        from PIL import Image
+
+        # Mock httpx.Client that raises on .stream()
+        mock_httpx_instance = mocker.MagicMock()
+        mock_httpx_instance.__enter__ = mocker.MagicMock(return_value=mock_httpx_instance)
+        mock_httpx_instance.__exit__ = mocker.MagicMock(return_value=None)
+        mock_httpx_instance.stream = mocker.MagicMock(side_effect=ConnectionError("Connection refused"))
+        mocker.patch("ai.httpx.Client", return_value=mock_httpx_instance)
+
+        client = OllamaClient(host="http://localhost:11434", model_id="ollama/x")
+        img = Image.new("RGB", (50, 50))
+        with pytest.raises(ConnectionError):
+            with client.ask_stream(images=[(img, "x")], transcript="?", history=[]) as stream:
+                # Never reached — __enter__ raises
+                pass
+
+        # The crucial assertion: __exit__ WAS called on the httpx client to
+        # release the connection pool. Without the BLOCKER 1 fix this would
+        # be 0 (leak).
+        assert mock_httpx_instance.__exit__.call_count == 1
+
+    def test_blocker1_closes_httpx_client_when_raise_for_status_raises(self, mocker):
+        """BLOCKER 1 regression sibling: if response.raise_for_status() raises
+        (non-2xx, non-404 — e.g. 500 Internal Server Error), the httpx client
+        must still be closed before re-raising."""
+        from ai import OllamaClient
+        from PIL import Image
+
+        mock_response = mocker.MagicMock()
+        mock_response.status_code = 500
+        mock_response.raise_for_status = mocker.MagicMock(
+            side_effect=RuntimeError("500 Internal Server Error")
+        )
+
+        mock_stream_cm = mocker.MagicMock()
+        mock_stream_cm.__enter__ = mocker.MagicMock(return_value=mock_response)
+        mock_stream_cm.__exit__ = mocker.MagicMock(return_value=None)
+
+        mock_httpx_instance = mocker.MagicMock()
+        mock_httpx_instance.__enter__ = mocker.MagicMock(return_value=mock_httpx_instance)
+        mock_httpx_instance.__exit__ = mocker.MagicMock(return_value=None)
+        mock_httpx_instance.stream = mocker.MagicMock(return_value=mock_stream_cm)
+        mocker.patch("ai.httpx.Client", return_value=mock_httpx_instance)
+
+        client = OllamaClient(host="http://localhost:11434", model_id="ollama/x")
+        img = Image.new("RGB", (50, 50))
+        with pytest.raises(RuntimeError, match="500"):
+            with client.ask_stream(images=[(img, "x")], transcript="?", history=[]) as stream:
+                pass
+
+        # Both the stream context AND the httpx client must be cleaned up.
+        assert mock_stream_cm.__exit__.call_count == 1
+        assert mock_httpx_instance.__exit__.call_count == 1
+
+    def test_blocker3_final_result_safe_after_text_deltas_raises(self, mocker):
+        """BLOCKER 3 regression: if text_deltas() raises mid-stream (Ollama
+        crash, network drop), final_result() must NOT re-enter the iterator
+        and re-raise — it must return parse_point_tag of whatever was
+        accumulated before the failure (graceful degradation).
+        """
+        from ai import OllamaClient
+        from PIL import Image
+
+        # Build a stream that yields 2 valid chunks then raises ReadError-like
+        def failing_iter_lines():
+            yield b'{"message":{"content":"partial "},"done":false}'
+            yield b'{"message":{"content":"response"},"done":false}'
+            raise ConnectionError("network drop mid-stream")
+
+        mock_response = mocker.MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = mocker.MagicMock()
+        mock_response.iter_lines = mocker.MagicMock(return_value=failing_iter_lines())
+
+        mock_stream_cm = mocker.MagicMock()
+        mock_stream_cm.__enter__ = mocker.MagicMock(return_value=mock_response)
+        mock_stream_cm.__exit__ = mocker.MagicMock(return_value=None)
+
+        mock_httpx_instance = mocker.MagicMock()
+        mock_httpx_instance.__enter__ = mocker.MagicMock(return_value=mock_httpx_instance)
+        mock_httpx_instance.__exit__ = mocker.MagicMock(return_value=None)
+        mock_httpx_instance.stream = mocker.MagicMock(return_value=mock_stream_cm)
+        mocker.patch("ai.httpx.Client", return_value=mock_httpx_instance)
+
+        client = OllamaClient(host="http://localhost:11434", model_id="ollama/x")
+        img = Image.new("RGB", (50, 50))
+        with client.ask_stream(images=[(img, "x")], transcript="?", history=[]) as stream:
+            # Consume deltas — will raise mid-stream
+            collected = []
+            try:
+                for delta in stream.text_deltas():
+                    collected.append(delta)
+            except ConnectionError:
+                pass  # Expected
+            # The crucial assertion: final_result() must NOT re-raise the
+            # ConnectionError. It must return a PointParseResult with what
+            # was accumulated before the failure. Without BLOCKER 3 fix
+            # this would re-iterate text_deltas() and re-raise.
+            result = stream.final_result()
+            # Accumulated text was "partial response" (no [POINT:x,y] tag)
+            assert result.coordinate is None
+            assert "partial" in result.spoken_text
+            assert "response" in result.spoken_text
+
+
+# --- create_ai_client factory: Ollama dispatch (v0.2.0) -----------------------
+
+class TestCreateAIClientOllama:
+    """Extends TestCreateAIClient: factory now dispatches ollama/* prefix
+    (and bare llama*/qwen*/llava* names) to OllamaClient."""
+
+    def test_routes_ollama_prefix_to_ollama_client(self, mocker):
+        from ai import create_ai_client, OllamaClient
+        mocker.patch("ai.httpx")  # don't make real HTTP calls
+        client = create_ai_client(
+            model_id="ollama/llama3.2-vision",
+            api_key="",   # no key needed for local Ollama
+            ollama_host="http://localhost:11434",
+        )
+        assert isinstance(client, OllamaClient)
+        assert client.model_id == "llama3.2-vision"  # prefix stripped
+
+    def test_routes_bare_llama_prefix_to_ollama_client(self, mocker):
+        """If MODEL_ID=llama3.2-vision (Bitshank-style bare name), route to Ollama."""
+        from ai import create_ai_client, OllamaClient
+        mocker.patch("ai.httpx")
+        client = create_ai_client(
+            model_id="llama3.2-vision",
+            api_key="",
+            ollama_host="http://localhost:11434",
+        )
+        assert isinstance(client, OllamaClient)
+
+    def test_routes_bare_qwen_prefix_to_ollama_client(self, mocker):
+        from ai import create_ai_client, OllamaClient
+        mocker.patch("ai.httpx")
+        client = create_ai_client(
+            model_id="qwen2.5-vl",
+            api_key="",
+            ollama_host="http://localhost:11434",
+        )
+        assert isinstance(client, OllamaClient)
+
+    def test_routes_bare_llava_prefix_to_ollama_client(self, mocker):
+        from ai import create_ai_client, OllamaClient
+        mocker.patch("ai.httpx")
+        client = create_ai_client(
+            model_id="llava:13b",
+            api_key="",
+            ollama_host="http://localhost:11434",
+        )
+        assert isinstance(client, OllamaClient)
+
+    def test_ollama_routing_uses_default_host_when_not_passed(self, mocker):
+        from ai import create_ai_client, OllamaClient
+        mocker.patch("ai.httpx")
+        client = create_ai_client(
+            model_id="ollama/llama3.2-vision",
+            api_key="",
+            # ollama_host omitted — should fall back to default
+        )
+        assert isinstance(client, OllamaClient)
+        assert client.host == "http://localhost:11434"
+
+    def test_ollama_routing_does_not_break_existing_anthropic_dispatch(self, mocker):
+        """Regression check: Anthropic dispatch still works alongside new Ollama branch."""
+        from ai import create_ai_client, AnthropicClient
+        mocker.patch("ai.Anthropic")
+        client = create_ai_client(
+            model_id="anthropic/claude-sonnet-4-6",
+            api_key="sk-ant-test",
+        )
+        assert isinstance(client, AnthropicClient)

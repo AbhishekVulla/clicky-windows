@@ -89,6 +89,18 @@ _PROVIDER_CATEGORIES: tuple[_ProviderCategory, ...] = (
                 api_key_env_var="ANTHROPIC_API_KEY",
                 signup_url="https://console.anthropic.com/settings/keys",
             ),
+            # v0.2.0: Local Ollama. No API key — instead the "API key" field
+            # stores the OLLAMA_HOST URL (default http://localhost:11434).
+            # Repurposing the field as a host URL keeps the dialog uniform
+            # (single field per provider) without adding a separate "host"
+            # input row. Pixel-pointing for local vision models is handled
+            # by locator.py's two-stage grid pattern (see ai.OllamaClient).
+            _Provider(
+                provider_id="ollama",
+                display_name="Ollama (local)",
+                api_key_env_var="OLLAMA_HOST",
+                signup_url="https://ollama.com/download",
+            ),
         ),
         default_index=0,
     ),
@@ -343,6 +355,15 @@ def required_keys_present() -> bool:
     (resolved via resolve_setting on LLM_PROVIDER / STT_PROVIDER /
     TTS_PROVIDER). The probe is what the launcher uses to decide whether
     to show the modal at start.
+
+    v0.2.0: special-case for OLLAMA_HOST — it's a config setting with a
+    working default (http://localhost:11434), NOT an API key the user
+    must provide. If the selected LLM provider is Ollama, this probe
+    treats OLLAMA_HOST as always-present (because the default works
+    out-of-the-box when Ollama is running locally). Without this
+    special-case, picking Ollama in the Settings dropdown would force
+    the user back into the first-launch modal forever even though they
+    don't need any actual credential.
     """
     from config import resolve_api_key, resolve_setting
 
@@ -355,6 +376,12 @@ def required_keys_present() -> bool:
             (p for p in category.providers if p.provider_id == provider_id),
             category.providers[category.default_index],  # fallback if stored value invalid
         )
+        # v0.2.0: OLLAMA_HOST is a config knob with a working default, not
+        # a credential the user must supply. config.OLLAMA_HOST always
+        # resolves to at least "http://localhost:11434" via resolve_setting,
+        # so consider it always-present from the launcher's perspective.
+        if provider.api_key_env_var == "OLLAMA_HOST":
+            continue
         if not resolve_api_key(provider.api_key_env_var):
             return False
     return True

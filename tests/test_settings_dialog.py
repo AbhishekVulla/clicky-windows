@@ -102,11 +102,24 @@ class TestProviderCategoriesData:
         from settings_dialog import _PROVIDER_CATEGORIES
         assert [c.category_key for c in _PROVIDER_CATEGORIES] == ["LLM", "STT", "TTS"]
 
-    def test_llm_category_has_only_anthropic(self):
+    def test_llm_category_has_anthropic_and_ollama(self):
+        """v0.2.0: LLM category gained 'ollama' for local Ollama support.
+        Default still index 0 (Anthropic) so existing users see no behavior change."""
         from settings_dialog import _PROVIDER_CATEGORIES
         llm = next(c for c in _PROVIDER_CATEGORIES if c.category_key == "LLM")
-        assert [p.provider_id for p in llm.providers] == ["anthropic"]
-        assert llm.default_index == 0
+        assert [p.provider_id for p in llm.providers] == ["anthropic", "ollama"]
+        assert llm.default_index == 0  # Anthropic stays default
+
+    def test_ollama_llm_provider_has_host_field_not_api_key(self):
+        """Ollama is special: its 'api_key_env_var' slot stores OLLAMA_HOST
+        (the local server URL) instead of an API key. Default in config.py
+        points at http://localhost:11434 (Ollama's default binding)."""
+        from settings_dialog import _PROVIDER_CATEGORIES
+        llm = next(c for c in _PROVIDER_CATEGORIES if c.category_key == "LLM")
+        ollama = next(p for p in llm.providers if p.provider_id == "ollama")
+        assert ollama.api_key_env_var == "OLLAMA_HOST"
+        assert ollama.display_name == "Ollama (local)"
+        assert "ollama.com" in ollama.signup_url
 
     def test_stt_category_has_only_assemblyai(self):
         from settings_dialog import _PROVIDER_CATEGORIES
@@ -120,10 +133,16 @@ class TestProviderCategoriesData:
         assert tts.default_index == 0  # Cartesia default
 
     def test_each_provider_has_env_var_and_signup_url(self):
+        """Every provider has a non-empty display name + keyring slot + signup
+        URL. The slot is _API_KEY suffix for cloud providers, OLLAMA_HOST for
+        Ollama (no API key — local server, slot stores the host URL)."""
         from settings_dialog import _PROVIDER_CATEGORIES
         for category in _PROVIDER_CATEGORIES:
             for provider in category.providers:
-                assert provider.api_key_env_var.endswith("_API_KEY")
+                assert (
+                    provider.api_key_env_var.endswith("_API_KEY")
+                    or provider.api_key_env_var == "OLLAMA_HOST"
+                ), f"{provider.provider_id!r} has unexpected slot {provider.api_key_env_var!r}"
                 assert provider.signup_url.startswith("https://")
                 assert provider.display_name  # non-empty
 
@@ -192,13 +211,18 @@ class TestSettingsDialogRender:
         items = [tts_dropdown.itemText(i) for i in range(tts_dropdown.count())]
         assert items == ["Cartesia", "ElevenLabs"]
 
-    def test_llm_dropdown_has_one_option(self, qapp, mocker):
+    def test_llm_dropdown_has_anthropic_and_ollama(self, qapp, mocker):
+        """v0.2.0: LLM dropdown gained 'Ollama (local)' alongside Anthropic.
+        Anthropic stays the default (selected at index 0)."""
         mocker.patch("settings_dialog.keyring.get_password", return_value=None)
         from settings_dialog import SettingsDialog
         dlg = SettingsDialog()
         llm_dropdown = dlg._dropdowns["LLM"]
-        assert llm_dropdown.count() == 1
-        assert llm_dropdown.itemText(0) == "Anthropic"
+        assert llm_dropdown.count() == 2
+        items = [llm_dropdown.itemText(i) for i in range(llm_dropdown.count())]
+        assert items == ["Anthropic", "Ollama (local)"]
+        # Default selection is Anthropic
+        assert llm_dropdown.currentIndex() == 0
 
 
 class TestSettingsDialogDropdownSwap:

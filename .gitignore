@@ -70,3 +70,9 @@ desktop.ini
 
 # Plan files (point-in-time, not part of project)
 .claude/plans/
+
+# Reference implementations from competitor repos (study-only, do not commit)
+_refs/
+
+# v0.2.0 smoke test report (local-only, user reviews before push)
+SMOKE_TEST_v0.2.0.md

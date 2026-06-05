@@ -244,3 +244,4 @@ class TestStartLifecycle:
 
         assert fake_listener_class.call_count == 1
         assert fake_listener_instance.start.call_count == 1
+

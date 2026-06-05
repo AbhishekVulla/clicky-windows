@@ -793,3 +793,298 @@ class TestTTSProviderDispatch:
         provider, api_key = _resolve_tts_credentials()
         assert provider == "elevenlabs"
         assert api_key == "eleven_test"
+
+
+# --- Grid-locator fallback (v0.2.0 Ollama pixel-pointing) --------------------
+
+class TestLooksDirectional:
+    """Tests for app._looks_directional — cheap pre-filter before firing grid-locator."""
+
+    def test_returns_true_for_where_question(self):
+        from app import _looks_directional
+        assert _looks_directional("where is the save button") is True
+
+    def test_returns_true_for_click_command(self):
+        from app import _looks_directional
+        assert _looks_directional("click on settings") is True
+
+    def test_returns_true_for_show_me(self):
+        from app import _looks_directional
+        assert _looks_directional("show me how to open the inspector") is True
+
+    def test_returns_true_for_find(self):
+        from app import _looks_directional
+        assert _looks_directional("find the user dropdown") is True
+
+    def test_returns_false_for_conceptual_question(self):
+        from app import _looks_directional
+        assert _looks_directional("what is HTML") is False
+        assert _looks_directional("explain async iterators") is False
+
+    def test_returns_false_for_empty_or_none(self):
+        from app import _looks_directional
+        assert _looks_directional("") is False
+        assert _looks_directional(None) is False
+
+    def test_case_insensitive(self):
+        from app import _looks_directional
+        assert _looks_directional("WHERE is the menu") is True
+        assert _looks_directional("Click The Button") is True
+
+
+class TestMaybeLocateViaGrid:
+    """Tests for app._maybe_locate_via_grid — only fires for Ollama + directional + no coord."""
+
+    def _mock_capture(self, mocker):
+        """Build a fake capture.LabeledCapture with a 200x100 white screenshot."""
+        from PIL import Image
+        capture = mocker.MagicMock()
+        capture.image = Image.new("RGB", (200, 100), color="white")
+        capture.target_width = 200
+        capture.target_height = 100
+        capture.monitor = {"left": 0, "top": 0, "width": 200, "height": 100}
+        capture.scale_x = 1.0
+        capture.scale_y = 1.0
+        return capture
+
+    def _mock_result(self, coordinate):
+        """Build a fake PointParseResult with given coordinate (None or (x,y))."""
+        from ai import PointParseResult
+        return PointParseResult(
+            spoken_text="some response",
+            coordinate=coordinate,
+            element_label=None,
+            screen_number=None,
+        )
+
+    def test_skipped_when_ai_client_is_not_ollama(self, mocker):
+        """Anthropic / Gemini paths should never trigger grid-locator — they have
+        their own native [POINT:x,y] tag emission."""
+        from app import _maybe_locate_via_grid
+        from ai import AnthropicClient
+        mock_locator = mocker.patch("app.locate_via_grid")
+
+        mock_anthropic = mocker.MagicMock(spec=AnthropicClient)
+        capture = self._mock_capture(mocker)
+        result = self._mock_result(coordinate=None)
+
+        out = _maybe_locate_via_grid(
+            ai_client=mock_anthropic,
+            result=result,
+            cursor_capture=capture,
+            query="where is the save button",
+        )
+        assert out is None
+        mock_locator.assert_not_called()
+
+    def test_skipped_when_result_already_has_coordinate(self, mocker):
+        """If Claude returned a [POINT:x,y] tag, the locator is unnecessary."""
+        from app import _maybe_locate_via_grid
+        from ai import OllamaClient
+        mock_locator = mocker.patch("app.locate_via_grid")
+
+        mock_ollama = OllamaClient(host="http://localhost:11434", model_id="ollama/llama3.2-vision")
+        capture = self._mock_capture(mocker)
+        result = self._mock_result(coordinate=(640, 400))
+
+        out = _maybe_locate_via_grid(
+            ai_client=mock_ollama,
+            result=result,
+            cursor_capture=capture,
+            query="where is the save button",
+        )
+        assert out is None
+        mock_locator.assert_not_called()
+
+    def test_skipped_when_query_not_directional(self, mocker):
+        """Conceptual questions ('what is HTML') should skip grid-locator —
+        no UI element to point at, would waste 2 LLM calls."""
+        from app import _maybe_locate_via_grid
+        from ai import OllamaClient
+        mock_locator = mocker.patch("app.locate_via_grid")
+
+        mock_ollama = OllamaClient(host="http://localhost:11434", model_id="ollama/llama3.2-vision")
+        capture = self._mock_capture(mocker)
+        result = self._mock_result(coordinate=None)
+
+        out = _maybe_locate_via_grid(
+            ai_client=mock_ollama,
+            result=result,
+            cursor_capture=capture,
+            query="what is HTML",
+        )
+        assert out is None
+        mock_locator.assert_not_called()
+
+    def test_fires_for_ollama_no_coord_directional_query(self, mocker):
+        """Happy path: Ollama + no coord + directional query → locator runs."""
+        from app import _maybe_locate_via_grid
+        from ai import OllamaClient
+        mock_locator = mocker.patch("app.locate_via_grid", return_value=(450, 300))
+
+        mock_ollama = OllamaClient(host="http://localhost:11434", model_id="ollama/llama3.2-vision")
+        capture = self._mock_capture(mocker)
+        result = self._mock_result(coordinate=None)
+
+        out = _maybe_locate_via_grid(
+            ai_client=mock_ollama,
+            result=result,
+            cursor_capture=capture,
+            query="where is the save button",
+        )
+        assert out == (450, 300)
+        mock_locator.assert_called_once()
+        kwargs = mock_locator.call_args.kwargs
+        # Caller uses physical-coords convention (dpi_scale=1.0)
+        assert kwargs["dpi_scale"] == 1.0
+        assert kwargs["llm_client"] is mock_ollama
+        assert kwargs["query"] == "where is the save button"
+
+    def test_passes_correct_physical_size_and_origin(self, mocker):
+        """Locator receives monitor's physical_size + physical_origin from capture."""
+        from app import _maybe_locate_via_grid
+        from ai import OllamaClient
+        mock_locator = mocker.patch("app.locate_via_grid", return_value=(100, 50))
+
+        mock_ollama = OllamaClient(host="http://localhost:11434", model_id="ollama/llama3.2-vision")
+        capture = self._mock_capture(mocker)
+        # Override to simulate a secondary monitor
+        capture.monitor = {"left": 1920, "top": 0, "width": 2560, "height": 1440}
+        result = self._mock_result(coordinate=None)
+
+        _maybe_locate_via_grid(
+            ai_client=mock_ollama,
+            result=result,
+            cursor_capture=capture,
+            query="click the menu",
+        )
+        kwargs = mock_locator.call_args.kwargs
+        assert kwargs["physical_size"] == (2560, 1440)
+        assert kwargs["physical_origin"] == (1920, 0)
+
+    def test_logs_skip_reason_when_query_not_directional(self, mocker):
+        """When skipped due to non-directional query, dbg.log is called with reason."""
+        from app import _maybe_locate_via_grid
+        from ai import OllamaClient
+        mocker.patch("app.locate_via_grid")
+
+        mock_ollama = OllamaClient(host="http://localhost:11434", model_id="ollama/llama3.2-vision")
+        capture = self._mock_capture(mocker)
+        result = self._mock_result(coordinate=None)
+        mock_dbg = mocker.MagicMock()
+
+        _maybe_locate_via_grid(
+            ai_client=mock_ollama,
+            result=result,
+            cursor_capture=capture,
+            query="what is HTML",
+            dbg=mock_dbg,
+        )
+        log_messages = [c.args[0] for c in mock_dbg.log.call_args_list]
+        assert any("GRID-LOCATOR" in m and "not directional" in m for m in log_messages)
+
+    def test_logs_hit_when_locator_returns_coords(self, mocker):
+        """When grid-locator returns coords, dbg.log records the hit with coords."""
+        from app import _maybe_locate_via_grid
+        from ai import OllamaClient
+        mocker.patch("app.locate_via_grid", return_value=(450, 300))
+
+        mock_ollama = OllamaClient(host="http://localhost:11434", model_id="ollama/llama3.2-vision")
+        capture = self._mock_capture(mocker)
+        result = self._mock_result(coordinate=None)
+        mock_dbg = mocker.MagicMock()
+
+        _maybe_locate_via_grid(
+            ai_client=mock_ollama,
+            result=result,
+            cursor_capture=capture,
+            query="where is save",
+            dbg=mock_dbg,
+        )
+        log_messages = [c.args[0] for c in mock_dbg.log.call_args_list]
+        assert any("GRID-LOCATOR" in m and "hit" in m and "450" in m for m in log_messages)
+
+    def test_passes_debug_log_to_locator_for_structured_logging(self, mocker):
+        """Codex MED fix: _maybe_locate_via_grid must thread dbg.log into
+        locate_via_grid so transport failures are distinguishable from
+        model uncertainty in the debug log."""
+        from app import _maybe_locate_via_grid
+        from ai import OllamaClient
+        mock_locator = mocker.patch("app.locate_via_grid", return_value=(100, 50))
+
+        mock_ollama = OllamaClient(host="http://localhost:11434", model_id="ollama/llama3.2-vision")
+        capture = self._mock_capture(mocker)
+        result = self._mock_result(coordinate=None)
+        mock_dbg = mocker.MagicMock()
+
+        _maybe_locate_via_grid(
+            ai_client=mock_ollama,
+            result=result,
+            cursor_capture=capture,
+            query="click thing",
+            dbg=mock_dbg,
+        )
+        # locate_via_grid received debug_log kwarg pointing at dbg.log
+        kwargs = mock_locator.call_args.kwargs
+        assert kwargs.get("debug_log") is mock_dbg.log
+
+
+# --- Codex HIGH 1 regression: LLM_PROVIDER routing -------------------------
+
+class TestResolveLLMCredentials:
+    """Regression tests for the Codex HIGH 1 finding: Settings dropdown
+    persisted LLM_PROVIDER=ollama but startup ignored it and constructed
+    AnthropicClient anyway. The Settings dropdown was cosmetic."""
+
+    def test_defaults_to_anthropic_path(self, mocker):
+        """No LLM_PROVIDER set → returns (MODEL_ID, ANTHROPIC_API_KEY)."""
+        from app import _resolve_llm_credentials
+        import config
+
+        mocker.patch("app.resolve_setting", return_value="anthropic")
+        mocker.patch("app.MODEL_ID", "anthropic/claude-sonnet-4-6")
+        mocker.patch("app.ANTHROPIC_API_KEY", "sk-ant-test")
+
+        model_id, api_key = _resolve_llm_credentials()
+        assert model_id == "anthropic/claude-sonnet-4-6"
+        assert api_key == "sk-ant-test"
+
+    def test_routes_to_ollama_when_provider_is_ollama(self, mocker):
+        """LLM_PROVIDER=ollama → returns ('ollama/<vision-model>', '').
+        Without the v0.2.0 fix, this returned MODEL_ID / ANTHROPIC_API_KEY
+        and the Settings dropdown was silently ignored."""
+        from app import _resolve_llm_credentials
+
+        mocker.patch("app.resolve_setting", return_value="ollama")
+        mocker.patch("app.OLLAMA_MODEL_VISION", "llama3.2-vision")
+
+        model_id, api_key = _resolve_llm_credentials()
+        assert model_id == "ollama/llama3.2-vision"
+        assert api_key == "", "Ollama path must return empty key (unauthenticated local)"
+
+    def test_anthropic_path_handles_none_api_key(self, mocker):
+        """If ANTHROPIC_API_KEY is None (resolve_api_key returned nothing),
+        we must return empty string (not None) — create_ai_client expects str."""
+        from app import _resolve_llm_credentials
+
+        mocker.patch("app.resolve_setting", return_value="anthropic")
+        mocker.patch("app.MODEL_ID", "anthropic/claude-sonnet-4-6")
+        mocker.patch("app.ANTHROPIC_API_KEY", None)
+
+        model_id, api_key = _resolve_llm_credentials()
+        assert api_key == ""
+
+    def test_unknown_provider_falls_back_to_anthropic(self, mocker):
+        """If LLM_PROVIDER is a string we don't recognize (forward-compat
+        for some future provider that gets removed), fall back to Anthropic
+        path. Don't crash."""
+        from app import _resolve_llm_credentials
+
+        mocker.patch("app.resolve_setting", return_value="bogus-provider")
+        mocker.patch("app.MODEL_ID", "anthropic/claude-sonnet-4-6")
+        mocker.patch("app.ANTHROPIC_API_KEY", "sk-ant-test")
+
+        model_id, api_key = _resolve_llm_credentials()
+        # Falls back to anthropic — doesn't raise.
+        assert model_id == "anthropic/claude-sonnet-4-6"
+        assert api_key == "sk-ant-test"

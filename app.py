@@ -29,8 +29,9 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtWidgets import QApplication
 
 import kb
-from ai import create_ai_client
+from ai import OllamaClient, create_ai_client
 from debug_log import DebugSession
+from locator import locate_via_grid
 from capture import (
     capture_all_screens,
     get_cursor_position,
@@ -44,9 +45,16 @@ from config import (
     ASSEMBLYAI_API_KEY,
     CARTESIA_API_KEY,
     MODEL_ID,
+    OLLAMA_HOST,
+    OLLAMA_MODEL_VISION,
     resolve_api_key,
     resolve_setting,
 )
+# Note: LLM_PROVIDER is intentionally NOT imported as a module-level
+# constant — _resolve_llm_credentials() calls resolve_setting fresh on
+# every invocation so any change the user made in the Settings dialog
+# (which writes to keyring) is picked up without an app restart. The
+# module-level constant would be frozen at import time.
 from hotkey import PushToTalkHotkey
 from memory import MemoryStore
 from overlay import OverlayController
@@ -81,6 +89,109 @@ def flush_sentences(buffer: str) -> tuple[list[str], str]:
         sentences.append(buffer[:end].strip())
         buffer = buffer[end:]
     return sentences, buffer
+
+
+# --- Grid-locator fallback (v0.2.0 Ollama pixel-pointing) --------------------
+
+_DIRECTIONAL_QUERY_WORDS = (
+    "where", "click", "show me", "find", "point", "open", "select", "press",
+    "navigate", "locate", "tap", "look at", "go to",
+)
+"""Words/phrases that suggest the user wants Clicky to point at a UI element.
+Grid-locator only fires for queries containing one of these — skips
+conceptual asks like 'what is HTML' that don't have a UI target."""
+
+
+def _looks_directional(query: str) -> bool:
+    """True if the query contains a directional word like 'where', 'click', 'show me'.
+
+    Used as a cheap pre-filter before firing the grid-locator (which is 2 extra
+    LLM calls — expensive on local Ollama). For conceptual questions Clicky
+    should just answer with TTS and not try to point anywhere.
+    """
+    if not query:
+        return False
+    q_lower = query.lower()
+    return any(word in q_lower for word in _DIRECTIONAL_QUERY_WORDS)
+
+
+def _maybe_locate_via_grid(
+    *,
+    ai_client,
+    result,
+    cursor_capture,
+    query: str,
+    dbg=None,
+):
+    """Grid-locator fallback for Ollama responses lacking a [POINT:x,y] tag.
+
+    Triggers ONLY if:
+        1. ai_client is OllamaClient (local vision model)
+        2. result.coordinate is None (Claude/Ollama didn't emit [POINT:x,y])
+        3. query is directional (contains 'where' / 'click' / 'show me' / etc.)
+
+    Returns (phys_x, phys_y) in PHYSICAL virtual-desktop coords (matching the
+    output of unscale_claude_coords) or None if any condition fails / locator
+    can't find a target.
+
+    The output is in physical coords (not logical) so the caller can pass it
+    straight to overlay.sig_point_at.emit() — same convention the existing
+    Claude-coordinate path uses.
+
+    Args:
+        ai_client: the active AIClient (OllamaClient / AnthropicClient / etc.)
+        result: PointParseResult from stream.final_result() — used to check
+            if coordinate is already set
+        cursor_capture: capture.LabeledCapture for the primary screen
+        query: user's transcript (the question they asked)
+        dbg: optional DebugSession for logging the grid-locator outcome
+    """
+    if not isinstance(ai_client, OllamaClient):
+        return None
+    if result.coordinate is not None:
+        return None
+    if not _looks_directional(query):
+        if dbg is not None:
+            dbg.log(
+                f"GRID-LOCATOR: skipped (query not directional): {query!r}"
+            )
+        return None
+
+    # Convert the PIL screenshot to base64 JPEG for the locator
+    import io
+    import base64
+    buf = io.BytesIO()
+    cursor_capture.image.save(buf, format="JPEG", quality=85)
+    jpeg_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+
+    monitor = cursor_capture.monitor
+    # locate_via_grid returns coords pre-divided by dpi_scale. We want
+    # PHYSICAL virtual-desktop coords (matching the existing app.py pipeline),
+    # so pass dpi_scale=1.0 — locator returns (vx, vy) i.e. physical coords.
+    # v0.2.0 Codex MED fix: thread dbg.log into the locator so transport
+    # failures (Ollama timeout, image-decode error) are distinguishable from
+    # model uncertainty (cell 0 / unparseable reply) in the debug log.
+    # Without this, a broken Ollama looked identical to "model said no UI
+    # element" — operator couldn't tell whether to debug their Ollama setup
+    # or just rephrase the question.
+    phys_xy = locate_via_grid(
+        llm_client=ai_client,
+        screenshot_jpeg_b64=jpeg_b64,
+        original_size=(cursor_capture.target_width, cursor_capture.target_height),
+        physical_size=(monitor["width"], monitor["height"]),
+        physical_origin=(monitor["left"], monitor["top"]),
+        dpi_scale=1.0,   # We want PHYSICAL coords; overlay handles logical conversion
+        query=query,
+        debug_log=(dbg.log if dbg is not None else None),
+    )
+
+    if dbg is not None:
+        if phys_xy is None:
+            dbg.log("GRID-LOCATOR: ran but returned None (LLM unsure or conceptual)")
+        else:
+            dbg.log(f"GRID-LOCATOR: hit physical=({phys_xy[0]},{phys_xy[1]})")
+
+    return phys_xy
 
 
 # --- Foreground app detection -------------------------------------------------
@@ -158,10 +269,18 @@ class ClickyApp(QObject):
     ) -> None:
         super().__init__()
 
-        self._ai = ai_client or create_ai_client(
-            model_id=MODEL_ID,
-            api_key=ANTHROPIC_API_KEY,
-        )
+        # v0.2.0: respect LLM_PROVIDER setting (Settings dialog dropdown).
+        # _resolve_llm_credentials returns the effective model_id + api_key
+        # based on whether the user picked Anthropic or Ollama in Settings.
+        # Without this branch the dropdown was cosmetic — see helper docstring.
+        if ai_client is None:
+            _model_id, _api_key = _resolve_llm_credentials()
+            ai_client = create_ai_client(
+                model_id=_model_id,
+                api_key=_api_key,
+                ollama_host=OLLAMA_HOST,
+            )
+        self._ai = ai_client
         self._stt = stt_client or AssemblyAIStreamingSTT(
             api_key=ASSEMBLYAI_API_KEY
         )
@@ -632,6 +751,36 @@ class ClickyApp(QObject):
 
             _log(f"Response: {result.spoken_text[:80]}...")
 
+            # v0.2.0: Grid-locator fallback for Ollama / weak vision models.
+            # If Claude returned no [POINT:x,y] tag AND we're using Ollama AND
+            # the query was directional, run grid-locator on the cursor
+            # screenshot to derive coordinates. Returns physical virtual-desktop
+            # coords (same convention as unscale_claude_coords output), or None
+            # if the locator can't find a target.
+            #
+            # CANCEL GUARD: skip the locator entirely if cancel fired between
+            # stream.final_result() and here (e.g. ESC during sentence
+            # streaming). Without this, locator's 2 Ollama calls would run for
+            # 5-10s on a cancelled worker and emit pointer + memory side
+            # effects for an interaction the user already aborted. Caught by
+            # codex adversarial review 2026-06-05 (HIGH 2).
+            if cancel.is_set():
+                return
+            locator_phys_xy = _maybe_locate_via_grid(
+                ai_client=self._ai,
+                result=result,
+                cursor_capture=cursor_capture,
+                query=transcript,
+                dbg=dbg,
+            )
+            # POST-LOCATOR cancel guard: if locator just ran (took seconds on
+            # Ollama), the user may have hit ESC or pressed Ctrl+Alt+Space
+            # again. Stop before emitting any pointer / memory side effects
+            # — those would race the new pipeline and write history for an
+            # interaction that no longer matters.
+            if cancel.is_set():
+                return
+
             if result.coordinate:
                 x_claude, y_claude = result.coordinate
                 screen_num = result.screen_number
@@ -668,6 +817,13 @@ class ClickyApp(QObject):
                 # cursor at the same time during the transition).
                 self.sig_hide_spinner.emit()
                 self.sig_point_at.emit(phys_x, phys_y, target_capture.monitor)
+            elif locator_phys_xy is not None:
+                # Grid-locator fallback (Ollama path): coords already in PHYSICAL
+                # virtual-desktop space — skip unscale_claude_coords, emit directly.
+                phys_x, phys_y = locator_phys_xy
+                dbg.log(f"COORDS: grid-locator -> physical=({phys_x},{phys_y})")
+                self.sig_hide_spinner.emit()
+                self.sig_point_at.emit(phys_x, phys_y, cursor_capture.monitor)
             else:
                 dbg.log("COORDS: no coordinate returned (text-only response)")
                 # Text-only path: spinner still needs to go away so the buddy
@@ -677,6 +833,11 @@ class ClickyApp(QObject):
             pointer_targets = []
             if result.coordinate:
                 pointer_targets.append(result.coordinate)
+            elif locator_phys_xy is not None:
+                # Memory recording: store the grid-locator coords (physical
+                # virtual-desktop space) so future recall can reference them
+                # the same way Claude coords are referenced.
+                pointer_targets.append(locator_phys_xy)
 
             self.sig_record_memory.emit(
                 app_name,
@@ -908,6 +1069,41 @@ def _resolve_tts_credentials() -> tuple[str, str | None]:
     return provider, api_key
 
 
+def _resolve_llm_credentials() -> tuple[str, str]:
+    """Resolve (effective_model_id, api_key) at startup based on LLM_PROVIDER (v0.2.0).
+
+    Reads LLM_PROVIDER via config.resolve_setting (env→keyring→default).
+    - LLM_PROVIDER='ollama'    → returns ("ollama/<OLLAMA_MODEL_VISION>", ""),
+                                  api_key empty because local Ollama is
+                                  unauthenticated. create_ai_client factory
+                                  routes `ollama/*` prefix to OllamaClient.
+    - LLM_PROVIDER='anthropic' → returns (MODEL_ID, ANTHROPIC_API_KEY).
+                                  Factory routes MODEL_ID prefix
+                                  ('anthropic/...' or 'claude...') to
+                                  AnthropicClient.
+    - any other value          → falls back to anthropic path (forward-compat).
+
+    Without this helper the Settings dropdown was cosmetic (caught by codex
+    adversarial review 2026-06-05): LLM_PROVIDER='ollama' got persisted to
+    keyring but app.py only ever read MODEL_ID, so the user's choice was
+    silently ignored and AnthropicClient was always constructed with whatever
+    MODEL_ID env var defaulted to.
+
+    Note: MODEL_ID env var takes precedence over LLM_PROVIDER ONLY when
+    MODEL_ID already routes to a non-Anthropic prefix (the factory dispatches
+    on MODEL_ID prefix first). For the GUI-flow (user clicks Ollama in the
+    dropdown), LLM_PROVIDER='ollama' is sufficient — they never need to know
+    about MODEL_ID.
+    """
+    provider = resolve_setting("LLM_PROVIDER", default="anthropic")
+    if provider == "ollama":
+        # Construct an ollama/ prefixed model id so create_ai_client routes
+        # correctly. api_key is empty (Ollama is unauthenticated local).
+        return f"ollama/{OLLAMA_MODEL_VISION}", ""
+    # anthropic (default) — preserve existing MODEL_ID + ANTHROPIC_API_KEY path
+    return MODEL_ID, ANTHROPIC_API_KEY or ""
+
+
 # --- Manual entry point -------------------------------------------------------
 
 if __name__ == "__main__":
@@ -981,6 +1177,12 @@ if __name__ == "__main__":
     api_anthropic = resolve_api_key("ANTHROPIC_API_KEY")
     api_assemblyai = resolve_api_key("ASSEMBLYAI_API_KEY")
 
+    # v0.2.0: resolve effective LLM model + api key based on LLM_PROVIDER
+    # setting (Settings dialog dropdown). Reads keyring fresh so any change
+    # the user just made in the modal is honored. See _resolve_llm_credentials
+    # docstring for the Anthropic vs Ollama dispatch logic.
+    _llm_model_id, _llm_api_key = _resolve_llm_credentials()
+
     # Sprint 4: dispatch TTS subclass based on TTS_PROVIDER setting.
     # Cartesia (default) and ElevenLabs (opt-in) are both supported;
     # user picks via Settings dialog dropdown which writes to keyring
@@ -1014,7 +1216,15 @@ if __name__ == "__main__":
         sys.exit(1)
 
     clicky = ClickyApp(
-        ai_client=create_ai_client(model_id=MODEL_ID, api_key=api_anthropic),
+        # v0.2.0: route LLM_PROVIDER to the right model/client. When user
+        # selected "Ollama (local)" in Settings, _llm_model_id is
+        # 'ollama/<vision-model>' and _llm_api_key is empty — create_ai_client
+        # dispatches to OllamaClient and Anthropic key is ignored.
+        ai_client=create_ai_client(
+            model_id=_llm_model_id,
+            api_key=_llm_api_key,
+            ollama_host=OLLAMA_HOST,
+        ),
         stt_client=AssemblyAIStreamingSTT(api_key=api_assemblyai),
         tts_client=tts_instance,
     )

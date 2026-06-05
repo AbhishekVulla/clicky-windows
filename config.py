@@ -276,6 +276,22 @@ TTS_PROVIDER: str = resolve_setting("TTS_PROVIDER", default="cartesia")
 """Which TTS subclass to construct. Sprint 4 ships "cartesia" (default)
 and "elevenlabs" (opt-in). User switches via Settings dialog dropdown."""
 
+LLM_PROVIDER: str = resolve_setting("LLM_PROVIDER", default="anthropic")
+"""Which LLM subclass to construct (v0.2.0). Settings dialog dropdown
+writes this. Values: 'anthropic' (default, cloud) or 'ollama' (local).
+
+When 'ollama' is selected, app.py builds an OllamaClient pointed at
+OLLAMA_HOST with OLLAMA_MODEL_VISION as the model — completely bypassing
+ANTHROPIC_API_KEY (which may be empty). Without this branch, the
+Settings dropdown was cosmetic in v0.2.0 (caught by codex adversarial
+review 2026-06-05): app would silently fall back to AnthropicClient
+with whatever MODEL_ID env var said, ignoring the user's choice.
+
+To override via env var (advanced): set MODEL_ID=ollama/llama3.2-vision
+directly — that takes precedence over LLM_PROVIDER because the create_ai_client
+factory dispatches on MODEL_ID prefix first. LLM_PROVIDER is the
+GUI-friendly way for users who don't edit .env."""
+
 
 # ── ElevenLabs TTS (opt-in alternative to Cartesia) ─────────────────────────
 
@@ -308,6 +324,34 @@ ELEVENLABS_OUTPUT_SAMPLE_RATE: int = int(
 requires Pro tier. ElevenLabs PCM is int16 (NOT float32 like Cartesia),
 so playback path converts inline: np.frombuffer(chunk, np.int16).astype(
 np.float32) / 32768.0."""
+
+
+# ── Ollama (local LLM via Ollama server) — added v0.2.0 ─────────────────────
+
+OLLAMA_HOST: str = os.getenv(
+    "OLLAMA_HOST", resolve_setting("OLLAMA_HOST", "http://localhost:11434")
+)
+"""Local Ollama server URL. Default matches Ollama's out-of-the-box
+``ollama serve`` binding. Set in .env or Settings dialog to point at a
+different host (e.g. another machine on LAN). v0.2.0 only supports
+unauthenticated local Ollama — no API-key field needed."""
+
+OLLAMA_MODEL_VISION: str = os.getenv(
+    "OLLAMA_MODEL_VISION",
+    resolve_setting("OLLAMA_MODEL_VISION", "llama3.2-vision"),
+)
+"""Ollama vision-capable model used when screenshots are present.
+Default ``llama3.2-vision`` is the smallest vision model Ollama
+ships out-of-the-box (11B, ~7.9 GB download). Bitshank-2338 also tests
+``qwen2.5-vl`` and ``llava``. Pull before use: ``ollama pull llama3.2-vision``."""
+
+OLLAMA_MODEL_TEXT: str = os.getenv(
+    "OLLAMA_MODEL_TEXT",
+    resolve_setting("OLLAMA_MODEL_TEXT", "llama3.2"),
+)
+"""Ollama text-only model used when no screenshots are sent (rare in
+Clicky's PTT flow but kept for parity with Bitshank's vision/text split).
+Defaults to plain ``llama3.2`` (3B, ~2 GB)."""
 
 
 # ── Memory ───────────────────────────────────────────────────────────────────
