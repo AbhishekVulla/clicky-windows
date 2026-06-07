@@ -343,3 +343,136 @@ class TestSettingsDialogSave:
 
         assert ("clicky-windows", "CARTESIA_API_KEY") in saved
         assert ("clicky-windows", "ELEVENLABS_API_KEY") not in saved
+
+
+# --- v0.2.1 (Issue #1 fix B + D): Ollama model dropdown + compat warn -------
+
+
+class TestOllamaModelDropdown:
+    """v0.2.1: when LLM provider is Ollama, an editable QComboBox appears
+    for OLLAMA_MODEL_VISION. Hidden when provider is Anthropic. Save
+    persists to keyring + runs Fix D compatibility check (which can
+    block save via QMessageBox)."""
+
+    def test_model_suggestions_includes_llava_as_first(self):
+        """llava:7b must be index 0 — it's the new default in v0.2.1.
+        llama3.2-vision comes after (more accurate but needs Ollama
+        >=0.4.x; users can pick it manually)."""
+        from settings_dialog import _OLLAMA_MODEL_SUGGESTIONS
+        assert _OLLAMA_MODEL_SUGGESTIONS[0] == "llava:7b"
+        assert "llama3.2-vision" in _OLLAMA_MODEL_SUGGESTIONS
+
+    def test_model_row_hidden_when_anthropic_is_default_provider(
+        self, qapp, mocker
+    ):
+        """Default LLM provider is Anthropic → Ollama model row exists
+        in the layout but is NOT visible (no point showing a model picker
+        for a provider that doesn't need one)."""
+        mocker.patch("settings_dialog.keyring.get_password", return_value=None)
+        from settings_dialog import SettingsDialog
+        dlg = SettingsDialog()
+        # Row was constructed (Fix B requires it always present)…
+        assert dlg._ollama_model_row is not None
+        assert dlg._ollama_model_combo is not None
+        # …but hidden because Anthropic is the active provider.
+        # Note: tests use isHidden() not isVisible() because the parent
+        # dialog is never .show()-n in tests — isVisible() depends on the
+        # parent's actual on-screen state, isHidden() reflects the
+        # explicit setVisible(False) intent regardless of parent state.
+        assert dlg._ollama_model_row.isHidden() is True
+
+    def test_model_row_visible_after_switching_llm_provider_to_ollama(
+        self, qapp, mocker
+    ):
+        """Switching LLM dropdown to Ollama (index 1) must reveal the
+        model row. Switching back to Anthropic (index 0) must hide it
+        again."""
+        mocker.patch("settings_dialog.keyring.get_password", return_value=None)
+        from settings_dialog import SettingsDialog
+        dlg = SettingsDialog()
+
+        # Switch to Ollama → row no longer hidden
+        dlg._dropdowns["LLM"].setCurrentIndex(1)
+        assert dlg._ollama_model_row.isHidden() is False
+
+        # Switch back to Anthropic → row hidden again
+        dlg._dropdowns["LLM"].setCurrentIndex(0)
+        assert dlg._ollama_model_row.isHidden() is True
+
+    def test_save_persists_ollama_model_to_keyring(
+        self, qapp, mocker, monkeypatch
+    ):
+        """Save must write the currently-selected model to keyring
+        under OLLAMA_MODEL_VISION slot, regardless of which LLM
+        provider is selected (so the value carries over when user
+        later switches to Ollama)."""
+        saved: dict[tuple[str, str], str] = {}
+        monkeypatch.setattr(
+            "settings_dialog.keyring.get_password",
+            lambda service, name: None,
+        )
+        monkeypatch.setattr(
+            "settings_dialog.keyring.set_password",
+            lambda service, name, value: saved.update({(service, name): value}),
+        )
+        # Compat check should not block on default model
+        mocker.patch(
+            "ollama_health.check_model_compatibility", return_value=None
+        )
+        mocker.patch(
+            "ollama_health.detect_ollama_version", return_value="0.5.0"
+        )
+
+        from settings_dialog import SettingsDialog
+        dlg = SettingsDialog()
+
+        # Fill key fields so Save is enabled (Anthropic stays selected;
+        # Ollama model still persists)
+        dlg._key_inputs["LLM"].setText("sk-llm-key")
+        dlg._key_inputs["STT"].setText("stt-key")
+        dlg._key_inputs["TTS"].setText("tts-key")
+
+        # Type a non-default model name
+        dlg._ollama_model_combo.setCurrentText("qwen2.5-vl")
+        dlg._on_save()
+
+        assert saved[("clicky-windows", "OLLAMA_MODEL_VISION")] == "qwen2.5-vl"
+
+    def test_save_aborts_when_user_cancels_compat_warning(
+        self, qapp, mocker, monkeypatch
+    ):
+        """Fix D: when Ollama provider + incompatible model picked,
+        QMessageBox warning fires. If user clicks Cancel, save MUST NOT
+        persist anything (don't half-save)."""
+        from PyQt6.QtWidgets import QMessageBox
+
+        saved: dict[tuple[str, str], str] = {}
+        monkeypatch.setattr(
+            "settings_dialog.keyring.get_password",
+            lambda service, name: None,
+        )
+        monkeypatch.setattr(
+            "settings_dialog.keyring.set_password",
+            lambda service, name, value: saved.update({(service, name): value}),
+        )
+        # Force compat warning to fire
+        mocker.patch(
+            "ollama_health.detect_ollama_version", return_value="0.3.14"
+        )
+        # User clicks Cancel in the warning dialog
+        mocker.patch(
+            "settings_dialog.QMessageBox.warning",
+            return_value=QMessageBox.StandardButton.Cancel,
+        )
+
+        from settings_dialog import SettingsDialog
+        dlg = SettingsDialog()
+        dlg._dropdowns["LLM"].setCurrentIndex(1)  # Ollama
+        dlg._key_inputs["LLM"].setText("http://localhost:11434")
+        dlg._key_inputs["STT"].setText("stt-key")
+        dlg._key_inputs["TTS"].setText("tts-key")
+        dlg._ollama_model_combo.setCurrentText("llama3.2-vision")
+        dlg._on_save()
+
+        # Nothing should have been saved.
+        assert saved == {}

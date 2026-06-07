@@ -1097,6 +1097,36 @@ def _resolve_llm_credentials() -> tuple[str, str]:
     """
     provider = resolve_setting("LLM_PROVIDER", default="anthropic")
     if provider == "ollama":
+        # v0.2.1 (Issue #1 fix D): log detected Ollama version + warn
+        # about model/version mismatches at startup. Stderr only — the
+        # Settings dialog catches this case interactively. This is
+        # belt-and-suspenders for users who set OLLAMA_MODEL_VISION via
+        # env var and never touch the Settings UI.
+        try:
+            from ollama_health import (
+                check_model_compatibility,
+                detect_ollama_version,
+            )
+            version = detect_ollama_version(OLLAMA_HOST)
+            if version is None:
+                print(
+                    f"[ollama] could not reach {OLLAMA_HOST}/api/version "
+                    "— is `ollama serve` running?",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"[ollama] detected version {version}, "
+                    f"using model {OLLAMA_MODEL_VISION}",
+                    file=sys.stderr,
+                )
+                warning = check_model_compatibility(OLLAMA_MODEL_VISION, version)
+                if warning:
+                    print(f"[ollama] WARNING: {warning}", file=sys.stderr)
+        except Exception as exc:
+            # Don't fail startup over a logging helper.
+            print(f"[ollama] version-check skipped: {exc}", file=sys.stderr)
+
         # Construct an ollama/ prefixed model id so create_ai_client routes
         # correctly. api_key is empty (Ollama is unauthenticated local).
         return f"ollama/{OLLAMA_MODEL_VISION}", ""

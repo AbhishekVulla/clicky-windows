@@ -261,18 +261,18 @@ The pattern is in the lineage of [Andrej Karpathy's LLM Wiki idea](https://gist.
 <details>
 <summary><strong>Does Ollama work?</strong> — yes, via a two-stage grid locator. ~30-50px accuracy vs Claude's ~5px. Click to expand for setup steps.</summary>
 
-Select **Ollama (local)** from the LLM dropdown in Settings. Default Ollama host is `http://localhost:11434`. Default vision model is `llama3.2-vision`.
+Select **Ollama (local)** from the LLM dropdown in Settings. Default Ollama host is `http://localhost:11434`. Default vision model is `llava:7b` — it works on every Ollama version with vision support. Clicky also exposes a model picker in Settings so you can switch to `llama3.2-vision`, `qwen2.5-vl`, `llava-llama3`, or type any custom model you've pulled.
+
+`llama3.2-vision` is more accurate than `llava:7b` but uses the `mllama` architecture which needs Ollama ≥0.4.x. If you pick it on an older Ollama, Clicky pops up a warning in the Settings dialog before saving — you can override and save anyway, or pick a compatible model.
 
 Local vision models can't return precise pixel coordinates directly, so Clicky uses a **two-stage grid** when pointing: it draws a numbered 12×8 grid on the screenshot, asks the model "which cell?", then zooms into that area with a 6×6 sub-grid and asks again. Accuracy is roughly ±30-50 px vs Claude's ~5 px. Plenty for buttons, menus, links, icons. Worse for tightly-packed UIs (small text, dense toolbars).
-
-Tested with: `llama3.2-vision`, `qwen2.5-vl`, `llava`. Other vision-capable Ollama models should work but may need their own tuning.
 
 **Prerequisites:**
 
 1. Install Ollama from [ollama.com/download](https://ollama.com/download)
-2. Pull a vision model: `ollama pull llama3.2-vision`
+2. Pull a vision model: `ollama pull llava:7b` (smaller, ~4.5 GB) or `ollama pull llama3.2-vision` (more accurate, ~7.9 GB, needs Ollama ≥0.4.x)
 3. Make sure Ollama is running: `ollama serve` (usually auto-starts on install)
-4. In Clicky: open Settings → LLM dropdown → switch to **Ollama (local)**, save, restart Clicky
+4. In Clicky: open Settings → LLM dropdown → switch to **Ollama (local)** → optionally pick a different model from the model dropdown → save → restart Clicky
 
 The grid-locator pattern was directly inspired by [Bitshank-2338/clicky-windows](https://github.com/Bitshank-2338/clicky-windows) (MIT-licensed). Original implementation lives in their `ai/universal_locator.py`.
 

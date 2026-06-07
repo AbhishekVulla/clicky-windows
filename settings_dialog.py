@@ -37,12 +37,25 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
 from config import KEYRING_SERVICE
+
+
+# v0.2.1 (Issue #1 fix B): pre-populated Ollama vision model suggestions
+# in the dropdown. `llava:7b` first since it's the new default (works
+# on all Ollama versions with vision). User can also type a custom
+# model name — the combobox is editable.
+_OLLAMA_MODEL_SUGGESTIONS: tuple[str, ...] = (
+    "llava:7b",
+    "llama3.2-vision",
+    "qwen2.5-vl",
+    "llava-llama3",
+)
 
 
 # --- Sprint 4: provider category data model ---------------------------------
@@ -179,6 +192,12 @@ class SettingsDialog(QDialog):
         self._dropdowns: dict[str, QComboBox] = {}
         self._key_inputs: dict[str, QLineEdit] = {}
         self._signup_buttons: dict[str, QPushButton] = {}
+        # v0.2.1 (Issue #1 fix B): per-LLM-provider extra fields.
+        # Currently only Ollama uses this slot, for the OLLAMA_MODEL_VISION
+        # editable combobox. The row is built once but hidden unless the
+        # LLM provider dropdown is set to "ollama".
+        self._ollama_model_combo: QComboBox | None = None
+        self._ollama_model_row: QWidget | None = None
         self._build_ui()
 
     # ---------- UI construction -----------------------------------------
@@ -269,6 +288,57 @@ class SettingsDialog(QDialog):
         # Pre-populate the key field with masked existing value (if any).
         self._refresh_key_field_for_category(category)
 
+        # v0.2.1 (Issue #1 fix B): for LLM category, build the Ollama-specific
+        # OLLAMA_MODEL_VISION editable combobox below the key field. The row
+        # is always present in the layout but visible only when "ollama" is
+        # the current LLM provider selection.
+        if category.category_key == "LLM":
+            self._ollama_model_row = self._build_ollama_model_row()
+            v.addWidget(self._ollama_model_row)
+            # Show/hide based on initial provider selection.
+            current_provider_id = category.providers[selected_index].provider_id
+            self._ollama_model_row.setVisible(current_provider_id == "ollama")
+
+        return container
+
+    def _build_ollama_model_row(self) -> QWidget:
+        """Build the OLLAMA_MODEL_VISION editable combobox row.
+
+        v0.2.1 Issue #1 fix B: lets users pick which Ollama vision
+        model to use (or type a custom one). Pre-populated with safe
+        defaults; editable so users can type any model they've pulled.
+        Persisted to keyring under the OLLAMA_MODEL_VISION slot via
+        the same resolve_setting flow config.py uses.
+        """
+        from config import resolve_setting
+
+        container = QWidget()
+        h = QHBoxLayout(container)
+        h.setContentsMargins(0, 4, 0, 0)
+
+        label = QLabel("Ollama model:")
+        h.addWidget(label)
+
+        combo = QComboBox()
+        combo.setEditable(True)
+        for model_name in _OLLAMA_MODEL_SUGGESTIONS:
+            combo.addItem(model_name)
+
+        # Pre-populate from keyring/env via resolve_setting. Falls back
+        # to the same default as config.py (llava:7b).
+        existing = resolve_setting("OLLAMA_MODEL_VISION", "llava:7b")
+        # If the existing value matches a suggestion, select it.
+        # Otherwise add it as a new item and select it (custom name).
+        idx = combo.findText(existing)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+        else:
+            combo.addItem(existing)
+            combo.setCurrentText(existing)
+
+        self._ollama_model_combo = combo
+        h.addWidget(combo, stretch=1)
+
         return container
 
     def _refresh_key_field_for_category(self, category: _ProviderCategory) -> None:
@@ -288,8 +358,16 @@ class SettingsDialog(QDialog):
 
     def _on_provider_changed(self, category: _ProviderCategory, _index: int) -> None:
         """Dropdown changed — swap the key field's contents to the newly-
-        selected provider's stored key + update placeholder + Save state."""
+        selected provider's stored key + update placeholder + Save state.
+
+        v0.2.1: also toggle the OLLAMA_MODEL_VISION row visibility when
+        the LLM provider changes between Anthropic and Ollama.
+        """
         self._refresh_key_field_for_category(category)
+        if category.category_key == "LLM" and self._ollama_model_row is not None:
+            dropdown = self._dropdowns[category.category_key]
+            selected_provider_id = dropdown.currentData()
+            self._ollama_model_row.setVisible(selected_provider_id == "ollama")
         self._update_save_enabled()
 
     def _on_signup_clicked(self, category: _ProviderCategory) -> None:
@@ -327,7 +405,24 @@ class SettingsDialog(QDialog):
 
     def _on_save(self) -> None:
         """Persist provider selection + currently-selected provider's key
-        for each category to keyring."""
+        for each category to keyring.
+
+        v0.2.1 (Issue #1 fix D): if user picks Ollama + a model that needs
+        a newer Ollama version than they have, show a non-blocking warning
+        BEFORE persisting. User can override and save anyway, or cancel.
+        Compatibility check runs against live ``/api/version`` ping — if
+        Ollama is unreachable we skip the check entirely (don't conflate
+        "Ollama down" with "incompatible model").
+        """
+        # v0.2.1 fix D: pre-save compatibility check for Ollama LLM.
+        llm_dropdown = self._dropdowns["LLM"]
+        llm_provider_id = llm_dropdown.currentData()
+        if llm_provider_id == "ollama" and self._ollama_model_combo is not None:
+            model = self._ollama_model_combo.currentText().strip()
+            if model:
+                if not self._confirm_ollama_compat(model):
+                    return  # user cancelled — abort save, no writes
+
         for category in _PROVIDER_CATEGORIES:
             dropdown = self._dropdowns[category.category_key]
             provider = category.providers[dropdown.currentIndex()]
@@ -345,7 +440,44 @@ class SettingsDialog(QDialog):
                 keyring.set_password(
                     KEYRING_SERVICE, provider.api_key_env_var, key_value,
                 )
+
+        # v0.2.1 fix B: persist OLLAMA_MODEL_VISION if Ollama is the LLM
+        # provider. (Always persist even if Anthropic is selected — the
+        # value carries over for the next time user switches to Ollama.)
+        if self._ollama_model_combo is not None:
+            model_value = self._ollama_model_combo.currentText().strip()
+            if model_value:
+                keyring.set_password(
+                    KEYRING_SERVICE, "OLLAMA_MODEL_VISION", model_value,
+                )
         self.accept()
+
+    def _confirm_ollama_compat(self, model: str) -> bool:
+        """Pre-save Ollama compatibility check (v0.2.1 fix D).
+
+        Returns True if the save should proceed, False if the user
+        cancelled. Pings the user's Ollama server for its version,
+        checks against the known mllama-supports-from table. Shows a
+        QMessageBox warning ONLY if there's a confirmed incompatibility
+        — silent on success or when Ollama is unreachable.
+        """
+        from config import resolve_setting
+        from ollama_health import check_model_compatibility, detect_ollama_version
+
+        host = resolve_setting("OLLAMA_HOST", "http://localhost:11434")
+        ollama_version = detect_ollama_version(host)
+        warning = check_model_compatibility(model, ollama_version)
+        if warning is None:
+            return True  # compatible OR can't check — proceed silently
+
+        reply = QMessageBox.warning(
+            self,
+            "Ollama compatibility warning",
+            warning + "\n\nSave anyway?",
+            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        return reply == QMessageBox.StandardButton.Save
 
 
 def required_keys_present() -> bool:

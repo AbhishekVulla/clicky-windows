@@ -338,12 +338,13 @@ unauthenticated local Ollama — no API-key field needed."""
 
 OLLAMA_MODEL_VISION: str = os.getenv(
     "OLLAMA_MODEL_VISION",
-    resolve_setting("OLLAMA_MODEL_VISION", "llama3.2-vision"),
+    resolve_setting("OLLAMA_MODEL_VISION", "llava:7b"),
 )
 """Ollama vision-capable model used when screenshots are present.
-Default ``llama3.2-vision`` is the smallest vision model Ollama
-ships out-of-the-box (11B, ~7.9 GB download). Bitshank-2338 also tests
-``qwen2.5-vl`` and ``llava``. Pull before use: ``ollama pull llama3.2-vision``."""
+Default ``llava:7b`` works on every Ollama version with vision support
+(~4.5 GB). ``llama3.2-vision`` is more accurate but needs Ollama
+>=0.4.x (uses ``mllama`` arch). User can switch via Settings dialog;
+``ollama_health.check_model_compatibility`` warns on mismatch."""
 
 OLLAMA_MODEL_TEXT: str = os.getenv(
     "OLLAMA_MODEL_TEXT",
