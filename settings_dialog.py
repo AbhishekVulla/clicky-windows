@@ -102,6 +102,15 @@ _PROVIDER_CATEGORIES: tuple[_ProviderCategory, ...] = (
                 api_key_env_var="ANTHROPIC_API_KEY",
                 signup_url="https://console.anthropic.com/settings/keys",
             ),
+            # v0.3.0: OpenAI native GPT-4o vision. Direct sk-... key (NOT the
+            # OpenRouter sk-or- key). Pointing refined via grid-locator (GPT-4o
+            # is weaker than Claude at raw pixel coords). See ai.OpenAIVisionClient.
+            _Provider(
+                provider_id="openai",
+                display_name="OpenAI (GPT-4o)",
+                api_key_env_var="OPENAI_API_KEY",
+                signup_url="https://platform.openai.com/api-keys",
+            ),
             # v0.2.0: Local Ollama. No API key — instead the "API key" field
             # stores the OLLAMA_HOST URL (default http://localhost:11434).
             # Repurposing the field as a host URL keeps the dialog uniform

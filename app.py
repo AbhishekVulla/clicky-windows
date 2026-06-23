@@ -29,7 +29,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtWidgets import QApplication
 
 import kb
-from ai import OllamaClient, create_ai_client
+from ai import OllamaClient, OpenAIVisionClient, create_ai_client
 from debug_log import DebugSession
 from locator import locate_via_grid
 from capture import (
@@ -47,6 +47,8 @@ from config import (
     MODEL_ID,
     OLLAMA_HOST,
     OLLAMA_MODEL_VISION,
+    OPENAI_API_KEY,
+    OPENAI_MODEL_VISION,
     resolve_api_key,
     resolve_setting,
 )
@@ -123,11 +125,13 @@ def _maybe_locate_via_grid(
     query: str,
     dbg=None,
 ):
-    """Grid-locator fallback for Ollama responses lacking a [POINT:x,y] tag.
+    """Grid-locator fallback for weak-vision responses lacking a [POINT:x,y] tag.
 
     Triggers ONLY if:
-        1. ai_client is OllamaClient (local vision model)
-        2. result.coordinate is None (Claude/Ollama didn't emit [POINT:x,y])
+        1. ai_client is a weak-at-pixel-coords vision model — OllamaClient
+           (local) or OpenAIVisionClient (GPT-4o is weaker than Claude at
+           raw coordinates, same as Ollama; both lean on the grid-locator)
+        2. result.coordinate is None (model didn't emit a usable [POINT:x,y])
         3. query is directional (contains 'where' / 'click' / 'show me' / etc.)
 
     Returns (phys_x, phys_y) in PHYSICAL virtual-desktop coords (matching the
@@ -146,7 +150,7 @@ def _maybe_locate_via_grid(
         query: user's transcript (the question they asked)
         dbg: optional DebugSession for logging the grid-locator outcome
     """
-    if not isinstance(ai_client, OllamaClient):
+    if not isinstance(ai_client, (OllamaClient, OpenAIVisionClient)):
         return None
     if result.coordinate is not None:
         return None
@@ -1096,6 +1100,13 @@ def _resolve_llm_credentials() -> tuple[str, str]:
     about MODEL_ID.
     """
     provider = resolve_setting("LLM_PROVIDER", default="anthropic")
+    if provider == "openai":
+        # v0.3.0: OpenAI native GPT-4o vision in the normal pipeline.
+        # 'openai/' prefix routes create_ai_client → OpenAIVisionClient.
+        # Pointing accuracy is refined via the grid-locator (GPT-4o is
+        # weaker at raw pixel coords than Claude). The GPT-Realtime
+        # speech-to-speech path is 'openai-realtime', handled separately.
+        return f"openai/{OPENAI_MODEL_VISION}", OPENAI_API_KEY or ""
     if provider == "ollama":
         # v0.2.1 (Issue #1 fix D): log detected Ollama version + warn
         # about model/version mismatches at startup. Stderr only — the

@@ -599,6 +599,40 @@ class _GeminiStreamingResponse:
         return parse_point_tag(self._accumulated)
 
 
+# --- OpenAIVisionClient (v0.3.0 — GPT-4o via OpenAI native API) --------------
+
+class OpenAIVisionClient(GeminiClient):
+    """GPT-4o (or any OpenAI vision model) via the OpenAI Python SDK pointed
+    at OpenAI's native endpoint (api.openai.com).
+
+    Reuses GeminiClient's ``ask_stream`` / ``ask`` / ``_GeminiStreamingResponse``
+    verbatim — both are OpenAI-chat-completions-shaped, the only difference is
+    the endpoint + key. Emits ``[POINT:x,y:label]`` per the same Clicky system
+    prompt. GPT-4o is weaker than Claude at raw pixel coordinates, so app.py
+    refines pointing through the two-stage grid-locator (locator.py) — the
+    same path Ollama's weak vision models use.
+
+    Routed via the ``openai/`` MODEL_ID prefix in create_ai_client(). The
+    GPT-Realtime speech-to-speech path is separate (realtime.py) and does NOT
+    go through this client.
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        model_id: str,
+        base_url: str | None = None,
+    ) -> None:
+        # Strip the ``openai/`` routing prefix — OpenAI's API wants the bare
+        # model name (e.g. "gpt-4o", not "openai/gpt-4o"). Mirrors OllamaClient.
+        if model_id.lower().startswith("openai/"):
+            model_id = model_id[len("openai/"):]
+        # base_url=None → OpenAI SDK default (https://api.openai.com/v1).
+        # Explicit base_url allows pointing at Azure/proxy if ever needed.
+        self.client = OpenAI(api_key=api_key, base_url=base_url, timeout=60.0)
+        self.model_id = model_id
+
+
 # --- OllamaClient (v0.2.0 local LLM support) ---------------------------------
 
 class OllamaClient(AIClient):
@@ -960,10 +994,20 @@ def create_ai_client(
             model_id=model_id,
             base_url=base_url or OPENROUTER_BASE_URL,
         )
+    # OpenAI native (v0.3.0): 'openai/gpt-4o' etc. The GPT-Realtime
+    # speech-to-speech path uses LLM_PROVIDER='openai-realtime' and is
+    # handled separately in app.py (realtime.py), NOT through this factory —
+    # so 'gpt-realtime*' should never reach here as a vision MODEL_ID.
+    if mid.startswith("openai/"):
+        return OpenAIVisionClient(
+            api_key=api_key,
+            model_id=model_id,
+            base_url=base_url,  # None → OpenAI SDK default api.openai.com
+        )
     raise ValueError(
         f"Unsupported MODEL_ID prefix: {model_id!r}. "
         f"Supported prefixes: 'anthropic/...' (or 'claude...'), "
-        f"'google/...' (or 'gemini...'), 'ollama/...' (or bare "
+        f"'google/...' (or 'gemini...'), 'openai/...', 'ollama/...' (or bare "
         f"'llama*'/'qwen*'/'llava*'/'mistral*'/'phi*'/'gemma*'). "
         f"To add a new provider, subclass AIClient in ai.py and extend "
         f"create_ai_client() with a new branch."

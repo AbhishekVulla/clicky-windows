@@ -877,6 +877,28 @@ class TestMaybeLocateViaGrid:
         assert out is None
         mock_locator.assert_not_called()
 
+    def test_fires_for_openai_vision_client(self, mocker):
+        """v0.3.0: GPT-4o is weak at raw pixel coords (like Ollama), so the
+        grid-locator must fire for OpenAIVisionClient too — directional query,
+        no coordinate in the result."""
+        from app import _maybe_locate_via_grid
+        from ai import OpenAIVisionClient
+        mocker.patch("ai.OpenAI")  # don't build a real OpenAI client
+        mock_locator = mocker.patch("app.locate_via_grid", return_value=(123, 45))
+
+        openai_client = OpenAIVisionClient(api_key="sk-proj-test", model_id="openai/gpt-4o")
+        capture = self._mock_capture(mocker)
+        result = self._mock_result(coordinate=None)
+
+        out = _maybe_locate_via_grid(
+            ai_client=openai_client,
+            result=result,
+            cursor_capture=capture,
+            query="where is the save button",
+        )
+        assert out == (123, 45)
+        mock_locator.assert_called_once()
+
     def test_skipped_when_result_already_has_coordinate(self, mocker):
         """If Claude returned a [POINT:x,y] tag, the locator is unnecessary."""
         from app import _maybe_locate_via_grid
@@ -1061,6 +1083,31 @@ class TestResolveLLMCredentials:
         model_id, api_key = _resolve_llm_credentials()
         assert model_id == "ollama/llama3.2-vision"
         assert api_key == "", "Ollama path must return empty key (unauthenticated local)"
+
+    def test_routes_to_openai_when_provider_is_openai(self, mocker):
+        """v0.3.0: LLM_PROVIDER=openai → returns ('openai/<vision-model>',
+        OPENAI_API_KEY). create_ai_client routes the openai/ prefix to
+        OpenAIVisionClient."""
+        from app import _resolve_llm_credentials
+
+        mocker.patch("app.resolve_setting", return_value="openai")
+        mocker.patch("app.OPENAI_MODEL_VISION", "gpt-4o")
+        mocker.patch("app.OPENAI_API_KEY", "sk-proj-test")
+
+        model_id, api_key = _resolve_llm_credentials()
+        assert model_id == "openai/gpt-4o"
+        assert api_key == "sk-proj-test"
+
+    def test_openai_path_handles_none_api_key(self, mocker):
+        """OPENAI_API_KEY None → empty string, not None (create_ai_client wants str)."""
+        from app import _resolve_llm_credentials
+
+        mocker.patch("app.resolve_setting", return_value="openai")
+        mocker.patch("app.OPENAI_MODEL_VISION", "gpt-4o")
+        mocker.patch("app.OPENAI_API_KEY", None)
+
+        model_id, api_key = _resolve_llm_credentials()
+        assert api_key == ""
 
     def test_anthropic_path_handles_none_api_key(self, mocker):
         """If ANTHROPIC_API_KEY is None (resolve_api_key returned nothing),

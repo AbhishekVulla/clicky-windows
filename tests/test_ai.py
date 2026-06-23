@@ -846,12 +846,14 @@ class TestCreateAIClient:
 
     def test_unknown_prefix_raises_value_error(self):
         from ai import create_ai_client
+        # 'cohere/' is a genuinely unsupported prefix (openai/ became valid in v0.3.0).
         with pytest.raises(ValueError) as excinfo:
-            create_ai_client(model_id="openai/gpt-4o", api_key="test-key")
+            create_ai_client(model_id="cohere/command-r", api_key="test-key")
         msg = str(excinfo.value)
-        assert "openai/gpt-4o" in msg
+        assert "cohere/command-r" in msg
         assert "anthropic/" in msg
         assert "google/" in msg
+        assert "openai/" in msg  # openai/ now listed as supported
 
     def test_base_url_override_forwarded_to_anthropic_client(self, mocker):
         """Tier 2.2 fix: base_url override must reach AnthropicClient, not be silently dropped."""
@@ -1548,3 +1550,63 @@ class TestCreateAIClientOllama:
             api_key="sk-ant-test",
         )
         assert isinstance(client, AnthropicClient)
+
+
+class TestOpenAIVisionClient:
+    """v0.3.0: OpenAIVisionClient (GPT-4o via OpenAI native API) is a thin
+    subclass of GeminiClient — same OpenAI-chat-completions shape, just
+    OpenAI's endpoint instead of OpenRouter. Strips the 'openai/' routing
+    prefix so the API gets the bare model name."""
+
+    def test_strips_openai_prefix_from_model_id(self, mocker):
+        from ai import OpenAIVisionClient
+        mocker.patch("ai.OpenAI")
+        client = OpenAIVisionClient(api_key="sk-proj-test", model_id="openai/gpt-4o")
+        assert client.model_id == "gpt-4o"  # prefix stripped
+
+    def test_keeps_bare_model_id_unchanged(self, mocker):
+        from ai import OpenAIVisionClient
+        mocker.patch("ai.OpenAI")
+        client = OpenAIVisionClient(api_key="sk-proj-test", model_id="gpt-4o")
+        assert client.model_id == "gpt-4o"
+
+    def test_constructs_openai_sdk_with_default_endpoint(self, mocker):
+        """base_url=None → OpenAI SDK uses its default (api.openai.com),
+        NOT OpenRouter (that's GeminiClient's job)."""
+        from ai import OpenAIVisionClient
+        mock_openai = mocker.patch("ai.OpenAI")
+        OpenAIVisionClient(api_key="sk-proj-test", model_id="openai/gpt-4o")
+        kwargs = mock_openai.call_args.kwargs
+        assert kwargs["api_key"] == "sk-proj-test"
+        assert kwargs.get("base_url") is None
+
+    def test_inherits_ask_stream_from_gemini_client(self):
+        """OpenAIVisionClient reuses GeminiClient.ask_stream verbatim —
+        same OpenAI chat.completions streaming shape. Confirms the subclass
+        doesn't override it."""
+        from ai import OpenAIVisionClient, GeminiClient
+        assert OpenAIVisionClient.ask_stream is GeminiClient.ask_stream
+
+
+class TestCreateAIClientOpenAI:
+    """Factory dispatch for the 'openai/' prefix → OpenAIVisionClient."""
+
+    def test_routes_openai_prefix_to_vision_client(self, mocker):
+        from ai import create_ai_client, OpenAIVisionClient
+        mocker.patch("ai.OpenAI")
+        client = create_ai_client(model_id="openai/gpt-4o", api_key="sk-proj-test")
+        assert isinstance(client, OpenAIVisionClient)
+        assert client.model_id == "gpt-4o"  # prefix stripped
+
+    def test_openai_routing_does_not_break_anthropic(self, mocker):
+        """Regression: Anthropic dispatch still works alongside the new branch."""
+        from ai import create_ai_client, AnthropicClient
+        mocker.patch("ai.Anthropic")
+        client = create_ai_client(model_id="anthropic/claude-sonnet-4-6", api_key="sk-ant-test")
+        assert isinstance(client, AnthropicClient)
+
+    def test_openai_routing_does_not_break_ollama(self, mocker):
+        from ai import create_ai_client, OllamaClient
+        mocker.patch("ai.httpx")
+        client = create_ai_client(model_id="ollama/llava:7b", api_key="")
+        assert isinstance(client, OllamaClient)

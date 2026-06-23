@@ -105,6 +105,15 @@ CARTESIA_API_KEY: str | None = resolve_api_key("CARTESIA_API_KEY")
 ~150-250ms TTFB + expressive "buddy" voice. 20k free credits/month from
 https://play.cartesia.ai/sign-in, no credit card required."""
 
+OPENAI_API_KEY: str | None = resolve_api_key("OPENAI_API_KEY")
+"""Optional (v0.3.0). OpenAI native API key (sk-...) for the OpenAI LLM
+provider — GPT-4o vision in the normal pipeline, and GPT-Realtime
+speech-to-speech as a separate path. Selected via LLM_PROVIDER='openai'
+(GPT-4o) or 'openai-realtime' (speech-to-speech). Distinct from the
+OpenRouter sk-or- key stored in ANTHROPIC_API_KEY — this is a direct
+OpenAI key for api.openai.com. Get one at
+https://platform.openai.com/api-keys."""
+
 
 # ── OpenRouter dual-SDK routing (BYOK, model-agnostic) ──────────────────────
 
@@ -353,6 +362,32 @@ OLLAMA_MODEL_TEXT: str = os.getenv(
 """Ollama text-only model used when no screenshots are sent (rare in
 Clicky's PTT flow but kept for parity with Bitshank's vision/text split).
 Defaults to plain ``llama3.2`` (3B, ~2 GB)."""
+
+
+# ── OpenAI (native API — GPT-4o vision + GPT-Realtime) — added v0.3.0 ────────
+
+OPENAI_MODEL_VISION: str = os.getenv(
+    "OPENAI_MODEL_VISION",
+    resolve_setting("OPENAI_MODEL_VISION", "gpt-4o"),
+)
+"""OpenAI vision model for the normal pipeline (LLM_PROVIDER='openai').
+``gpt-4o`` by default — strong general vision, emits [POINT:x,y:label] via
+the same Clicky system prompt as Claude. GPT-4o is weaker than Claude at
+raw pixel coordinates, so pointing is refined through the two-stage
+grid-locator (locator.py), same pattern used for Ollama's weak vision
+models. Routed via the ``openai/`` MODEL_ID prefix in create_ai_client."""
+
+OPENAI_REALTIME_MODEL: str = os.getenv(
+    "OPENAI_REALTIME_MODEL",
+    resolve_setting("OPENAI_REALTIME_MODEL", "gpt-realtime-2"),
+)
+"""OpenAI GPT-Realtime model for the speech-to-speech path
+(LLM_PROVIDER='openai-realtime'). ``gpt-realtime-2`` is GPT-5-class,
+continuous-stream voice — near-zero latency, sees the screenshot, reasons,
+and emits a pointing target via the point_at function call. This path
+bypasses the STT→AIClient→TTS chain entirely (realtime.py owns the
+WebSocket session + audio I/O). Coordinates are refined via the
+grid-locator, same as the GPT-4o path."""
 
 
 # ── Memory ───────────────────────────────────────────────────────────────────

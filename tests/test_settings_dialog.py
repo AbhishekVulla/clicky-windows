@@ -102,13 +102,24 @@ class TestProviderCategoriesData:
         from settings_dialog import _PROVIDER_CATEGORIES
         assert [c.category_key for c in _PROVIDER_CATEGORIES] == ["LLM", "STT", "TTS"]
 
-    def test_llm_category_has_anthropic_and_ollama(self):
-        """v0.2.0: LLM category gained 'ollama' for local Ollama support.
-        Default still index 0 (Anthropic) so existing users see no behavior change."""
+    def test_llm_category_has_anthropic_openai_and_ollama(self):
+        """v0.2.0 added 'ollama'; v0.3.0 added 'openai' (GPT-4o). Order is
+        anthropic, openai, ollama. Default still index 0 (Anthropic) so
+        existing users see no behavior change."""
         from settings_dialog import _PROVIDER_CATEGORIES
         llm = next(c for c in _PROVIDER_CATEGORIES if c.category_key == "LLM")
-        assert [p.provider_id for p in llm.providers] == ["anthropic", "ollama"]
+        assert [p.provider_id for p in llm.providers] == ["anthropic", "openai", "ollama"]
         assert llm.default_index == 0  # Anthropic stays default
+
+    def test_openai_llm_provider_uses_openai_api_key_slot(self):
+        """v0.3.0: OpenAI (GPT-4o) provider stores a direct OPENAI_API_KEY
+        (NOT the OpenRouter sk-or- key in ANTHROPIC_API_KEY)."""
+        from settings_dialog import _PROVIDER_CATEGORIES
+        llm = next(c for c in _PROVIDER_CATEGORIES if c.category_key == "LLM")
+        openai = next(p for p in llm.providers if p.provider_id == "openai")
+        assert openai.api_key_env_var == "OPENAI_API_KEY"
+        assert openai.display_name == "OpenAI (GPT-4o)"
+        assert "platform.openai.com" in openai.signup_url
 
     def test_ollama_llm_provider_has_host_field_not_api_key(self):
         """Ollama is special: its 'api_key_env_var' slot stores OLLAMA_HOST
@@ -211,19 +222,17 @@ class TestSettingsDialogRender:
         items = [tts_dropdown.itemText(i) for i in range(tts_dropdown.count())]
         assert items == ["Cartesia", "ElevenLabs"]
 
-    def test_llm_dropdown_has_anthropic_and_ollama(self, qapp, mocker):
-        """v0.2.0: LLM dropdown gained 'Ollama (local)' alongside Anthropic.
-        Anthropic stays the default (selected at index 0)."""
+    def test_llm_dropdown_has_anthropic_openai_and_ollama(self, qapp, mocker):
+        """v0.3.0: LLM dropdown has Anthropic, OpenAI (GPT-4o), Ollama (local).
+        Anthropic stays default (index 0)."""
         mocker.patch("settings_dialog.keyring.get_password", return_value=None)
         from settings_dialog import SettingsDialog
         dlg = SettingsDialog()
         llm_dropdown = dlg._dropdowns["LLM"]
-        assert llm_dropdown.count() == 2
+        assert llm_dropdown.count() == 3
         items = [llm_dropdown.itemText(i) for i in range(llm_dropdown.count())]
-        assert items == ["Anthropic", "Ollama (local)"]
-        # Default selection is Anthropic
+        assert items == ["Anthropic", "OpenAI (GPT-4o)", "Ollama (local)"]
         assert llm_dropdown.currentIndex() == 0
-
 
 class TestSettingsDialogDropdownSwap:
     """Switching the TTS dropdown from Cartesia → ElevenLabs must:
@@ -384,15 +393,15 @@ class TestOllamaModelDropdown:
     def test_model_row_visible_after_switching_llm_provider_to_ollama(
         self, qapp, mocker
     ):
-        """Switching LLM dropdown to Ollama (index 1) must reveal the
-        model row. Switching back to Anthropic (index 0) must hide it
-        again."""
+        """Switching LLM dropdown to Ollama (index 2 since v0.3.0 added
+        OpenAI at index 1) must reveal the model row. Switching back to
+        Anthropic (index 0) must hide it again."""
         mocker.patch("settings_dialog.keyring.get_password", return_value=None)
         from settings_dialog import SettingsDialog
         dlg = SettingsDialog()
 
-        # Switch to Ollama → row no longer hidden
-        dlg._dropdowns["LLM"].setCurrentIndex(1)
+        # Switch to Ollama (index 2: anthropic=0, openai=1, ollama=2) → row shows
+        dlg._dropdowns["LLM"].setCurrentIndex(2)
         assert dlg._ollama_model_row.isHidden() is False
 
         # Switch back to Anthropic → row hidden again
@@ -467,7 +476,7 @@ class TestOllamaModelDropdown:
 
         from settings_dialog import SettingsDialog
         dlg = SettingsDialog()
-        dlg._dropdowns["LLM"].setCurrentIndex(1)  # Ollama
+        dlg._dropdowns["LLM"].setCurrentIndex(2)  # Ollama (0=anthropic, 1=openai, 2=ollama)
         dlg._key_inputs["LLM"].setText("http://localhost:11434")
         dlg._key_inputs["STT"].setText("stt-key")
         dlg._key_inputs["TTS"].setText("tts-key")
