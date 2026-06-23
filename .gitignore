@@ -76,3 +76,6 @@ _refs/
 
 # v0.2.0 smoke test report (local-only, user reviews before push)
 SMOKE_TEST_v0.2.0.md
+
+# Hackathon submission writeup — local only, content goes to Google Drive
+PYCON_DELIVERABLE.md
