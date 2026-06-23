@@ -285,6 +285,20 @@ class ClickyApp(QObject):
                 ollama_host=OLLAMA_HOST,
             )
         self._ai = ai_client
+
+        # v0.3.0: GPT-Realtime speech-to-speech mode. Selected via
+        # LLM_PROVIDER='openai-realtime'. This is a PARALLEL pipeline — when
+        # active, _handle_press/_handle_release branch to the realtime session
+        # (mic streams to the WS, model speaks back + points) instead of the
+        # STT->AI->TTS chain. The realtime session's rough point_at coordinate
+        # is refined by the grid-locator (via a GPT-4o client). Everything is
+        # fail-safe: a realtime setup failure logs + leaves _realtime None so
+        # the app still runs (just without realtime).
+        self._realtime = None
+        self._realtime_vision = None  # OpenAIVisionClient for grid-locator refinement
+        self._realtime_capture = None  # cursor-screen capture for the current turn
+        if resolve_setting("LLM_PROVIDER", default="anthropic") == "openai-realtime":
+            self._setup_realtime()
         self._stt = stt_client or AssemblyAIStreamingSTT(
             api_key=ASSEMBLYAI_API_KEY
         )
@@ -349,13 +363,89 @@ class ClickyApp(QObject):
         self._cancel_event.set()
         self._tts.stop()
         self._stt.disconnect()
+        if self._realtime is not None:
+            try:
+                self._realtime.close()
+            except Exception:
+                pass
         _log("Shutdown complete.")
 
     # --- Hotkey handlers (called on Qt main thread via pyqtSignal) ---
 
+    # --- v0.3.0 GPT-Realtime (parallel pipeline) ---------------------------
+
+    def _setup_realtime(self) -> None:
+        """Build + connect the GPT-Realtime session. Fail-safe: any error
+        leaves self._realtime None and logs, so the app still runs."""
+        try:
+            from realtime import RealtimeSession
+            from ai import OpenAIVisionClient
+            key = OPENAI_API_KEY or ""
+            # GPT-4o client used only to refine realtime's rough point_at coord
+            # via the grid-locator (realtime coords can be wildly off — see the
+            # y=454-out-of-bounds case in live testing).
+            self._realtime_vision = OpenAIVisionClient(
+                api_key=key, model_id="openai/gpt-4o",
+            )
+            self._realtime = RealtimeSession(
+                api_key=key,
+                on_coordinate=self._realtime_on_coordinate,
+                on_audio_start=lambda: self.sig_hide_spinner.emit(),
+            )
+            self._realtime.connect()
+            _log("REALTIME: session connected (gpt-realtime speech-to-speech mode)")
+        except Exception as exc:
+            self._realtime = None
+            _log(f"REALTIME: setup failed, falling back to normal pipeline — {exc}")
+
+    def _realtime_on_coordinate(self, x: int, y: int, label: str) -> None:
+        """Realtime emitted a point_at(x,y,label). Runs on the realtime recv
+        thread. Refine via the grid-locator (realtime's raw coord is rough),
+        then emit sig_point_at to move the overlay. Falls back to None if the
+        locator can't resolve it."""
+        cap = self._realtime_capture
+        if cap is None:
+            return
+        try:
+            import io as _io
+            import base64 as _b64
+            buf = _io.BytesIO()
+            cap.image.save(buf, format="JPEG", quality=85)
+            jpeg_b64 = _b64.b64encode(buf.getvalue()).decode("ascii")
+            mon = cap.monitor
+            phys_xy = locate_via_grid(
+                llm_client=self._realtime_vision,
+                screenshot_jpeg_b64=jpeg_b64,
+                original_size=(cap.target_width, cap.target_height),
+                physical_size=(mon["width"], mon["height"]),
+                physical_origin=(mon["left"], mon["top"]),
+                dpi_scale=1.0,
+                query=label or "the element the user asked about",
+            )
+            if phys_xy is not None:
+                self.sig_point_at.emit(phys_xy[0], phys_xy[1], mon)
+                _log(f"REALTIME: pointed at {phys_xy} (label={label!r})")
+        except Exception as exc:
+            _log(f"REALTIME: coordinate refine failed — {exc}")
+
     def _handle_press(self) -> None:
         """Hotkey pressed: kill TTS + start recording + capture foreground app."""
         import time
+        # v0.3.0: GPT-Realtime mode takes a separate path — stream mic to the
+        # realtime WS instead of STT. The normal STT/AI/TTS chain is skipped.
+        if self._realtime is not None:
+            _log("PRESS handler START (realtime mode)")
+            try:
+                self._realtime.stop()  # cancel any in-flight response
+                self._realtime.start_turn()
+                cursor_x, cursor_y = get_cursor_position()
+                self._press_cursor_pos = (cursor_x, cursor_y)
+                mon = monitor_containing(cursor_x, cursor_y, list_monitors())
+                if mon is not None:
+                    self.sig_show_waveform.emit(cursor_x, cursor_y, mon)
+            except Exception as exc:
+                _log(f"REALTIME: press failed — {exc}")
+            return
         _log("PRESS handler START")
         t0 = time.time()
         # Clear any stale spinner from a prior interaction (defensive — if the
@@ -505,6 +595,36 @@ class ClickyApp(QObject):
     def _handle_release(self) -> None:
         """Hotkey released: cancel previous worker, spawn new pipeline."""
         import time
+        # v0.3.0: GPT-Realtime mode — capture the screen, hand it to the
+        # realtime session, which commits the spoken audio + requests a
+        # response (model speaks back + emits point_at). Coordinate refinement
+        # happens in _realtime_on_coordinate. Normal pipeline is skipped.
+        if self._realtime is not None:
+            _log("RELEASE handler START (realtime mode)")
+            self.sig_hide_waveform.emit()
+            try:
+                import io as _io
+                import base64 as _b64
+                # Hide overlay so the model never sees our own blue cursor.
+                self.sig_hide_overlay.emit()
+                threading.Event().wait(0.05)
+                captures = capture_all_screens()
+                self.sig_show_overlay.emit()
+                # Cursor-screen capture is first (capture_all_screens sorts it).
+                self._realtime_capture = captures[0] if captures else None
+                if self._realtime_capture is not None:
+                    buf = _io.BytesIO()
+                    self._realtime_capture.image.save(buf, format="JPEG", quality=85)
+                    b64 = _b64.b64encode(buf.getvalue()).decode("ascii")
+                    self._realtime.respond(screenshot_jpeg_b64=b64)
+                    # Show THINKING spinner until audio starts (on_audio_start hides it).
+                    cx, cy = self._press_cursor_pos or get_cursor_position()
+                    mon = monitor_containing(cx, cy, list_monitors())
+                    if mon is not None:
+                        self.sig_show_spinner.emit(cx, cy, mon)
+            except Exception as exc:
+                _log(f"REALTIME: release failed — {exc}")
+            return
         _log(f"RELEASE handler START (Qt main thread)")
         # LISTENING → THINKING transition: hide waveform, show spinner at the
         # current cursor position. Cursor polygon stays hidden while spinner
@@ -1100,12 +1220,14 @@ def _resolve_llm_credentials() -> tuple[str, str]:
     about MODEL_ID.
     """
     provider = resolve_setting("LLM_PROVIDER", default="anthropic")
-    if provider == "openai":
-        # v0.3.0: OpenAI native GPT-4o vision in the normal pipeline.
-        # 'openai/' prefix routes create_ai_client → OpenAIVisionClient.
-        # Pointing accuracy is refined via the grid-locator (GPT-4o is
-        # weaker at raw pixel coords than Claude). The GPT-Realtime
-        # speech-to-speech path is 'openai-realtime', handled separately.
+    if provider in ("openai", "openai-realtime"):
+        # v0.3.0: OpenAI native GPT-4o vision. 'openai/' prefix routes
+        # create_ai_client → OpenAIVisionClient. Pointing accuracy is refined
+        # via the grid-locator (GPT-4o is weaker at raw pixel coords than
+        # Claude). For 'openai-realtime', the GPT-Realtime speech-to-speech
+        # session runs as a parallel pipeline (see _setup_realtime); the main
+        # ai_client built here is a valid GPT-4o client used by the realtime
+        # path's grid-locator refinement, harmless otherwise.
         return f"openai/{OPENAI_MODEL_VISION}", OPENAI_API_KEY or ""
     if provider == "ollama":
         # v0.2.1 (Issue #1 fix D): log detected Ollama version + warn

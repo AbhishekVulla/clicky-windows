@@ -1109,6 +1109,21 @@ class TestResolveLLMCredentials:
         model_id, api_key = _resolve_llm_credentials()
         assert api_key == ""
 
+    def test_openai_realtime_resolves_to_gpt4o_vision_client(self, mocker):
+        """v0.3.0: LLM_PROVIDER=openai-realtime still builds a valid GPT-4o
+        vision client as the main ai_client (used by the realtime path's
+        grid-locator refinement). The realtime speech-to-speech session runs
+        as a parallel pipeline (_setup_realtime), not via this resolver."""
+        from app import _resolve_llm_credentials
+
+        mocker.patch("app.resolve_setting", return_value="openai-realtime")
+        mocker.patch("app.OPENAI_MODEL_VISION", "gpt-4o")
+        mocker.patch("app.OPENAI_API_KEY", "sk-proj-test")
+
+        model_id, api_key = _resolve_llm_credentials()
+        assert model_id == "openai/gpt-4o"
+        assert api_key == "sk-proj-test"
+
     def test_anthropic_path_handles_none_api_key(self, mocker):
         """If ANTHROPIC_API_KEY is None (resolve_api_key returned nothing),
         we must return empty string (not None) — create_ai_client expects str."""
