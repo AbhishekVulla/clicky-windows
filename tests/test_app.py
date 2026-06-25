@@ -1079,12 +1079,17 @@ class TestResolveLLMCredentials:
     AnthropicClient anyway. The Settings dropdown was cosmetic."""
 
     def test_defaults_to_anthropic_path(self, mocker):
-        """No LLM_PROVIDER set → returns (MODEL_ID, ANTHROPIC_API_KEY)."""
+        """No LLM_PROVIDER + no MODEL_ID override → defaults to
+        anthropic/claude-sonnet-4-6. resolve_setting is keyed (LLM_PROVIDER vs
+        ANTHROPIC_MODEL), and MODEL_ID env is forced empty so the test exercises
+        the default model-resolution path regardless of the local .env."""
         from app import _resolve_llm_credentials
-        import config
 
-        mocker.patch("app.resolve_setting", return_value="anthropic")
-        mocker.patch("app.MODEL_ID", "anthropic/claude-sonnet-4-6")
+        mocker.patch(
+            "app.resolve_setting",
+            side_effect=lambda name, default=None: {"LLM_PROVIDER": "anthropic"}.get(name, default),
+        )
+        mocker.patch("app.os.getenv", return_value=None)  # no MODEL_ID env override
         mocker.patch("app.ANTHROPIC_API_KEY", "sk-ant-test")
 
         model_id, api_key = _resolve_llm_credentials()
@@ -1162,12 +1167,15 @@ class TestResolveLLMCredentials:
         path. Don't crash."""
         from app import _resolve_llm_credentials
 
-        mocker.patch("app.resolve_setting", return_value="bogus-provider")
-        mocker.patch("app.MODEL_ID", "anthropic/claude-sonnet-4-6")
+        mocker.patch(
+            "app.resolve_setting",
+            side_effect=lambda name, default=None: {"LLM_PROVIDER": "bogus-provider"}.get(name, default),
+        )
+        mocker.patch("app.os.getenv", return_value=None)  # no MODEL_ID env override
         mocker.patch("app.ANTHROPIC_API_KEY", "sk-ant-test")
 
         model_id, api_key = _resolve_llm_credentials()
-        # Falls back to anthropic — doesn't raise.
+        # Falls back to anthropic with the default model — doesn't raise.
         assert model_id == "anthropic/claude-sonnet-4-6"
         assert api_key == "sk-ant-test"
 
