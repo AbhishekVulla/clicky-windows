@@ -1610,3 +1610,20 @@ class TestCreateAIClientOpenAI:
         mocker.patch("ai.httpx")
         client = create_ai_client(model_id="ollama/llava:7b", api_key="")
         assert isinstance(client, OllamaClient)
+
+
+class TestAnnotationPrompt:
+    """v0.3.0 hackathon: draw-on-screen annotation system prompt."""
+
+    def test_annotation_prompt_has_four_shape_tags(self):
+        from ai import _CLICKY_ANNOTATION_SYSTEM_PROMPT as p
+        for tag in ("[ARROW:", "[CIRCLE:", "[UNDERLINE:", "[LABEL:"):
+            assert tag in p, f"annotation prompt missing {tag}"
+
+    def test_annotation_prompt_uses_image_dimension_coordinate_space(self):
+        """Farza's accuracy contract: tell the model the screenshot pixel
+        dimensions and ask for coords in that space."""
+        from ai import _CLICKY_ANNOTATION_SYSTEM_PROMPT as p
+        assert "dimension" in p.lower()
+        assert "pixel" in p.lower()
+        assert "0,0" in p or "origin" in p.lower()

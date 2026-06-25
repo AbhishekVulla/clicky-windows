@@ -454,3 +454,59 @@ class TestSpinnerWidgetMath:
         assert abs(_spinner_angle_deg(_SPINNER_PERIOD_S) - 0.0) < 1e-6
         # At 1.5 periods, angle is 180 again
         assert abs(_spinner_angle_deg(_SPINNER_PERIOD_S * 1.5) - 180.0) < 1e-6
+
+
+# --- Hackathon: teaching-annotation coordinate transform --------------------
+
+class TestAnnotationsToLocal:
+    """Tests for overlay.annotations_to_local — maps annotation coords from
+    PHYSICAL virtual-desktop pixels to a screen's LOCAL-logical DIP coords.
+    Pure function, same Space A->B math the [POINT] path uses (proven: the
+    253,52->569,117 marker landed on the button). Mock-based, no QApplication.
+    """
+
+    def test_circle_center_and_radius_transformed(self):
+        from overlay import annotations_to_local
+        from annotations import Circle
+        # 2.25-ratio screen at origin (mirrors the user's 2880x1800@200%-ish box).
+        # physical (569,117) -> local (252, 52); radius 45 -> 45/2.25 = 20.
+        screen = _MockScreen(x=0, y=0, w=1280, h=800, ratio=2.25, name="Mock")
+        out = annotations_to_local([Circle(569, 117, 45, "save")], screen)
+        assert out == [Circle(252, 52, 20, "save")]
+
+    def test_arrow_both_endpoints_transformed(self):
+        from overlay import annotations_to_local
+        from annotations import Arrow
+        screen = _MockScreen(x=0, y=0, w=1280, h=800, ratio=2.0, name="Mock")
+        out = annotations_to_local([Arrow(100, 200, 300, 400)], screen)
+        assert out == [Arrow(50, 100, 150, 200)]
+
+    def test_underline_width_scaled_by_ratio(self):
+        from overlay import annotations_to_local
+        from annotations import Underline
+        screen = _MockScreen(x=0, y=0, w=1280, h=800, ratio=2.0, name="Mock")
+        out = annotations_to_local([Underline(100, 200, 240)], screen)
+        assert out == [Underline(50, 100, 120)]
+
+    def test_label_text_preserved_coords_transformed(self):
+        from overlay import annotations_to_local
+        from annotations import Label
+        screen = _MockScreen(x=0, y=0, w=1280, h=800, ratio=2.0, name="Mock")
+        out = annotations_to_local([Label(100, 200, "multiply by 2")], screen)
+        assert out == [Label(50, 100, "multiply by 2")]
+
+    def test_respects_per_screen_origin_offset(self):
+        """A second monitor at physical origin (2560,0): physical x has the
+        origin subtracted before the ratio divide (per-screen DPI, not global)."""
+        from overlay import annotations_to_local
+        from annotations import Circle
+        # geometry is in DIP; origin_phys = left*ratio = 1280*2.0 = 2560.
+        screen = _MockScreen(x=1280, y=0, w=960, h=540, ratio=2.0, name="Ext")
+        out = annotations_to_local([Circle(2660, 100, 20, "")], screen)
+        # (2660 - 2560)/2.0 = 50 ; 100/2.0 = 50 ; r 20/2.0 = 10
+        assert out == [Circle(50, 50, 10, "")]
+
+    def test_empty_list_returns_empty(self):
+        from overlay import annotations_to_local
+        screen = _MockScreen(x=0, y=0, w=1280, h=800, ratio=1.0, name="Mock")
+        assert annotations_to_local([], screen) == []

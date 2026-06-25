@@ -29,7 +29,13 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtWidgets import QApplication
 
 import kb
-from ai import OllamaClient, OpenAIVisionClient, create_ai_client
+from ai import (
+    _CLICKY_ANNOTATION_SYSTEM_PROMPT,
+    OllamaClient,
+    OpenAIVisionClient,
+    create_ai_client,
+)
+from annotations import parse_annotations
 from debug_log import DebugSession
 from locator import locate_via_grid
 from capture import (
@@ -41,6 +47,7 @@ from capture import (
     unscale_claude_coords,
 )
 from config import (
+    ANNOTATION_MODE,
     ANTHROPIC_API_KEY,
     ASSEMBLYAI_API_KEY,
     CARTESIA_API_KEY,
@@ -115,6 +122,54 @@ def _looks_directional(query: str) -> bool:
         return False
     q_lower = query.lower()
     return any(word in q_lower for word in _DIRECTIONAL_QUERY_WORDS)
+
+
+def _annotations_to_physical(annotations: list, cursor_capture) -> list:
+    """Map screenshot-pixel annotation coords -> physical virtual-desktop
+    coords using the SAME proven transform the [POINT] cursor uses
+    (capture.unscale_claude_coords: clamp -> *scale -> +monitor-origin). The
+    v0.1.0 marker proved this exact transform correct (253,52 -> 569,117 landed
+    on the button). No grid-locator — Claude is natively accurate at coords;
+    GPT-4o/Ollama are selectable and forgiving for big worksheet regions.
+
+    Lengths (circle radius, underline width) only scale by scale_x (they're
+    sizes, not positions — no origin, no clamp). Returns NEW annotation objects.
+    """
+    from annotations import Arrow, Circle, Underline, Label
+
+    if not annotations:
+        return []
+
+    cap = cursor_capture
+
+    def pt(x: int, y: int) -> tuple[int, int]:
+        return unscale_claude_coords(
+            claude_x=x,
+            claude_y=y,
+            scale_x=cap.scale_x,
+            scale_y=cap.scale_y,
+            monitor_left=cap.monitor["left"],
+            monitor_top=cap.monitor["top"],
+            target_w=cap.target_width,
+            target_h=cap.target_height,
+        )
+
+    out: list = []
+    for a in annotations:
+        if isinstance(a, Circle):
+            x, y = pt(a.x, a.y)
+            out.append(Circle(x, y, int(a.r * cap.scale_x), a.label))
+        elif isinstance(a, Arrow):
+            x1, y1 = pt(a.x1, a.y1)
+            x2, y2 = pt(a.x2, a.y2)
+            out.append(Arrow(x1, y1, x2, y2))
+        elif isinstance(a, Underline):
+            x, y = pt(a.x, a.y)
+            out.append(Underline(x, y, int(a.w * cap.scale_x)))
+        elif isinstance(a, Label):
+            x, y = pt(a.x, a.y)
+            out.append(Label(x, y, a.text))
+    return out
 
 
 def _maybe_locate_via_grid(
@@ -261,6 +316,12 @@ class ClickyApp(QObject):
     # ~4-7s LLM wait (instead of the cursor just sitting there).
     sig_show_spinner = pyqtSignal(int, int, dict)
     sig_hide_spinner = pyqtSignal()
+    # v0.3.0 hackathon: draw-on-screen teaching annotations. Carries a list of
+    # annotation dataclasses (PHYSICAL coords) + the target monitor dict.
+    sig_show_annotations = pyqtSignal(list, dict)
+    # Clear all teaching shapes (fired at the start of each press so stale
+    # annotations never survive a no-speech / cancelled / errored turn).
+    sig_clear_annotations = pyqtSignal()
 
     def __init__(
         self,
@@ -333,6 +394,8 @@ class ClickyApp(QObject):
         self.sig_audio_level.connect(self._on_audio_level)
         self.sig_show_spinner.connect(self._on_show_spinner)
         self.sig_hide_spinner.connect(self._on_hide_spinner)
+        self.sig_show_annotations.connect(self._on_show_annotations)
+        self.sig_clear_annotations.connect(self._on_clear_annotations)
 
     def start(self) -> None:
         """Initialize overlay + hotkey and begin listening.
@@ -381,11 +444,12 @@ class ClickyApp(QObject):
             from realtime import RealtimeSession
             from ai import OpenAIVisionClient
             key = OPENAI_API_KEY or ""
-            # GPT-4o client used only to refine realtime's rough point_at coord
-            # via the grid-locator (realtime coords can be wildly off — see the
-            # y=454-out-of-bounds case in live testing).
+            # Accurate vision client for the realtime PIXEL pass — gpt-5.4 by
+            # default (pixel-perfect grounding, live-verified 5px off Claude;
+            # NO grid-locator, which the old gpt-4o path needed). Same
+            # OPENAI_MODEL_VISION the standard OpenAI path uses.
             self._realtime_vision = OpenAIVisionClient(
-                api_key=key, model_id="openai/gpt-4o",
+                api_key=key, model_id=f"openai/{OPENAI_MODEL_VISION}",
             )
             self._realtime = RealtimeSession(
                 api_key=key,
@@ -399,34 +463,83 @@ class ClickyApp(QObject):
             _log(f"REALTIME: setup failed, falling back to normal pipeline — {exc}")
 
     def _realtime_on_coordinate(self, x: int, y: int, label: str) -> None:
-        """Realtime emitted a point_at(x,y,label). Runs on the realtime recv
-        thread. Refine via the grid-locator (realtime's raw coord is rough),
-        then emit sig_point_at to move the overlay. Falls back to None if the
-        locator can't resolve it."""
+        """Realtime called point_at(x,y,label) — the user wants visual help.
+        Runs on the realtime recv thread. We DISCARD the model's rough (x,y)
+        (realtime is weak at pixels) and do an ACCURATE vision pass (gpt-5.4)
+        on the screenshot instead: when draw mode is on, render shapes;
+        otherwise point the cursor. Both via gpt-5.4 — drops the old gpt-4o
+        grid-locator entirely."""
         cap = self._realtime_capture
         if cap is None:
             return
         try:
-            import io as _io
-            import base64 as _b64
-            buf = _io.BytesIO()
-            cap.image.save(buf, format="JPEG", quality=85)
-            jpeg_b64 = _b64.b64encode(buf.getvalue()).decode("ascii")
-            mon = cap.monitor
-            phys_xy = locate_via_grid(
-                llm_client=self._realtime_vision,
-                screenshot_jpeg_b64=jpeg_b64,
-                original_size=(cap.target_width, cap.target_height),
-                physical_size=(mon["width"], mon["height"]),
-                physical_origin=(mon["left"], mon["top"]),
-                dpi_scale=1.0,
-                query=label or "the element the user asked about",
-            )
-            if phys_xy is not None:
-                self.sig_point_at.emit(phys_xy[0], phys_xy[1], mon)
-                _log(f"REALTIME: pointed at {phys_xy} (label={label!r})")
+            if ANNOTATION_MODE == "on":
+                shapes = self._realtime_render_annotations(
+                    label, cap, self._realtime_vision
+                )
+                if shapes:
+                    self.sig_show_annotations.emit(shapes, cap.monitor)
+                    _log(f"REALTIME: drew {len(shapes)} shapes (label={label!r})")
+                    return
+            phys = self._realtime_locate_point(label, cap, self._realtime_vision)
+            if phys is not None:
+                self.sig_point_at.emit(phys[0], phys[1], cap.monitor)
+                _log(f"REALTIME: pointed at {phys} (label={label!r})")
         except Exception as exc:
-            _log(f"REALTIME: coordinate refine failed — {exc}")
+            _log(f"REALTIME: vision pass failed — {exc}")
+
+    def _realtime_render_annotations(self, label, cap, vision_client) -> list:
+        """Accurate annotation vision pass for realtime draw mode: send the
+        screenshot + the annotation system prompt to gpt-5.4, parse the shape
+        tags, map to physical coords. Returns physical shapes (possibly empty).
+
+        Uses ask_stream (not ask) because only ask_stream accepts a
+        system_prompt override. The spoken text is discarded — GPT-Realtime
+        already speaks; this pass is pixels-only."""
+        img_label = (
+            f"primary focus (image dimensions: "
+            f"{cap.target_width}x{cap.target_height} pixels)"
+        )
+        query = (
+            f"circle or point at: {label}" if label
+            else "point at what the user just asked about"
+        )
+        with vision_client.ask_stream(
+            images=[(cap.image, img_label)],
+            transcript=query,
+            history=[],
+            system_prompt=_CLICKY_ANNOTATION_SYSTEM_PROMPT,
+        ) as stream:
+            for _ in stream.text_deltas():
+                pass
+            result = stream.final_result()
+        _, anns = parse_annotations(result.spoken_text)
+        return _annotations_to_physical(anns, cap)
+
+    def _realtime_locate_point(self, label, cap, vision_client):
+        """Accurate single-point vision pass for realtime cursor mode — gpt-5.4
+        returns a precise [POINT] directly. Returns physical (x,y) or None."""
+        query = (
+            f"where is: {label}" if label
+            else "where is what the user just asked about"
+        )
+        result = vision_client.ask(
+            cap.image, query, [], cap.target_width, cap.target_height,
+        )
+        points = result.get("points") or []
+        if not points:
+            return None
+        p = points[0]
+        return unscale_claude_coords(
+            claude_x=p["x"],
+            claude_y=p["y"],
+            scale_x=cap.scale_x,
+            scale_y=cap.scale_y,
+            monitor_left=cap.monitor["left"],
+            monitor_top=cap.monitor["top"],
+            target_w=cap.target_width,
+            target_h=cap.target_height,
+        )
 
     def _handle_press(self) -> None:
         """Hotkey pressed: kill TTS + start recording + capture foreground app."""
@@ -448,10 +561,23 @@ class ClickyApp(QObject):
             return
         _log("PRESS handler START")
         t0 = time.time()
+        # Cancel any in-flight worker from the PREVIOUS turn BEFORE clearing, so
+        # it can't race past its cancel guards and repaint stale annotations /
+        # pointer after this clear. (Without this, the old worker is only
+        # cancelled at release, leaving a window during the new press-hold where
+        # it could emit sig_show_annotations again.) Mirrors _handle_release's
+        # cancel; the new worker gets a fresh cancel_event at release.
+        if self._worker_thread and self._worker_thread.is_alive():
+            self._cancel_event.set()
         # Clear any stale spinner from a prior interaction (defensive — if the
         # previous pipeline errored before hide_spinner fired, we don't want
         # to leave a spinner spinning when a new PTT starts).
         self.sig_hide_spinner.emit()
+        # Same for stale teaching annotations: clearing on every press means
+        # old shapes never survive a no-speech / cancelled / errored prior turn
+        # (they'd otherwise linger until the 30s auto-clear timer). Cheap no-op
+        # when there were no annotations.
+        self.sig_clear_annotations.emit()
         self._tts.stop()
         # Prevent TTS speaker decay from leaking into this PTT's transcript
         # (acoustic feedback loop). 200ms window tuned to real laptop-mic decay.
@@ -830,13 +956,26 @@ class ClickyApp(QObject):
             tag_started = False
             already_flushed_chars = 0
 
-            with self._ai.ask_stream(
+            # v0.3.0 hackathon: draw-on-screen teaching mode. Uses the module-
+            # level cached config.ANNOTATION_MODE (resolved ONCE at import) — NOT
+            # a fresh resolve_setting() — so there is ZERO per-interaction keyring
+            # read/write on the hot path (resolve_setting writes to keyring on
+            # every call when the value is in env). Trade-off: toggling needs an
+            # app restart, which is fine (set once in .env). When on, swap in the
+            # annotation system prompt so the model emits shape tags. Default
+            # off = unchanged behavior (the [POINT] cursor prompt).
+            annotation_mode = ANNOTATION_MODE == "on"
+            _ask_kwargs = dict(
                 images=images,
                 transcript=user_text,
                 history=self._history,
                 kb_content=kb_content,
                 kb_app_name=kb_app_name,
-            ) as stream:
+            )
+            if annotation_mode:
+                _ask_kwargs["system_prompt"] = _CLICKY_ANNOTATION_SYSTEM_PROMPT
+
+            with self._ai.ask_stream(**_ask_kwargs) as stream:
                 for delta in stream.text_deltas():
                     if cancel.is_set():
                         return
@@ -861,11 +1000,35 @@ class ClickyApp(QObject):
             dbg.log(f"CLAUDE: spoken_text: {result.spoken_text!r}")
             dbg.log(f"CLAUDE: coordinate={result.coordinate}, label={result.element_label!r}, screen={result.screen_number}")
 
+            # v0.3.0 annotation mode: the shape tags ([ARROW]/[CIRCLE]/...) are
+            # still in result.spoken_text — ai.py's parser only strips [POINT].
+            # Parse + strip them here so TTS never reads coordinates aloud, and
+            # map their screenshot coords to physical for the overlay.
+            spoken_text = result.spoken_text
+            phys_annotations: list = []
+            if annotation_mode and result.spoken_text:
+                # Strip FIRST, outside the try — parse_annotations is pure regex
+                # and cannot raise, so spoken_text is ALWAYS tag-stripped before
+                # the tail flush (coords never reach TTS even if the coordinate
+                # transform below fails). Only the physical transform is guarded.
+                spoken_text, _anns = parse_annotations(result.spoken_text)
+                if _anns:
+                    try:
+                        phys_annotations = _annotations_to_physical(
+                            _anns, cursor_capture
+                        )
+                        dbg.log(
+                            f"ANNOTATIONS: {len(_anns)} shapes parsed -> "
+                            f"{len(phys_annotations)} physical"
+                        )
+                    except Exception as exc:  # never break the pipeline
+                        dbg.log(f"ANNOTATIONS: transform skipped — {exc}")
+
             # Flush the tail (everything in spoken_text that hasn't yet been
-            # sent to TTS). Uses result.spoken_text because it's tag-stripped —
-            # avoids ever speaking the [POINT:x,y:label] aloud.
-            if result.spoken_text:
-                tail = result.spoken_text[already_flushed_chars:].strip()
+            # sent to TTS). Uses the tag-stripped spoken_text — avoids ever
+            # speaking the [POINT:x,y:label] OR shape tags aloud.
+            if spoken_text:
+                tail = spoken_text[already_flushed_chars:].strip()
                 if tail:
                     dbg.log(f"TTS: flushing tail ({len(tail)} chars)")
                     self._tts.speak_sentence(tail)
@@ -890,13 +1053,23 @@ class ClickyApp(QObject):
             # codex adversarial review 2026-06-05 (HIGH 2).
             if cancel.is_set():
                 return
-            locator_phys_xy = _maybe_locate_via_grid(
-                ai_client=self._ai,
-                result=result,
-                cursor_capture=cursor_capture,
-                query=transcript,
-                dbg=dbg,
-            )
+            if annotation_mode:
+                # Annotation mode draws SHAPES, not a grid-located cursor point.
+                # Skip the grid-locator entirely — it would otherwise fire for
+                # weak-vision providers (OpenAI/Ollama) on directional queries
+                # since annotation responses carry no [POINT] tag, adding 2 extra
+                # LLM calls + emitting an unrelated cursor point that competes
+                # with the shapes. Keeps annotation behavior identical across
+                # providers (Codex review 2026-06-25).
+                locator_phys_xy = None
+            else:
+                locator_phys_xy = _maybe_locate_via_grid(
+                    ai_client=self._ai,
+                    result=result,
+                    cursor_capture=cursor_capture,
+                    query=transcript,
+                    dbg=dbg,
+                )
             # POST-LOCATOR cancel guard: if locator just ran (took seconds on
             # Ollama), the user may have hit ESC or pressed Ctrl+Alt+Space
             # again. Stop before emitting any pointer / memory side effects
@@ -954,6 +1127,21 @@ class ClickyApp(QObject):
                 # returns to follow-cursor mode during TTS playback.
                 self.sig_hide_spinner.emit()
 
+            # v0.3.0: draw the teaching annotations (additive to the cursor).
+            # Independent of the [POINT]/locator branches above — shapes show
+            # during SPEAKING and auto-clear after 30s. Emit on EVERY annotation-
+            # mode turn (even with zero shapes) so a no-shape answer clears any
+            # stale circles/arrows from the previous turn immediately, instead of
+            # leaving them on screen (misleading) until the 30s timer fires.
+            # Final cancel guard: if the user re-pressed (which cancels this
+            # worker), do NOT repaint — the press already cleared the overlay.
+            if cancel.is_set():
+                return
+            if annotation_mode:
+                self.sig_show_annotations.emit(
+                    phys_annotations, cursor_capture.monitor
+                )
+
             pointer_targets = []
             if result.coordinate:
                 pointer_targets.append(result.coordinate)
@@ -963,11 +1151,16 @@ class ClickyApp(QObject):
                 # the same way Claude coords are referenced.
                 pointer_targets.append(locator_phys_xy)
 
+            # Use the tag-stripped `spoken_text` (== result.spoken_text in
+            # normal mode; shape-tags removed in annotation mode) so memory +
+            # history never store [CIRCLE]/[ARROW] control tags — otherwise
+            # recall() would re-inject coordinates into future prompts and
+            # stale tags could resurface on non-annotation turns.
             self.sig_record_memory.emit(
                 app_name,
                 window_title,
                 transcript,
-                result.spoken_text,
+                spoken_text,
                 pointer_targets,
             )
 
@@ -977,7 +1170,7 @@ class ClickyApp(QObject):
             })
             self._history.append({
                 "role": "assistant",
-                "content": [{"type": "text", "text": result.spoken_text}],
+                "content": [{"type": "text", "text": spoken_text}],
             })
             if len(self._history) > _MAX_HISTORY_EXCHANGES * 2:
                 self._history = self._history[-(
@@ -1053,6 +1246,14 @@ class ClickyApp(QObject):
     def _on_hide_spinner(self) -> None:
         if self._overlay:
             self._overlay.hide_spinner()
+
+    def _on_show_annotations(self, annotations: list, monitor: dict) -> None:
+        if self._overlay:
+            self._overlay.show_annotations(annotations, monitor)
+
+    def _on_clear_annotations(self) -> None:
+        if self._overlay:
+            self._overlay.clear_all_annotations()
 
 
 _T0 = __import__("time").time()
@@ -1263,8 +1464,24 @@ def _resolve_llm_credentials() -> tuple[str, str]:
         # Construct an ollama/ prefixed model id so create_ai_client routes
         # correctly. api_key is empty (Ollama is unauthenticated local).
         return f"ollama/{OLLAMA_MODEL_VISION}", ""
-    # anthropic (default) — preserve existing MODEL_ID + ANTHROPIC_API_KEY path
-    return MODEL_ID, ANTHROPIC_API_KEY or ""
+    # anthropic (default). v0.3.0: the Settings model dropdown persists
+    # ANTHROPIC_MODEL (e.g. claude-opus-4-8 for max accuracy) — honor it. An
+    # explicitly-set MODEL_ID env var still takes precedence (advanced override).
+    if os.getenv("MODEL_ID"):
+        return MODEL_ID, ANTHROPIC_API_KEY or ""
+    ant_model = resolve_setting("ANTHROPIC_MODEL", default="claude-sonnet-4-6")
+    return f"anthropic/{ant_model}", ANTHROPIC_API_KEY or ""
+
+
+def _should_connect_stt(realtime) -> bool:
+    """Whether to open the AssemblyAI STT mic at startup.
+
+    FALSE in realtime mode: GPT-Realtime owns the 24 kHz mic (realtime.py
+    start_turn opens its own RawInputStream). Opening the 16 kHz AssemblyAI
+    STT mic too is the 'two-mic bug' — both grab the input device and the
+    realtime path produces no audio. So in realtime mode we skip STT entirely.
+    """
+    return realtime is None
 
 
 # --- Manual entry point -------------------------------------------------------
@@ -1392,15 +1609,21 @@ if __name__ == "__main__":
         tts_client=tts_instance,
     )
 
-    _log("Pre-opening mic + WebSocket (one-time startup cost)...")
-    try:
-        clicky._stt.connect()
-        clicky._stt.on_partial_transcript(
-            lambda text: print(f"[stt partial] {text}", flush=True)
-        )
-    except RuntimeError as exc:
-        print(f"\nERROR: {exc}")
-        sys.exit(1)
+    # Two-mic fix: in realtime mode, GPT-Realtime owns the 24kHz mic, so we
+    # must NOT also open the 16kHz AssemblyAI STT mic (both grabbing the input
+    # device = no audio). Skip STT entirely when the realtime session is active.
+    if _should_connect_stt(clicky._realtime):
+        _log("Pre-opening mic + WebSocket (one-time startup cost)...")
+        try:
+            clicky._stt.connect()
+            clicky._stt.on_partial_transcript(
+                lambda text: print(f"[stt partial] {text}", flush=True)
+            )
+        except RuntimeError as exc:
+            print(f"\nERROR: {exc}")
+            sys.exit(1)
+    else:
+        _log("REALTIME: skipping AssemblyAI STT mic (GPT-Realtime owns the mic)")
 
     clicky.start()
 

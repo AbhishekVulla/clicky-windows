@@ -256,6 +256,26 @@ class TestClickyApp:
         app._on_hide_spinner()
         app._overlay.hide_spinner.assert_called_once()
 
+    def test_press_clears_stale_annotations(self, mocker):
+        """v0.3.0: PRESS must clear any stale teaching annotations from a prior
+        turn so old shapes never survive a no-speech/cancelled/errored turn."""
+        app = self._make_app(mocker)
+        mocker.patch("app.get_foreground_app", return_value=("EXCEL.EXE", "Sheet1"))
+        mocker.patch("app.get_cursor_position", return_value=(100, 100))
+        mocker.patch("app.capture_all_screens", return_value=[mocker.MagicMock()])
+
+        app._handle_press()
+        if app._capture_thread is not None:
+            app._capture_thread.join(timeout=2.0)
+
+        app._overlay.clear_all_annotations.assert_called()
+
+    def test_clear_annotations_slot_forwards_to_overlay(self, mocker):
+        """sig_clear_annotations slot must delegate to overlay.clear_all_annotations."""
+        app = self._make_app(mocker)
+        app._on_clear_annotations()
+        app._overlay.clear_all_annotations.assert_called_once()
+
     def test_press_handler_plays_listening_chime(self, mocker):
         """Path A Task 11: _handle_press plays a short chime the moment the
         hotkey goes down so the user has immediate feedback 'mic is hot, keep
@@ -1150,3 +1170,144 @@ class TestResolveLLMCredentials:
         # Falls back to anthropic — doesn't raise.
         assert model_id == "anthropic/claude-sonnet-4-6"
         assert api_key == "sk-ant-test"
+
+
+class TestAnnotationsToPhysical:
+    """v0.3.0 hackathon: map screenshot-space annotation coords to physical
+    virtual-desktop coords via the SAME unscale_claude_coords transform the
+    [POINT] cursor uses (proven correct by the v0.1.0 253,52->569,117 marker)."""
+
+    def _cap(self, mocker, scale=2.25):
+        cap = mocker.MagicMock()
+        cap.scale_x = scale
+        cap.scale_y = scale
+        cap.monitor = {"left": 0, "top": 0, "width": 2880, "height": 1800}
+        cap.target_width = 1280
+        cap.target_height = 800
+        return cap
+
+    def test_circle_uses_proven_marker_transform(self, mocker):
+        from app import _annotations_to_physical
+        from annotations import Circle
+        out = _annotations_to_physical([Circle(253, 52, 10, "save")], self._cap(mocker))
+        # 253*2.25=569, 52*2.25=117, r 10*2.25=22 — the exact proven numbers
+        assert out == [Circle(569, 117, 22, "save")]
+
+    def test_arrow_both_endpoints(self, mocker):
+        from app import _annotations_to_physical
+        from annotations import Arrow
+        cap = self._cap(mocker, scale=2.0)
+        out = _annotations_to_physical([Arrow(10, 20, 30, 40)], cap)
+        assert out == [Arrow(20, 40, 60, 80)]
+
+    def test_underline_width_scaled(self, mocker):
+        from app import _annotations_to_physical
+        from annotations import Underline
+        cap = self._cap(mocker, scale=2.0)
+        out = _annotations_to_physical([Underline(10, 20, 50)], cap)
+        assert out == [Underline(20, 40, 100)]
+
+    def test_label_coords_mapped_text_preserved(self, mocker):
+        from app import _annotations_to_physical
+        from annotations import Label
+        cap = self._cap(mocker, scale=2.0)
+        out = _annotations_to_physical([Label(10, 20, "use the chain rule")], cap)
+        assert out == [Label(20, 40, "use the chain rule")]
+
+    def test_respects_monitor_origin_offset(self, mocker):
+        from app import _annotations_to_physical
+        from annotations import Circle
+        cap = self._cap(mocker, scale=2.0)
+        cap.monitor = {"left": 2560, "top": 100, "width": 1920, "height": 1080}
+        out = _annotations_to_physical([Circle(10, 20, 5, "x")], cap)
+        # 2560 + 10*2 = 2580 ; 100 + 20*2 = 140 ; r 5*2 = 10
+        assert out == [Circle(2580, 140, 10, "x")]
+
+    def test_empty_returns_empty(self, mocker):
+        from app import _annotations_to_physical
+        assert _annotations_to_physical([], mocker.MagicMock()) == []
+
+
+class TestShouldConnectStt:
+    """Two-mic fix: skip the AssemblyAI STT mic in realtime mode (GPT-Realtime
+    owns the 24kHz mic; opening the 16kHz STT mic too = no audio)."""
+
+    def test_connects_stt_in_normal_mode(self):
+        from app import _should_connect_stt
+        assert _should_connect_stt(None) is True
+
+    def test_skips_stt_in_realtime_mode(self, mocker):
+        from app import _should_connect_stt
+        fake_realtime = mocker.MagicMock()  # a live RealtimeSession
+        assert _should_connect_stt(fake_realtime) is False
+
+
+class TestRealtimeDrawShapes:
+    """Phase 2B: realtime mode does an ACCURATE vision pass (gpt-5.4) — draws
+    shapes when draw mode is on, else points the cursor. No grid-locator."""
+
+    def _app(self, mocker):
+        from app import ClickyApp
+        return ClickyApp(
+            ai_client=mocker.MagicMock(),
+            stt_client=mocker.MagicMock(),
+            tts_client=mocker.MagicMock(),
+            memory_store=mocker.MagicMock(),
+            overlay_controller=mocker.MagicMock(),
+            hotkey_instance=mocker.MagicMock(),
+        )
+
+    def _cap(self, mocker):
+        cap = mocker.MagicMock()
+        cap.image = mocker.MagicMock()  # PIL image (not used by the mocked client)
+        cap.scale_x = 2.25
+        cap.scale_y = 2.25
+        cap.monitor = {"left": 0, "top": 0, "width": 2880, "height": 1800}
+        cap.target_width = 1280
+        cap.target_height = 800
+        return cap
+
+    def test_render_annotations_parses_shapes_and_transforms(self, mocker):
+        from annotations import Circle
+        app = self._app(mocker)
+        cap = self._cap(mocker)
+
+        class _FakeStream:
+            def __enter__(self_):
+                return self_
+            def __exit__(self_, *a):
+                return False
+            def text_deltas(self_):
+                return iter(["circle it [CIRCLE:253,52,30:save]"])
+            def final_result(self_):
+                r = mocker.MagicMock()
+                r.spoken_text = "circle it [CIRCLE:253,52,30:save]"
+                return r
+
+        vision = mocker.MagicMock()
+        vision.ask_stream.return_value = _FakeStream()
+        shapes = app._realtime_render_annotations("save", cap, vision)
+        # 253*2.25=569, 52*2.25=117, r 30*2.25=67 — the proven ×scale transform
+        assert shapes == [Circle(569, 117, 67, "save")]
+        # annotation prompt was used (system_prompt kwarg)
+        _, kwargs = vision.ask_stream.call_args
+        from ai import _CLICKY_ANNOTATION_SYSTEM_PROMPT
+        assert kwargs["system_prompt"] == _CLICKY_ANNOTATION_SYSTEM_PROMPT
+
+    def test_locate_point_uses_ask_and_unscales(self, mocker):
+        app = self._app(mocker)
+        cap = self._cap(mocker)
+        vision = mocker.MagicMock()
+        vision.ask.return_value = {
+            "text": "the save button",
+            "points": [{"x": 253, "y": 52, "label": "save"}],
+        }
+        phys = app._realtime_locate_point("save", cap, vision)
+        assert phys == (569, 117)
+
+    def test_locate_point_returns_none_when_no_points(self, mocker):
+        app = self._app(mocker)
+        cap = self._cap(mocker)
+        vision = mocker.MagicMock()
+        vision.ask.return_value = {"text": "conceptual", "points": []}
+        assert app._realtime_locate_point("x", cap, vision) is None

@@ -75,6 +75,32 @@ examples:
 - element is on screen 2 (not where cursor is): "that's over on your other monitor — see the terminal window? [POINT:400,300:terminal:screen2]"\
 """
 
+_CLICKY_ANNOTATION_SYSTEM_PROMPT = """\
+you're clicky, a patient tutor that teaches by drawing on the user's screen. the user just spoke to you via push-to-talk and you can see their screen(s). your reply is spoken aloud via text-to-speech, so write the way you'd actually talk — all lowercase, casual, warm, one or two short sentences (longer only if they ask you to go deeper). write for the ear: no lists, no markdown, no symbols that sound weird read aloud.
+
+instead of only pointing with the cursor, you can DRAW on the screen to teach — circle the exact thing you mean, draw an arrow from a mistake to where it should go, underline a term, or write a short correction. use drawing whenever it makes your help more concrete: finding a button, explaining a step, showing a mistake on the user's work.
+
+how to draw: explain in spoken words first, then append shape tags at the very END of your reply, after your spoken text. the screenshot images are labeled with their pixel dimensions — use those dimensions as the coordinate space. the origin (0,0) is the top-left corner of the image, x increases rightward, y increases downward. point at the SPECIFIC element, never a vague region. never read coordinates aloud. only annotate the screen labeled "primary focus" (the one with the cursor) — do NOT emit shape tags for elements on any other screen.
+
+shape tags (use as many as help, only what helps):
+- [CIRCLE:x,y,r:label] — circle the exact element. (x,y) is the center, r is the radius in pixels, label is a 1-3 word description.
+- [ARROW:x1,y1->x2,y2] — an arrow from (x1,y1) to (x2,y2), e.g. from the mistake to where it should go.
+- [UNDERLINE:x,y,w] — underline a term or formula. (x,y) is the left end, w is the width in pixels.
+- [LABEL:x,y:text] — write a short correction or hint on the screen at (x,y).
+
+if nothing on screen is relevant (a purely conceptual question), just speak with no tags.
+
+examples:
+- user asks why their answer is wrong: "you applied the power rule but missed the chain rule here — you need to multiply by the derivative of the inside. [CIRCLE:340,210,28:missing step][ARROW:340,210->410,260]"
+- user asks where to save: "hit the save button up in the top left of the toolbar. [CIRCLE:48,30,18:save]"
+- user asks what a binary tree is (nothing on screen): "it's a structure where each node has at most two children, a left and a right. great for fast lookups."\
+"""
+"""Annotation-mode system prompt (hackathon draw-on-screen). Same
+dimension-labeled coordinate-space contract as the cursor [POINT] prompt
+(Farza CompanionManager.swift:566), extended from a single point to four
+shape tags parsed by annotations.parse_annotations. Used when
+config.ANNOTATION_MODE == 'on'."""
+
 _POINT_TAG_RE = re.compile(
     r"\[POINT:(?:none|(\d+)\s*,\s*(\d+)(?::(?!screen\d)([^\]:\s][^\]:]*?))?(?::screen(\d+))?)\]\s*$"
 )
@@ -602,19 +628,24 @@ class _GeminiStreamingResponse:
 # --- OpenAIVisionClient (v0.3.0 — GPT-4o via OpenAI native API) --------------
 
 class OpenAIVisionClient(GeminiClient):
-    """GPT-4o (or any OpenAI vision model) via the OpenAI Python SDK pointed
+    """OpenAI vision model (default gpt-5.4) via the OpenAI Python SDK pointed
     at OpenAI's native endpoint (api.openai.com).
 
     Reuses GeminiClient's ``ask_stream`` / ``ask`` / ``_GeminiStreamingResponse``
     verbatim — both are OpenAI-chat-completions-shaped, the only difference is
     the endpoint + key. Emits ``[POINT:x,y:label]`` per the same Clicky system
-    prompt. GPT-4o is weaker than Claude at raw pixel coordinates, so app.py
-    refines pointing through the two-stage grid-locator (locator.py) — the
-    same path Ollama's weak vision models use.
+    prompt.
+
+    Accuracy note (2026-06-25): the default model is now **gpt-5.4**, which is
+    pixel-accurate at grounding (live-verified 5px off Claude on the EduPack
+    target; 85.4% ScreenSpot-Pro). It returns a precise ``[POINT]`` tag directly,
+    so app.py's grid-locator auto-skips (it only fires when no tag is present).
+    The grid-locator crutch was for the OLD gpt-4o default (74px off) and for
+    Ollama's weak local vision models — both still supported via env override.
 
     Routed via the ``openai/`` MODEL_ID prefix in create_ai_client(). The
-    GPT-Realtime speech-to-speech path is separate (realtime.py) and does NOT
-    go through this client.
+    GPT-Realtime speech-to-speech path is separate (realtime.py); its accurate
+    pixel pass also goes through this client (gpt-5.4) — see app.py.
     """
 
     def __init__(

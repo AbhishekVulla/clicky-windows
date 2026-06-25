@@ -67,17 +67,38 @@ _OLLAMA_MODEL_SUGGESTIONS: tuple[str, ...] = (
 
 
 @dataclass(frozen=True)
+class _Model:
+    """One selectable model for a provider. ``model_id`` is the bare model
+    string passed to the SDK / stored in the provider's model_setting slot
+    (e.g. "claude-opus-4-8", "gpt-5.4", "llava:7b")."""
+
+    display_name: str           # e.g. "Claude Sonnet 4.6 (default)"
+    model_id: str               # e.g. "claude-sonnet-4-6"
+
+
+@dataclass(frozen=True)
 class _Provider:
     """Single provider in a category. ``provider_id`` is the lowercase
     string used as the value of LLM_PROVIDER / STT_PROVIDER / TTS_PROVIDER
     config + the dropdown's data slot. ``api_key_env_var`` is BOTH the
     env-var name AND the keyring slot name (they share namespace by
-    convention — see config.resolve_api_key)."""
+    convention — see config.resolve_api_key).
+
+    v0.3.0: optional per-provider model picker. ``models`` (if non-empty)
+    drives a contextual model dropdown shown only when this provider is
+    selected; the chosen model_id persists to ``model_setting`` (a keyring
+    slot like "ANTHROPIC_MODEL"). ``models_editable`` lets the user type a
+    custom model (Ollama). ``hides_other_categories`` collapses the STT+TTS
+    rows when selected (GPT-Realtime does speech end-to-end)."""
 
     provider_id: str            # e.g. "anthropic", "elevenlabs"
     display_name: str           # e.g. "Anthropic", "ElevenLabs"
     api_key_env_var: str        # e.g. "ANTHROPIC_API_KEY"
     signup_url: str
+    models: tuple[_Model, ...] = ()
+    model_setting: str = ""           # keyring slot for the chosen model
+    models_editable: bool = False     # True → user can type a custom model
+    hides_other_categories: bool = False  # True → collapse STT+TTS (realtime)
 
 
 @dataclass(frozen=True)
@@ -101,15 +122,36 @@ _PROVIDER_CATEGORIES: tuple[_ProviderCategory, ...] = (
                 display_name="Anthropic",
                 api_key_env_var="ANTHROPIC_API_KEY",
                 signup_url="https://console.anthropic.com/settings/keys",
+                models=(
+                    _Model("Claude Sonnet 4.6 (fast, accurate)", "claude-sonnet-4-6"),
+                    _Model("Claude Opus 4.8 (max accuracy)", "claude-opus-4-8"),
+                ),
+                model_setting="ANTHROPIC_MODEL",
             ),
-            # v0.3.0: OpenAI native GPT-4o vision. Direct sk-... key (NOT the
-            # OpenRouter sk-or- key). Pointing refined via grid-locator (GPT-4o
-            # is weaker than Claude at raw pixel coords). See ai.OpenAIVisionClient.
+            # v0.3.0: OpenAI native vision. Direct sk-... key (NOT the OpenRouter
+            # sk-or- key). Default gpt-5.4 is pixel-accurate (grid-locator
+            # auto-skips); gpt-4o kept as a cheaper/weaker fallback option.
             _Provider(
                 provider_id="openai",
-                display_name="OpenAI (GPT-4o)",
+                display_name="OpenAI",
                 api_key_env_var="OPENAI_API_KEY",
                 signup_url="https://platform.openai.com/api-keys",
+                models=(
+                    _Model("GPT-5.4 (pixel-accurate)", "gpt-5.4"),
+                    _Model("GPT-4o (cheaper, less precise)", "gpt-4o"),
+                ),
+                model_setting="OPENAI_MODEL_VISION",
+            ),
+            # v0.3.0: GPT-Realtime voice-to-voice. Lowest latency — handles
+            # speech end-to-end (hear + speak + route), so the STT + TTS rows
+            # collapse when selected. Pixels go through an accurate vision pass
+            # (gpt-5.4/Claude) in app.py. Uses the same OPENAI_API_KEY.
+            _Provider(
+                provider_id="openai-realtime",
+                display_name="OpenAI Realtime (lowest latency, voice)",
+                api_key_env_var="OPENAI_API_KEY",
+                signup_url="https://platform.openai.com/api-keys",
+                hides_other_categories=True,
             ),
             # v0.2.0: Local Ollama. No API key — instead the "API key" field
             # stores the OLLAMA_HOST URL (default http://localhost:11434).
@@ -122,6 +164,9 @@ _PROVIDER_CATEGORIES: tuple[_ProviderCategory, ...] = (
                 display_name="Ollama (local)",
                 api_key_env_var="OLLAMA_HOST",
                 signup_url="https://ollama.com/download",
+                models=tuple(_Model(m, m) for m in _OLLAMA_MODEL_SUGGESTIONS),
+                model_setting="OLLAMA_MODEL_VISION",
+                models_editable=True,
             ),
         ),
         default_index=0,
@@ -201,12 +246,18 @@ class SettingsDialog(QDialog):
         self._dropdowns: dict[str, QComboBox] = {}
         self._key_inputs: dict[str, QLineEdit] = {}
         self._signup_buttons: dict[str, QPushButton] = {}
-        # v0.2.1 (Issue #1 fix B): per-LLM-provider extra fields.
-        # Currently only Ollama uses this slot, for the OLLAMA_MODEL_VISION
-        # editable combobox. The row is built once but hidden unless the
-        # LLM provider dropdown is set to "ollama".
-        self._ollama_model_combo: QComboBox | None = None
-        self._ollama_model_row: QWidget | None = None
+        # v0.3.0: generic per-provider model picker (generalized from the
+        # v0.2.1 Ollama-only row). One model combo + row per category that has
+        # any provider with models (in practice just LLM). The row is shown
+        # only when the selected provider has models; the combo is repopulated
+        # on provider change.
+        self._model_combos: dict[str, QComboBox] = {}
+        self._model_rows: dict[str, QWidget] = {}
+        # v0.3.0: per-category container widgets, so the realtime provider can
+        # collapse the STT + TTS rows (it does speech end-to-end).
+        self._category_widgets: dict[str, QWidget] = {}
+        self._realtime_note: QLabel | None = None
+        self._draw_checkbox: QCheckBox | None = None
         self._build_ui()
 
     # ---------- UI construction -----------------------------------------
@@ -228,11 +279,27 @@ class SettingsDialog(QDialog):
 
         for category in _PROVIDER_CATEGORIES:
             category_widget = self._build_category_row(category)
+            self._category_widgets[category.category_key] = category_widget
             outer.addWidget(category_widget)
+
+        # v0.3.0: draw-on-screen teaching mode toggle. Single checkbox, off by
+        # default. Persists ANNOTATION_MODE to keyring (config reads it). When
+        # on, Clicky circles/arrows/underlines answers on screen.
+        from config import resolve_setting
+        self._draw_checkbox = QCheckBox(
+            "✏️  Draw on screen — circle, arrow + underline the answer (teaching mode)"
+        )
+        self._draw_checkbox.setChecked(
+            resolve_setting("ANNOTATION_MODE", "off") == "on"
+        )
+        outer.addWidget(self._draw_checkbox)
 
         self._reveal = QCheckBox("Show keys in plain text (paste-verify)")
         self._reveal.toggled.connect(self._on_reveal_toggled)
         outer.addWidget(self._reveal)
+
+        # Apply the initial realtime collapse (if LLM provider is realtime).
+        self._apply_realtime_collapse()
 
         self._buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save
@@ -297,58 +364,107 @@ class SettingsDialog(QDialog):
         # Pre-populate the key field with masked existing value (if any).
         self._refresh_key_field_for_category(category)
 
-        # v0.2.1 (Issue #1 fix B): for LLM category, build the Ollama-specific
-        # OLLAMA_MODEL_VISION editable combobox below the key field. The row
-        # is always present in the layout but visible only when "ollama" is
-        # the current LLM provider selection.
+        # v0.3.0: generic per-provider model picker row (generalized from the
+        # v0.2.1 Ollama-only row). Built if ANY provider in this category has
+        # models; shown only when the selected provider has models. Populated
+        # for the current provider.
+        if any(p.models for p in category.providers):
+            model_row = self._build_model_row(category)
+            v.addWidget(model_row)
+            self._model_rows[category.category_key] = model_row
+            current_provider = category.providers[selected_index]
+            self._populate_model_combo(category, current_provider)
+            model_row.setVisible(bool(current_provider.models))
+
+        # v0.3.0: realtime note — shown under the LLM row when the realtime
+        # provider is selected (it collapses STT+TTS; tell the user why).
         if category.category_key == "LLM":
-            self._ollama_model_row = self._build_ollama_model_row()
-            v.addWidget(self._ollama_model_row)
-            # Show/hide based on initial provider selection.
-            current_provider_id = category.providers[selected_index].provider_id
-            self._ollama_model_row.setVisible(current_provider_id == "ollama")
+            note = QLabel(
+                "⚡ Realtime handles speech end-to-end (lowest latency). "
+                "STT + TTS aren't used in this mode."
+            )
+            note.setWordWrap(True)
+            note.setStyleSheet("color: #2563eb; padding-top: 2px;")
+            v.addWidget(note)
+            self._realtime_note = note
+            current_provider = category.providers[selected_index]
+            note.setVisible(current_provider.hides_other_categories)
 
         return container
 
-    def _build_ollama_model_row(self) -> QWidget:
-        """Build the OLLAMA_MODEL_VISION editable combobox row.
-
-        v0.2.1 Issue #1 fix B: lets users pick which Ollama vision
-        model to use (or type a custom one). Pre-populated with safe
-        defaults; editable so users can type any model they've pulled.
-        Persisted to keyring under the OLLAMA_MODEL_VISION slot via
-        the same resolve_setting flow config.py uses.
-        """
-        from config import resolve_setting
-
+    def _build_model_row(self, category: _ProviderCategory) -> QWidget:
+        """Build the per-provider 'Model:' combobox row (v0.3.0, generalized
+        from the v0.2.1 Ollama-only row). The combo is (re)populated for the
+        selected provider by _populate_model_combo. Stored in _model_combos."""
         container = QWidget()
         h = QHBoxLayout(container)
         h.setContentsMargins(0, 4, 0, 0)
-
-        label = QLabel("Ollama model:")
-        h.addWidget(label)
-
+        h.addWidget(QLabel("Model:"))
         combo = QComboBox()
-        combo.setEditable(True)
-        for model_name in _OLLAMA_MODEL_SUGGESTIONS:
-            combo.addItem(model_name)
-
-        # Pre-populate from keyring/env via resolve_setting. Falls back
-        # to the same default as config.py (llava:7b).
-        existing = resolve_setting("OLLAMA_MODEL_VISION", "llava:7b")
-        # If the existing value matches a suggestion, select it.
-        # Otherwise add it as a new item and select it (custom name).
-        idx = combo.findText(existing)
-        if idx >= 0:
-            combo.setCurrentIndex(idx)
-        else:
-            combo.addItem(existing)
-            combo.setCurrentText(existing)
-
-        self._ollama_model_combo = combo
         h.addWidget(combo, stretch=1)
-
+        self._model_combos[category.category_key] = combo
         return container
+
+    def _populate_model_combo(
+        self, category: _ProviderCategory, provider: _Provider
+    ) -> None:
+        """Fill the category's model combo with the provider's models and
+        select the stored choice (resolve_setting on provider.model_setting,
+        default = the provider's first model). Editable for Ollama (custom)."""
+        from config import resolve_setting
+
+        combo = self._model_combos.get(category.category_key)
+        if combo is None:
+            return
+        combo.blockSignals(True)
+        combo.clear()
+        combo.setEditable(provider.models_editable)
+        for m in provider.models:
+            combo.addItem(m.display_name, m.model_id)
+        if provider.models and provider.model_setting:
+            default_id = provider.models[0].model_id
+            stored = resolve_setting(provider.model_setting, default_id)
+            idx = combo.findData(stored)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+            elif provider.models_editable:
+                combo.addItem(stored, stored)
+                combo.setCurrentText(stored)
+            else:
+                combo.setCurrentIndex(0)
+        combo.blockSignals(False)
+
+    def _selected_model_id(self, category: _ProviderCategory, provider: _Provider) -> str:
+        """The chosen model id for a provider. Editable combos (Ollama) use the
+        typed text; fixed combos use the selected item's data (the bare id)."""
+        combo = self._model_combos.get(category.category_key)
+        if combo is None:
+            return ""
+        if provider.models_editable:
+            return combo.currentText().strip()
+        data = combo.currentData()
+        return data if data else combo.currentText().strip()
+
+    def _collapsed_categories(self) -> set[str]:
+        """Categories collapsed because the selected LLM provider does speech
+        end-to-end (realtime). Returns {"STT","TTS"} or an empty set."""
+        llm_dropdown = self._dropdowns.get("LLM")
+        if llm_dropdown is None:
+            return set()
+        llm_cat = next(c for c in _PROVIDER_CATEGORIES if c.category_key == "LLM")
+        provider = llm_cat.providers[llm_dropdown.currentIndex()]
+        return {"STT", "TTS"} if provider.hides_other_categories else set()
+
+    def _apply_realtime_collapse(self) -> None:
+        """Hide/show the STT+TTS rows + the realtime note based on the current
+        LLM provider. Called on construction + on LLM provider change."""
+        collapsed = self._collapsed_categories()
+        for key in ("STT", "TTS"):
+            widget = self._category_widgets.get(key)
+            if widget is not None:
+                widget.setVisible(key not in collapsed)
+        if self._realtime_note is not None:
+            self._realtime_note.setVisible(bool(collapsed))
 
     def _refresh_key_field_for_category(self, category: _ProviderCategory) -> None:
         """Read the keyring slot for the dropdown's currently-selected
@@ -366,17 +482,23 @@ class SettingsDialog(QDialog):
     # ---------- Slots ----------------------------------------------------
 
     def _on_provider_changed(self, category: _ProviderCategory, _index: int) -> None:
-        """Dropdown changed — swap the key field's contents to the newly-
-        selected provider's stored key + update placeholder + Save state.
-
-        v0.2.1: also toggle the OLLAMA_MODEL_VISION row visibility when
-        the LLM provider changes between Anthropic and Ollama.
-        """
+        """Dropdown changed — swap the key field to the newly-selected
+        provider's stored key, repopulate + show/hide the model row, and (for
+        the LLM category) collapse STT+TTS when realtime is selected."""
         self._refresh_key_field_for_category(category)
-        if category.category_key == "LLM" and self._ollama_model_row is not None:
-            dropdown = self._dropdowns[category.category_key]
-            selected_provider_id = dropdown.currentData()
-            self._ollama_model_row.setVisible(selected_provider_id == "ollama")
+        dropdown = self._dropdowns[category.category_key]
+        provider = category.providers[dropdown.currentIndex()]
+
+        # Repopulate + show/hide the per-provider model row.
+        model_row = self._model_rows.get(category.category_key)
+        if model_row is not None:
+            self._populate_model_combo(category, provider)
+            model_row.setVisible(bool(provider.models))
+
+        # LLM realtime collapse (hide STT+TTS rows + show the note).
+        if category.category_key == "LLM":
+            self._apply_realtime_collapse()
+
         self._update_save_enabled()
 
     def _on_signup_clicked(self, category: _ProviderCategory) -> None:
@@ -404,9 +526,13 @@ class SettingsDialog(QDialog):
         """
         if not hasattr(self, "_buttons"):
             return
+        # v0.3.0: skip categories collapsed by realtime (STT+TTS aren't used /
+        # editable in realtime mode, so don't gate Save on their key fields).
+        collapsed = self._collapsed_categories()
         all_filled = all(
             key_input.text().strip()
-            for key_input in self._key_inputs.values()
+            for key, key_input in self._key_inputs.items()
+            if key not in collapsed
         )
         self._buttons.button(
             QDialogButtonBox.StandardButton.Save
@@ -424,13 +550,13 @@ class SettingsDialog(QDialog):
         "Ollama down" with "incompatible model").
         """
         # v0.2.1 fix D: pre-save compatibility check for Ollama LLM.
+        llm_category = next(c for c in _PROVIDER_CATEGORIES if c.category_key == "LLM")
         llm_dropdown = self._dropdowns["LLM"]
-        llm_provider_id = llm_dropdown.currentData()
-        if llm_provider_id == "ollama" and self._ollama_model_combo is not None:
-            model = self._ollama_model_combo.currentText().strip()
-            if model:
-                if not self._confirm_ollama_compat(model):
-                    return  # user cancelled — abort save, no writes
+        llm_provider = llm_category.providers[llm_dropdown.currentIndex()]
+        if llm_provider.provider_id == "ollama":
+            model = self._selected_model_id(llm_category, llm_provider)
+            if model and not self._confirm_ollama_compat(model):
+                return  # user cancelled — abort save, no writes
 
         for category in _PROVIDER_CATEGORIES:
             dropdown = self._dropdowns[category.category_key]
@@ -450,15 +576,24 @@ class SettingsDialog(QDialog):
                     KEYRING_SERVICE, provider.api_key_env_var, key_value,
                 )
 
-        # v0.2.1 fix B: persist OLLAMA_MODEL_VISION if Ollama is the LLM
-        # provider. (Always persist even if Anthropic is selected — the
-        # value carries over for the next time user switches to Ollama.)
-        if self._ollama_model_combo is not None:
-            model_value = self._ollama_model_combo.currentText().strip()
-            if model_value:
-                keyring.set_password(
-                    KEYRING_SERVICE, "OLLAMA_MODEL_VISION", model_value,
-                )
+            # 3. v0.3.0: persist the chosen model for providers with a model
+            # picker (Anthropic→ANTHROPIC_MODEL, OpenAI→OPENAI_MODEL_VISION,
+            # Ollama→OLLAMA_MODEL_VISION). Only the selected provider's model
+            # combo is live, so we only persist that one.
+            if provider.models and provider.model_setting:
+                model_id = self._selected_model_id(category, provider)
+                if model_id:
+                    keyring.set_password(
+                        KEYRING_SERVICE, provider.model_setting, model_id,
+                    )
+
+        # v0.3.0: persist the draw-on-screen toggle.
+        if self._draw_checkbox is not None:
+            keyring.set_password(
+                KEYRING_SERVICE,
+                "ANNOTATION_MODE",
+                "on" if self._draw_checkbox.isChecked() else "off",
+            )
         self.accept()
 
     def _confirm_ollama_compat(self, model: str) -> bool:
@@ -508,15 +643,25 @@ def required_keys_present() -> bool:
     """
     from config import resolve_api_key, resolve_setting
 
-    for category in _PROVIDER_CATEGORIES:
+    def _selected(category: _ProviderCategory) -> _Provider:
         provider_id = resolve_setting(
             f"{category.category_key}_PROVIDER",
             default=category.providers[category.default_index].provider_id,
         )
-        provider = next(
+        return next(
             (p for p in category.providers if p.provider_id == provider_id),
-            category.providers[category.default_index],  # fallback if stored value invalid
+            category.providers[category.default_index],
         )
+
+    # v0.3.0: if the selected LLM provider does speech end-to-end (realtime),
+    # the STT + TTS keys aren't required — realtime never uses them.
+    llm_category = next(c for c in _PROVIDER_CATEGORIES if c.category_key == "LLM")
+    realtime = _selected(llm_category).hides_other_categories
+
+    for category in _PROVIDER_CATEGORIES:
+        if realtime and category.category_key in ("STT", "TTS"):
+            continue
+        provider = _selected(category)
         # v0.2.0: OLLAMA_HOST is a config knob with a working default, not
         # a credential the user must supply. config.OLLAMA_HOST always
         # resolves to at least "http://localhost:11434" via resolve_setting,

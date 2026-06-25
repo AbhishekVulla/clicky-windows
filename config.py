@@ -301,6 +301,18 @@ directly — that takes precedence over LLM_PROVIDER because the create_ai_clien
 factory dispatches on MODEL_ID prefix first. LLM_PROVIDER is the
 GUI-friendly way for users who don't edit .env."""
 
+ANNOTATION_MODE: str = resolve_setting("ANNOTATION_MODE", default="off")
+"""Draw-on-screen teaching mode (v0.3.0, hackathon). When 'on', the vision
+model is given the annotation system prompt and emits
+[ARROW]/[CIRCLE]/[UNDERLINE]/[LABEL] tags that the overlay renders as shapes
+(in ADDITION to the [POINT] cursor). When 'off' (default) Clicky behaves
+exactly as before — nothing is overridden. Accuracy comes from the model
+(Claude is natively precise; GPT-4o/Ollama selectable). Resolved ONCE here at
+import (env→keyring→default); app.py reads this cached constant per interaction
+rather than calling resolve_setting on the hot path, so there is no
+per-interaction keyring read/write latency. Set it in .env and restart to
+toggle."""
+
 
 # ── ElevenLabs TTS (opt-in alternative to Cartesia) ─────────────────────────
 
@@ -364,12 +376,18 @@ Clicky's PTT flow but kept for parity with Bitshank's vision/text split).
 Defaults to plain ``llama3.2`` (3B, ~2 GB)."""
 
 
-# ── OpenAI (native API — GPT-4o vision + GPT-Realtime) — added v0.3.0 ────────
+# ── OpenAI (native API — gpt-5.4 vision + GPT-Realtime) — added v0.3.0 ───────
 
 OPENAI_MODEL_VISION: str = os.getenv(
     "OPENAI_MODEL_VISION",
-    resolve_setting("OPENAI_MODEL_VISION", "gpt-4o"),
+    resolve_setting("OPENAI_MODEL_VISION", "gpt-5.4"),
 )
+# Default bumped gpt-4o → gpt-5.4 (2026-06-25). Live-verified: on the EduPack
+# Chart/Select target, gpt-5.4 returned (258,53) vs Claude's (253,52) — 5px off,
+# pixel-perfect; gpt-4o returned (327,57) — 74px off. gpt-5.4 scores 85.4% on
+# ScreenSpot-Pro GUI grounding vs gpt-4o's weak coords. So the OpenAI vision
+# path no longer needs the grid-locator crutch (it auto-skips when a [POINT]
+# tag is returned). Env OPENAI_MODEL_VISION still overrides (e.g. =gpt-4o).
 """OpenAI vision model for the normal pipeline (LLM_PROVIDER='openai').
 ``gpt-4o`` by default — strong general vision, emits [POINT:x,y:label] via
 the same Clicky system prompt as Claude. GPT-4o is weaker than Claude at

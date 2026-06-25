@@ -46,7 +46,7 @@ from PyQt6.QtCore import (
     QVariantAnimation,
     Qt,
 )
-from PyQt6.QtGui import QColor, QCursor, QGuiApplication, QPainter, QPen, QPolygonF, QScreen
+from PyQt6.QtGui import QColor, QCursor, QFont, QGuiApplication, QPainter, QPen, QPolygonF, QScreen
 from PyQt6.QtWidgets import QWidget
 
 
@@ -329,6 +329,41 @@ def physical_to_local_logical(
     return local_log_x, local_log_y
 
 
+def annotations_to_local(annotations: list, screen) -> list:
+    """Map teaching-annotation coords from PHYSICAL virtual-desktop pixels
+    (Space A) to a screen's LOCAL-logical DIP coords (Space B).
+
+    Points (centers, endpoints) go through physical_to_local_logical (which
+    subtracts the screen origin + divides by the per-screen devicePixelRatio).
+    Lengths (radius, width) are NOT positions — they only divide by the ratio,
+    no origin subtraction. Returns NEW annotation objects (inputs untouched).
+
+    Pure function so the coordinate math is unit-testable without a QApplication
+    (the [POINT] path proved this transform correct: 253,52 -> 569,117 landed on
+    the button). The per-screen ratio is never cached globally — mixed-DPI
+    setups have a different ratio per screen.
+    """
+    from annotations import Arrow, Circle, Underline, Label
+
+    ratio = screen.devicePixelRatio() or 1.0
+    out: list = []
+    for a in annotations:
+        if isinstance(a, Circle):
+            lx, ly = physical_to_local_logical(a.x, a.y, screen)
+            out.append(Circle(lx, ly, int(a.r / ratio), a.label))
+        elif isinstance(a, Arrow):
+            x1, y1 = physical_to_local_logical(a.x1, a.y1, screen)
+            x2, y2 = physical_to_local_logical(a.x2, a.y2, screen)
+            out.append(Arrow(x1, y1, x2, y2))
+        elif isinstance(a, Underline):
+            lx, ly = physical_to_local_logical(a.x, a.y, screen)
+            out.append(Underline(lx, ly, int(a.w / ratio)))
+        elif isinstance(a, Label):
+            lx, ly = physical_to_local_logical(a.x, a.y, screen)
+            out.append(Label(lx, ly, a.text))
+    return out
+
+
 # --- Overlay window ----------------------------------------------------------
 
 class OverlayWindow(QWidget):
@@ -408,6 +443,35 @@ class OverlayWindow(QWidget):
         self._flight_p2: tuple[float, float] = (0.0, 0.0)
         self._flight_scale: float = 1.0
 
+        # Hackathon: teaching annotations (arrows/circles/underlines/labels)
+        # drawn IN ADDITION to the cursor. Stored in this window's LOCAL-logical
+        # coords (the controller transforms physical->local before storing, the
+        # same way point_at computes local_x/local_y). Auto-clear after 30s or
+        # on the next set_annotations call (next-question clear).
+        self._annotations: list = []
+        self._annotation_clear_timer = QTimer(self)
+        self._annotation_clear_timer.setSingleShot(True)
+        self._annotation_clear_timer.timeout.connect(self.clear_annotations)
+
+    def set_annotations(self, annotations: list) -> None:
+        """Replace the current annotations (LOCAL-logical coords) + repaint.
+        Auto-clears after 30s; a new call cancels the prior timer. An empty
+        list clears immediately."""
+        self._annotations = list(annotations)
+        self.update()
+        self._annotation_clear_timer.stop()
+        if self._annotations:
+            self._annotation_clear_timer.start(30_000)
+
+    def clear_annotations(self) -> None:
+        # Cheap no-op when already empty so clearing on every press (the stale-
+        # annotation guard) costs nothing in the common no-annotation case.
+        if not self._annotations:
+            return
+        self._annotations = []
+        self._annotation_clear_timer.stop()
+        self.update()
+
     def paintEvent(self, _event) -> None:
         """Draw a blue arrow cursor polygon at the current pointer position.
 
@@ -419,10 +483,16 @@ class OverlayWindow(QWidget):
         tracking the Bezier curve position exactly (scale around any other
         point would drift the tip).
         """
-        if not self._pointer_visible:
-            return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        # Teaching annotations paint independently of the cursor (they show
+        # during SPEAKING, when the cursor may be hidden or at rest).
+        if self._annotations:
+            self._paint_annotations(painter)
+
+        if not self._pointer_visible:
+            return
         px, py = self._pointer_pos.x(), self._pointer_pos.y()
 
         # Glow: semi-transparent blue circle behind the cursor
@@ -449,6 +519,59 @@ class OverlayWindow(QWidget):
 
         if self._flight_scale != 1.0:
             painter.restore()
+
+    def _paint_annotations(self, painter: QPainter) -> None:
+        """Draw the teaching annotations. Coords are this window's LOCAL-logical
+        space (the controller already mapped physical->local). Blue accent to
+        match the cursor; circles/underlines are outlines (never filled) so they
+        frame the element without covering it."""
+        from annotations import Arrow, Circle, Underline, Label
+
+        accent = QColor(59, 130, 246)  # #3B82F6
+        pen = QPen(accent)
+        pen.setWidth(3)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+
+        for ann in self._annotations:
+            if isinstance(ann, Circle):
+                painter.drawEllipse(QPointF(ann.x, ann.y), float(ann.r), float(ann.r))
+                if ann.label:
+                    painter.drawText(QPointF(ann.x + ann.r + 6, ann.y), ann.label)
+            elif isinstance(ann, Arrow):
+                painter.drawLine(
+                    QPointF(ann.x1, ann.y1), QPointF(ann.x2, ann.y2)
+                )
+                self._draw_arrowhead(painter, ann.x1, ann.y1, ann.x2, ann.y2)
+            elif isinstance(ann, Underline):
+                painter.drawLine(
+                    QPointF(ann.x, ann.y), QPointF(ann.x + ann.w, ann.y)
+                )
+            elif isinstance(ann, Label):
+                painter.drawText(QPointF(ann.x, ann.y), ann.text)
+
+    @staticmethod
+    def _draw_arrowhead(
+        painter: QPainter, x1: float, y1: float, x2: float, y2: float
+    ) -> None:
+        """Filled arrowhead at (x2,y2) pointing along the (x1,y1)->(x2,y2) line."""
+        import math
+
+        angle = math.atan2(y2 - y1, x2 - x1)
+        size = 14.0
+        tip = QPointF(x2, y2)
+        left = QPointF(
+            x2 - size * math.cos(angle - math.pi / 6),
+            y2 - size * math.sin(angle - math.pi / 6),
+        )
+        right = QPointF(
+            x2 - size * math.cos(angle + math.pi / 6),
+            y2 - size * math.sin(angle + math.pi / 6),
+        )
+        painter.setBrush(QColor(59, 130, 246))
+        painter.drawPolygon(QPolygonF([tip, left, right]))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
 
     def animate_pointer_to(self, local_logical_x: int, local_logical_y: int) -> None:
         """Fly the pointer along a quadratic Bezier arc to (x, y).
@@ -937,6 +1060,33 @@ class OverlayController:
             if overlay.screen_name == target_name:
                 return overlay
         return None
+
+    def show_annotations(self, annotations: list, monitor: dict) -> None:
+        """Render teaching annotations (PHYSICAL-pixel coords) on the monitor's
+        overlay. Routes to the per-monitor window like point_at, transforms the
+        coords physical->local via annotations_to_local, and clears annotations
+        on every OTHER overlay so only the active screen shows them."""
+        screens = QGuiApplication.screens()
+        target_screen = screen_for_monitor(monitor, screens)
+        target_overlay = self._overlay_for_screen(target_screen)
+        if target_overlay is None:
+            if not self.overlays:
+                return
+            target_overlay = self.overlays[0]
+
+        local = annotations_to_local(annotations, target_screen)
+        for overlay in self.overlays:
+            if overlay is target_overlay:
+                overlay.set_annotations(local)
+            else:
+                overlay.clear_annotations()
+
+    def clear_all_annotations(self) -> None:
+        """Clear teaching annotations on every overlay. Called at the start of
+        each new interaction so stale shapes never survive a no-speech /
+        cancelled / errored turn (they'd otherwise linger until the 30s timer)."""
+        for overlay in self.overlays:
+            overlay.clear_annotations()
 
     def hide_for_capture(self) -> None:
         """Hide ALL overlays + stop timer for screen capture."""
