@@ -879,7 +879,7 @@ class TestCreateAIClient:
         from ai import create_ai_client
         create_ai_client(
             model_id="anthropic/claude-sonnet-4-6",
-            api_key="sk-or-v1-d16e1d434a7808ef8fc276b09213983270952aae",
+            api_key="sk-or-v1-fake-test-key",
         )
         kwargs = mock_anthropic.call_args.kwargs
         assert kwargs.get("base_url") == "https://openrouter.ai/api", (
