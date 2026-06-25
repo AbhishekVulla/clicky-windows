@@ -9,7 +9,6 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/AbhishekVulla/clicky-windows/actions/workflows/test.yml"><img src="https://github.com/AbhishekVulla/clicky-windows/actions/workflows/test.yml/badge.svg" alt="tests" /></a>
   <img src="https://img.shields.io/badge/license-MIT-f4d35e" alt="MIT" />
   <img src="https://img.shields.io/badge/platform-Windows%2010%2F11-0078d4" alt="Windows 10/11" />
   <a href="https://github.com/AbhishekVulla/clicky-windows/releases"><img src="https://img.shields.io/github/downloads/AbhishekVulla/clicky-windows/total?label=installs&color=ed8936" alt="installs" /></a>
@@ -148,7 +147,7 @@ graph LR
 The interesting parts. Each of these is a problem I hit, the gotcha I had to figure out, and the measured win.
 
 <details>
-<summary><strong>1. Sub-2s first-audible-word despite three sequential APIs</strong> — parallel kick-off + sentence streaming + Cartesia double-buffer. ~3.7s naive → ~1.7s measured. Click to expand.</summary>
+<summary><strong>1. Sub-2s first-audible-word despite three sequential APIs</strong> — parallel kick-off + sentence streaming + Cartesia double-buffer. ~3.7s naive → ~1.7s measured.</summary>
 
 The naive pipeline is hotkey → STT (wait) → screenshot (wait) → Claude vision (wait) → TTS (wait). That is roughly 3.7 seconds of latency for a one-sentence response. Unusable.
 
@@ -187,7 +186,7 @@ Three wins stacked:
 </details>
 
 <details>
-<summary><strong>2. Win32 layered click-through overlay, per-monitor DPI-aware</strong> — one QWidget per physical screen sidesteps Qt 6's mixed-DPI gotcha; ctypes flags applied AFTER show(). Click to expand.</summary>
+<summary><strong>2. Win32 layered click-through overlay, per-monitor DPI-aware</strong> — one QWidget per physical screen sidesteps Qt 6's mixed-DPI gotcha; ctypes flags applied AFTER show().</summary>
 
 The blue cursor that points at things has to do four things at once:
 - always on top
@@ -202,7 +201,7 @@ The click-through behavior comes from Win32 layered-window flags applied via `ct
 </details>
 
 <details>
-<summary><strong>3. A hotkey that does not break your typing</strong> — observe-only pynput Listener (suppress=False is load-bearing); three-step pivot to find an Excel-safe combo. Click to expand.</summary>
+<summary><strong>3. A hotkey that does not break your typing</strong> — observe-only pynput Listener (suppress=False is load-bearing); three-step pivot to find an Excel-safe combo.</summary>
 
 `pynput.Listener(suppress=False)` is observe-only. It sees keypresses, the OS still delivers them to whatever app is focused. This is load-bearing. Setting `suppress=True` installs a `WH_KEYBOARD_LL` hook that globally blocks every keystroke from reaching anything. Your typing breaks system-wide. Do not do this.
 
@@ -217,7 +216,7 @@ A clean solution for Alt+Space exists: Win32 `RegisterHotKey` claims the combo a
 </details>
 
 <details>
-<summary><strong>4. Multi-provider TTS via progressive-disclosure UX</strong> — 3-category dropdown (LLM/STT/TTS) instead of 6 password fields; ElevenLabsTTS mirrors Cartesia with 3 deliberate divergences. Click to expand.</summary>
+<summary><strong>4. Multi-provider TTS via progressive-disclosure UX</strong> — 3-category dropdown (LLM/STT/TTS) instead of 6 password fields; ElevenLabsTTS mirrors Cartesia with 3 deliberate divergences.</summary>
 
 The naive way to add a second TTS provider is to add another field to the settings dialog. Three required keys becomes four. Then you add a second STT provider and it becomes five. By the time you have one option per category you are at six required password fields on a first-launch dialog. That is well past the documented onboarding-abandonment cliff.
 
@@ -234,7 +233,7 @@ Sample rate is per-provider (Cartesia 44.1kHz, ElevenLabs 22.05kHz) because Elev
 </details>
 
 <details>
-<summary><strong>5. Single-instance mutex preventing the multi-PTT chaos</strong> — observe-only hook means N processes = N overlapping voices; canonical Win32 named-mutex (Spotify/Slack/Discord pattern) acquired before QApplication. Click to expand.</summary>
+<summary><strong>5. Single-instance mutex preventing the multi-PTT chaos</strong> — observe-only hook means N processes = N overlapping voices; canonical Win32 named-mutex (Spotify/Slack/Discord pattern) acquired before QApplication.</summary>
 
 A user reported double-clicking the installed Start Menu shortcut and seeing three blue cursor icons stacked in the system tray. Worse, every Ctrl+Alt+Space press triggered three overlapping voice responses to the same question.
 
@@ -253,7 +252,7 @@ Implementation in [`app.py`](app.py).
 </details>
 
 <details>
-<summary><strong>6. Markdown memory and a drop-in knowledge folder</strong> — two stores, plain-text .md per app, no vector DB; auto-learned memory tail + user-uploadable KB at second cache_control breakpoint. Click to expand.</summary>
+<summary><strong>6. Markdown memory and a drop-in knowledge folder</strong> — two stores, plain-text .md per app, no vector DB; auto-learned memory tail + user-uploadable KB at second cache_control breakpoint.</summary>
 
 Two stores, both human-readable markdown, no vector DB.
 
@@ -274,7 +273,7 @@ The pattern is in the lineage of [Andrej Karpathy's LLM Wiki idea](https://gist.
 ## FAQ
 
 <details>
-<summary><strong>Does Ollama work?</strong> — yes, via a two-stage grid locator. ~30-50px accuracy vs Claude's ~5px. Click to expand for setup steps.</summary>
+<summary><strong>Does Ollama work?</strong> — yes, via a two-stage grid locator. ~30-50px accuracy vs Claude's ~5px.</summary>
 
 Select **Ollama (local)** from the LLM dropdown in Settings. Default Ollama host is `http://localhost:11434`. Default vision model is `llava:7b` — it works on every Ollama version with vision support. Clicky also exposes a model picker in Settings so you can switch to `llama3.2-vision`, `qwen2.5-vl`, `llava-llama3`, or type any custom model you've pulled.
 
@@ -294,7 +293,7 @@ The grid-locator pattern was directly inspired by [Bitshank-2338/clicky-windows]
 </details>
 
 <details>
-<summary><strong>Which LLM should I pick — Claude, GPT-4o, or Ollama?</strong> — Click to expand.</summary>
+<summary><strong>Which LLM should I pick — Claude, GPT-4o, or Ollama?</strong></summary>
 
 - **Claude Sonnet 4.6 (default)** — pixel-accurate pointing (~5px). The out-of-the-box choice. You can also pick Claude Opus 4.8 from the model dropdown for a bit more accuracy.
 - **OpenAI** — pick **GPT-5.4** for pixel-accurate pointing (as good as Claude, so no grid-locator needed), or the cheaper **GPT-4o** which is weaker at exact coordinates and falls back to the grid-locator. Both are in the Settings model dropdown. Paste an [OpenAI key](https://platform.openai.com/api-keys).
@@ -305,7 +304,7 @@ All three run through the same pipeline — switching is just a dropdown.
 </details>
 
 <details>
-<summary><strong>What's the GPT-Realtime voice mode?</strong> — talk to Clicky and it talks back in near real-time. Click to expand.</summary>
+<summary><strong>What's the GPT-Realtime voice mode?</strong> — talk to Clicky and it talks back in near real-time.</summary>
 
 An experimental speech-to-speech mode built on [OpenAI's GPT-Realtime](https://openai.com/index/introducing-gpt-realtime/). Instead of the usual transcribe → think → speak pipeline, one connection carries your voice in and the model's voice out, with it reasoning on your screen in between — so the reply comes back near-instantly and it points at where to click in the same turn.
 
