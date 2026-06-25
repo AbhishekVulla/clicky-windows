@@ -49,6 +49,8 @@ Three real ways people are using it:
 - **Niche or company-internal software the AI does not know.** Drop a markdown file with the docs into `~/Documents/Clicky Wiki/<app>.exe.md` and Clicky becomes an expert. I do this for Granta EduPack, a materials-engineering tool I had to use for an SUTD class. Clicky now points at things in EduPack like a TA who already read the manual.
 - **Building a first app on Lovable, Bolt, Replit, or a similar AI-coding platform.** Don't know what a state hook is? Hit the hotkey, ask, Clicky reads your editor and explains what is broken and where to click.
 
+There is also a **teaching mode** (toggle *Draw on screen* in Settings). Instead of a single cursor, Clicky marks up your screen the way a tutor would: it circles the thing you asked about, draws an arrow to it, underlines a term, and writes a short label, then clears them once you've read them. Handy when a single dot is not enough, like a worksheet or a dense toolbar.
+
 Everything runs through your own API keys. Nothing routes through a proxy server. See [Privacy](#privacy) for the specifics.
 
 ## Quick install
@@ -56,7 +58,7 @@ Everything runs through your own API keys. Nothing routes through a proxy server
 1. Download `Clicky-Windows-Setup-v0.1.0.exe` from the [Releases](https://github.com/AbhishekVulla/clicky-windows/releases) page (~87 MB).
 2. Run it. Windows SmartScreen will warn you (the EXE is unsigned for v0; SignPath OSS application is in flight). Click **More info** → **Run anyway**.
 3. Launch Clicky from the Start Menu. A modal asks for three API keys:
-   - [Anthropic](https://console.anthropic.com/settings/keys) for Claude Sonnet 4.6 (vision and reasoning). You can also pick **OpenAI (GPT-4o)** or **Ollama (local)** from the dropdown instead — see [FAQ](#faq) for the trade-offs.
+   - [Anthropic](https://console.anthropic.com/settings/keys) for Claude Sonnet 4.6 (vision and reasoning). You can also pick **OpenAI (GPT-5.4)** or **Ollama (local)** from the dropdown instead — see [FAQ](#faq) for the trade-offs.
    - [AssemblyAI](https://www.assemblyai.com/dashboard/signup) for Universal-3 streaming speech-to-text
    - [Cartesia](https://play.cartesia.ai/sign-in) for Sonic-3 voice output (or pick ElevenLabs from the dropdown)
 4. Hit `Ctrl+Alt+Space`, ask something, release.
@@ -294,8 +296,8 @@ The grid-locator pattern was directly inspired by [Bitshank-2338/clicky-windows]
 <details>
 <summary><strong>Which LLM should I pick — Claude, GPT-4o, or Ollama?</strong> — Click to expand.</summary>
 
-- **Claude Sonnet 4.6 (default)** — best at returning precise pixel coordinates, so pointing is most accurate (~5px). The out-of-the-box choice.
-- **OpenAI (GPT-4o)** — strong vision and reasoning. Weaker than Claude at raw pixel coordinates, so Clicky refines its pointing through the same two-stage grid-locator it uses for Ollama. Pick **OpenAI (GPT-4o)** in the Settings LLM dropdown and paste an [OpenAI key](https://platform.openai.com/api-keys).
+- **Claude Sonnet 4.6 (default)** — pixel-accurate pointing (~5px). The out-of-the-box choice. You can also pick Claude Opus 4.8 from the model dropdown for a bit more accuracy.
+- **OpenAI** — pick **GPT-5.4** for pixel-accurate pointing (as good as Claude, so no grid-locator needed), or the cheaper **GPT-4o** which is weaker at exact coordinates and falls back to the grid-locator. Both are in the Settings model dropdown. Paste an [OpenAI key](https://platform.openai.com/api-keys).
 - **Ollama (local)** — free, runs on your machine, no API key. Slower and less precise, but private. See the question above.
 
 All three run through the same pipeline — switching is just a dropdown.
