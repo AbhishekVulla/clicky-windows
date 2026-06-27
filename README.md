@@ -54,7 +54,7 @@ Everything runs through your own API keys. Nothing routes through a proxy server
 
 ## Quick install
 
-1. Download the latest `Clicky-Windows-Setup.exe` from the [Releases](https://github.com/AbhishekVulla/clicky-windows/releases/latest) page (around 130 MB, it bundles the optional local model runtimes).
+1. Download the latest `Clicky-Windows-Setup.exe` from the [Releases](https://github.com/AbhishekVulla/clicky-windows/releases/latest) page (around 123 MB, it bundles the optional local model runtimes).
 2. Run it. Windows SmartScreen will warn you (the EXE is unsigned for v0; SignPath OSS application is in flight). Click **More info** → **Run anyway**.
 3. Launch Clicky from the Start Menu. A modal asks for your API keys (fewer if you pick local options, none if you go fully local):
    - [Anthropic](https://console.anthropic.com/settings/keys) for Claude Sonnet 4.6 (vision and reasoning). You can also pick **OpenAI (GPT-5.4)**, **Google Gemini**, or **Ollama (local)** from the dropdown instead. See the [FAQ](#faq) for the trade-offs.

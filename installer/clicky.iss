@@ -10,13 +10,13 @@
 ; Build:
 ;     iscc installer\clicky.iss
 ;
-; Output: installer\Output\Clicky-Windows-Setup-v0.1.0.exe (~80-150 MB
-; after Inno's LZMA2 compresses the 275 MB onedir bundle).
+; Output: installer\Output\Clicky-Windows-Setup-v0.4.0.exe (~120-160 MB
+; after Inno's LZMA2 compresses the 443 MB onedir bundle).
 ;
 ; Inno Setup 6+ required: https://jrsoftware.org/isdl.php (free).
 
 #define AppName "Clicky Windows"
-#define AppVersion "0.3.0"
+#define AppVersion "0.4.0"
 #define AppPublisher "Abhishek Vulla"
 #define AppURL "https://github.com/AbhishekVulla/clicky-windows"
 #define AppExeName "Clicky.exe"
