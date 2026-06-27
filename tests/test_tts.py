@@ -773,3 +773,52 @@ class TestFirstChunkCallback:
             f"Expected >=2 play() calls; callback exception should not break "
             f"playback. Got {fake_play.call_count}"
         )
+
+
+class TestKokoroTTS:
+    """Local offline TTS via Kokoro-82M. Subclasses CartesiaSonicTTS, overriding
+    only synth + playback. kokoro_onnx is lazy-imported (DI in tests)."""
+
+    def test_generate_returns_samples_from_kokoro(self, mocker):
+        import numpy as np
+        from tts import KokoroTTS
+        fake = mocker.MagicMock()
+        fake.create.return_value = (np.zeros(2400, dtype=np.float32), 24000)
+        t = KokoroTTS(kokoro_factory=lambda: fake)
+        samples = t._generate_response("hello")
+        assert samples.shape[0] == 2400
+        fake.create.assert_called_once()
+
+    def test_sample_rate_is_24k(self, mocker):
+        from tts import KokoroTTS
+        t = KokoroTTS(kokoro_factory=lambda: mocker.MagicMock())
+        assert t.sample_rate == 24000
+
+    def test_lazy_no_kokoro_import_when_using_di(self, mocker):
+        import sys
+        sys.modules.pop("kokoro_onnx", None)
+        from tts import KokoroTTS
+        t = KokoroTTS(kokoro_factory=lambda: mocker.MagicMock())
+        t._ensure_kokoro()  # uses the injected factory, not the real import
+        assert "kokoro_onnx" not in sys.modules
+
+
+def test_create_tts_client_routes_kokoro():
+    from tts import KokoroTTS, create_tts_client
+    assert isinstance(create_tts_client("kokoro", ""), KokoroTTS)
+
+
+def test_kokoro_warmup_preloads_model(mocker):
+    """warmup() loads the Kokoro model up front (app.py calls it at startup)."""
+    from tts import KokoroTTS
+    fake = mocker.MagicMock()
+    t = KokoroTTS(kokoro_factory=lambda: fake)
+    t.warmup()
+    assert t._kokoro is fake
+
+
+def test_cartesia_warmup_is_noop(mocker):
+    """Cloud TTS inherits the base no-op warmup (nothing to pre-load)."""
+    from tts import CartesiaSonicTTS
+    t = CartesiaSonicTTS(api_key="x", client_factory=lambda **k: mocker.MagicMock())
+    t.warmup()  # must not raise

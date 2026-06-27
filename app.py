@@ -31,6 +31,7 @@ from PyQt6.QtWidgets import QApplication
 import kb
 from ai import (
     _CLICKY_ANNOTATION_SYSTEM_PROMPT,
+    GeminiClient,
     OllamaClient,
     OpenAIVisionClient,
     create_ai_client,
@@ -51,6 +52,8 @@ from config import (
     ANTHROPIC_API_KEY,
     ASSEMBLYAI_API_KEY,
     CARTESIA_API_KEY,
+    GEMINI_API_KEY,
+    GEMINI_MODEL_VISION,
     MODEL_ID,
     OLLAMA_HOST,
     OLLAMA_MODEL_VISION,
@@ -67,7 +70,7 @@ from config import (
 from hotkey import PushToTalkHotkey
 from memory import MemoryStore
 from overlay import OverlayController
-from stt import AssemblyAIStreamingSTT
+from stt import AssemblyAIStreamingSTT, create_stt_client
 from tts import CartesiaSonicTTS
 
 
@@ -205,7 +208,7 @@ def _maybe_locate_via_grid(
         query: user's transcript (the question they asked)
         dbg: optional DebugSession for logging the grid-locator outcome
     """
-    if not isinstance(ai_client, (OllamaClient, OpenAIVisionClient)):
+    if not isinstance(ai_client, (OllamaClient, OpenAIVisionClient, GeminiClient)):
         return None
     if result.coordinate is not None:
         return None
@@ -1387,11 +1390,24 @@ def _resolve_tts_credentials() -> tuple[str, str | None]:
     tts.create_tts_client(provider, api_key).
     """
     provider = resolve_setting("TTS_PROVIDER", default="cartesia")
+    if provider == "kokoro":
+        return provider, ""  # local offline TTS, no API key
     if provider == "elevenlabs":
         api_key = resolve_api_key("ELEVENLABS_API_KEY")
     else:
         api_key = resolve_api_key("CARTESIA_API_KEY")
     return provider, api_key
+
+
+def _resolve_stt_credentials() -> tuple[str, str]:
+    """Resolve (STT_PROVIDER, api_key) at startup. Mirrors
+    _resolve_tts_credentials. faster-whisper is local offline (no key).
+    Resolved fresh (env→keyring) so a Settings change is honored on restart.
+    """
+    provider = resolve_setting("STT_PROVIDER", default="assemblyai")
+    if provider in ("faster-whisper", "local"):
+        return "faster-whisper", ""
+    return "assemblyai", resolve_api_key("ASSEMBLYAI_API_KEY") or ""
 
 
 def _resolve_llm_credentials() -> tuple[str, str]:
@@ -1430,6 +1446,12 @@ def _resolve_llm_credentials() -> tuple[str, str]:
         # ai_client built here is a valid GPT-4o client used by the realtime
         # path's grid-locator refinement, harmless otherwise.
         return f"openai/{OPENAI_MODEL_VISION}", OPENAI_API_KEY or ""
+    if provider == "gemini":
+        # v0.3.x: Google Gemini via OpenRouter. The 'google/' model prefix
+        # routes create_ai_client → GeminiClient at the OpenRouter endpoint.
+        # GEMINI_API_KEY holds the user's OpenRouter (sk-or-) key. Pointing is
+        # refined by the grid-locator if the model returns no [POINT] tag.
+        return GEMINI_MODEL_VISION, GEMINI_API_KEY or ""
     if provider == "ollama":
         # v0.2.1 (Issue #1 fix D): log detected Ollama version + warn
         # about model/version mismatches at startup. Stderr only — the
@@ -1563,12 +1585,17 @@ if __name__ == "__main__":
     # docstring for the Anthropic vs Ollama dispatch logic.
     _llm_model_id, _llm_api_key = _resolve_llm_credentials()
 
+    # Local STT (faster-whisper) is opt-in via STT_PROVIDER; default AssemblyAI.
+    # Resolved fresh so a Settings change is honored without a code edit.
+    _stt_provider, _stt_key = _resolve_stt_credentials()
+
     # Sprint 4: dispatch TTS subclass based on TTS_PROVIDER setting.
     # Cartesia (default) and ElevenLabs (opt-in) are both supported;
     # user picks via Settings dialog dropdown which writes to keyring
     # under "TTS_PROVIDER" + the provider's key under e.g. "ELEVENLABS_API_KEY".
     tts_provider, tts_api_key = _resolve_tts_credentials()
-    if not tts_api_key:
+    # Local TTS (Kokoro) is keyless — skip the credential guard for it.
+    if tts_provider != "kokoro" and not tts_api_key:
         ctypes.windll.user32.MessageBoxW(
             None,
             f"Clicky needs an API key for {tts_provider.title()} TTS.\n\n"
@@ -1595,6 +1622,13 @@ if __name__ == "__main__":
         )
         sys.exit(1)
 
+    # Pre-load a local TTS model (Kokoro) in the background so the first spoken
+    # reply isn't blocked by a cold ~330MB model load. No-op for cloud TTS.
+    import threading as _warmup_threading
+    _warmup_threading.Thread(
+        target=tts_instance.warmup, daemon=True, name="tts-warmup"
+    ).start()
+
     clicky = ClickyApp(
         # v0.2.0: route LLM_PROVIDER to the right model/client. When user
         # selected "Ollama (local)" in Settings, _llm_model_id is
@@ -1605,7 +1639,7 @@ if __name__ == "__main__":
             api_key=_llm_api_key,
             ollama_host=OLLAMA_HOST,
         ),
-        stt_client=AssemblyAIStreamingSTT(api_key=api_assemblyai),
+        stt_client=create_stt_client(_stt_provider, _stt_key),
         tts_client=tts_instance,
     )
 

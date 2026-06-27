@@ -1319,3 +1319,40 @@ class TestRealtimeDrawShapes:
         vision = mocker.MagicMock()
         vision.ask.return_value = {"text": "conceptual", "points": []}
         assert app._realtime_locate_point("x", cap, vision) is None
+
+
+class TestResolveSTTCredentials:
+    def test_defaults_to_assemblyai(self, mocker):
+        from app import _resolve_stt_credentials
+        mocker.patch("app.resolve_setting", return_value="assemblyai")
+        mocker.patch("app.resolve_api_key", return_value="aai-key")
+        provider, key = _resolve_stt_credentials()
+        assert provider == "assemblyai"
+        assert key == "aai-key"
+
+    def test_faster_whisper_has_no_key(self, mocker):
+        from app import _resolve_stt_credentials
+        mocker.patch("app.resolve_setting", return_value="faster-whisper")
+        provider, key = _resolve_stt_credentials()
+        assert provider == "faster-whisper"
+        assert key == ""
+
+
+class TestResolveTTSKokoro:
+    def test_kokoro_has_no_key(self, mocker):
+        from app import _resolve_tts_credentials
+        mocker.patch("app.resolve_setting", return_value="kokoro")
+        provider, key = _resolve_tts_credentials()
+        assert provider == "kokoro"
+        assert key == ""
+
+
+class TestResolveLLMGemini:
+    def test_routes_to_gemini(self, mocker):
+        from app import _resolve_llm_credentials
+        mocker.patch("app.resolve_setting", return_value="gemini")
+        mocker.patch("app.GEMINI_MODEL_VISION", "google/gemini-3.5-flash")
+        mocker.patch("app.GEMINI_API_KEY", "sk-or-test")
+        model_id, api_key = _resolve_llm_credentials()
+        assert model_id == "google/gemini-3.5-flash"
+        assert api_key == "sk-or-test"

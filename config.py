@@ -408,6 +408,55 @@ WebSocket session + audio I/O). Coordinates are refined via the
 grid-locator, same as the GPT-4o path."""
 
 
+# -- Local STT (faster-whisper, opt-in offline, no API key) ------------------
+
+FASTER_WHISPER_MODEL: str = os.getenv(
+    "FASTER_WHISPER_MODEL", resolve_setting("FASTER_WHISPER_MODEL", "base.en")
+)
+"""faster-whisper model size. 'base.en' is the low-latency English default
+(~150MB, downloads to the HF cache on first use). 'small.en' is more accurate
+but slower. Local offline STT needs no API key."""
+
+FASTER_WHISPER_DEVICE: str = os.getenv(
+    "FASTER_WHISPER_DEVICE", resolve_setting("FASTER_WHISPER_DEVICE", "cpu")
+)
+"""'cpu' (portable default) or 'cuda' if the user has an NVIDIA GPU."""
+
+FASTER_WHISPER_COMPUTE: str = os.getenv(
+    "FASTER_WHISPER_COMPUTE", resolve_setting("FASTER_WHISPER_COMPUTE", "int8")
+)
+"""CTranslate2 compute type. 'int8' is fast + low-memory on CPU."""
+
+
+# -- Local TTS (Kokoro-82M via ONNX, opt-in offline, no API key) -------------
+
+KOKORO_VOICE: str = os.getenv("KOKORO_VOICE", resolve_setting("KOKORO_VOICE", "af_heart"))
+"""Kokoro voice id. 'af_heart' is a warm conversational female voice."""
+
+KOKORO_OUTPUT_SAMPLE_RATE: int = 24_000
+"""Kokoro-82M output sample rate (24kHz float32)."""
+
+_DEFAULT_KOKORO_DIR = Path.home() / ".clicky-windows" / "kokoro"
+KOKORO_CACHE_DIR: Path = Path(os.getenv("KOKORO_CACHE_DIR", str(_DEFAULT_KOKORO_DIR)))
+"""Where the Kokoro onnx + voices files download on first use (~336MB total)."""
+
+
+# -- Google Gemini (re-enabled cloud vision via OpenRouter) ------------------
+
+GEMINI_API_KEY: str | None = resolve_api_key("GEMINI_API_KEY")
+"""OpenRouter key (sk-or-) for Gemini. Get one at https://openrouter.ai/keys.
+Gemini routes through OpenRouter's OpenAI-compat endpoint (see GeminiClient)."""
+
+GEMINI_MODEL_VISION: str = os.getenv(
+    "GEMINI_MODEL_VISION",
+    resolve_setting("GEMINI_MODEL_VISION", "google/gemini-3.5-flash"),
+)
+"""Gemini model. 'google/gemini-3.5-flash' (cheap, computer-use, default) or
+'google/gemini-3.1-pro' (max grounding, 84.4% ScreenSpot-Pro). The earlier
+rejected models were gemini-2.5-flash + gemini-3-flash-preview (weak coords);
+the 3.5/3.1 generation is grounding-competitive. Live-test before trusting."""
+
+
 # ── Memory ───────────────────────────────────────────────────────────────────
 
 _DEFAULT_MEMORY_DIR = Path.home() / ".clicky-windows"

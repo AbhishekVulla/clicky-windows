@@ -35,7 +35,7 @@ The #1 community request on [Farza's Clicky](https://github.com/farzaa/clicky) w
   </a>
 </p>
 <p align="center">
-  <em>90 seconds. Me trying to navigate Granta EduPack for a class project — Clicky knows my project, sees my screen, points at where to click.</em>
+  <em>90 seconds. Me trying to navigate Granta EduPack for a class project. Clicky knows my project, sees my screen, points at where to click.</em>
 </p>
 
 ## What it does
@@ -54,15 +54,15 @@ Everything runs through your own API keys. Nothing routes through a proxy server
 
 ## Quick install
 
-1. Download the latest `Clicky-Windows-Setup.exe` from the [Releases](https://github.com/AbhishekVulla/clicky-windows/releases/latest) page (~88 MB).
+1. Download the latest `Clicky-Windows-Setup.exe` from the [Releases](https://github.com/AbhishekVulla/clicky-windows/releases/latest) page (around 130 MB, it bundles the optional local model runtimes).
 2. Run it. Windows SmartScreen will warn you (the EXE is unsigned for v0; SignPath OSS application is in flight). Click **More info** → **Run anyway**.
-3. Launch Clicky from the Start Menu. A modal asks for three API keys:
-   - [Anthropic](https://console.anthropic.com/settings/keys) for Claude Sonnet 4.6 (vision and reasoning). You can also pick **OpenAI (GPT-5.4)** or **Ollama (local)** from the dropdown instead — see [FAQ](#faq) for the trade-offs.
-   - [AssemblyAI](https://www.assemblyai.com/dashboard/signup) for Universal-3 streaming speech-to-text
-   - [Cartesia](https://play.cartesia.ai/sign-in) for Sonic-3 voice output (or pick ElevenLabs from the dropdown)
+3. Launch Clicky from the Start Menu. A modal asks for your API keys (fewer if you pick local options, none if you go fully local):
+   - [Anthropic](https://console.anthropic.com/settings/keys) for Claude Sonnet 4.6 (vision and reasoning). You can also pick **OpenAI (GPT-5.4)**, **Google Gemini**, or **Ollama (local)** from the dropdown instead. See the [FAQ](#faq) for the trade-offs.
+   - [AssemblyAI](https://www.assemblyai.com/dashboard/signup) for Universal-3 streaming speech-to-text, or pick **Local (faster-whisper)** for free offline transcription with no key
+   - [Cartesia](https://play.cartesia.ai/sign-in) for Sonic-3 voice output (or pick ElevenLabs, or **Local (Kokoro)** for a free offline voice with no key)
 4. Hit `Ctrl+Alt+Space`, ask something, release.
 
-Free tier signups exist for all three cloud providers. Total cost for a typical 30-second interaction with the default Anthropic + AssemblyAI + Cartesia stack is around $0.016. Ollama (local) is free but slower and less accurate at pixel-pointing — see FAQ.
+Free tier signups exist for all three cloud providers. A typical 30-second interaction on the default Anthropic + AssemblyAI + Cartesia stack costs around $0.016. You can also go fully local and offline with no keys at all (Ollama + faster-whisper + Kokoro), it is just slower and heavier on your machine. See the FAQ.
 
 <p align="center">
   <img src="assets/screenshots/settings-dialog.png" alt="First-launch API keys dialog" width="520" />
@@ -131,7 +131,7 @@ The hotkey listener observes Ctrl+Alt+Space without consuming the keys. On relea
 
 ### The experimental GPT-Realtime path
 
-The default pipeline above is a four-stage chain (transcribe → think → speak → point). The experimental **GPT-Realtime** mode (`LLM_PROVIDER=openai-realtime`) collapses it into a single speech-to-speech WebSocket: your voice streams in, the model's voice streams back, and it reasons on the screenshot in between — so the reply is near-instant. This genuinely doesn't fit the speech-to-text → model → text-to-speech abstraction (there's no intermediate text to parse for a pointing tag), so it runs as its own parallel pipeline rather than being forced into the chain. Pointing comes from a function call the model makes, then gets refined by the same grid-locator.
+The default pipeline above is a four-stage chain (transcribe → think → speak → point). The experimental **GPT-Realtime** mode (`LLM_PROVIDER=openai-realtime`) collapses it into a single speech-to-speech WebSocket: your voice streams in, the model's voice streams back, and it reasons on the screenshot in between, so the reply is near-instant. This genuinely doesn't fit the speech-to-text → model → text-to-speech abstraction (there's no intermediate text to parse for a pointing tag), so it runs as its own parallel pipeline rather than being forced into the chain. Pointing comes from a function call the model makes, then gets refined by the same grid-locator.
 
 ```mermaid
 graph LR
@@ -147,7 +147,7 @@ graph LR
 The interesting parts. Each of these is a problem I hit, the gotcha I had to figure out, and the measured win.
 
 <details>
-<summary><strong>1. Sub-2s first-audible-word despite three sequential APIs</strong> — parallel kick-off + sentence streaming + Cartesia double-buffer. ~3.7s naive → ~1.7s measured.</summary>
+<summary><strong>1. Sub-2s first-audible-word despite three sequential APIs.</strong> Parallel kick-off, sentence streaming, and a Cartesia double-buffer. ~3.7s naive down to ~1.7s measured.</summary>
 
 The naive pipeline is hotkey → STT (wait) → screenshot (wait) → Claude vision (wait) → TTS (wait). That is roughly 3.7 seconds of latency for a one-sentence response. Unusable.
 
@@ -186,7 +186,7 @@ Three wins stacked:
 </details>
 
 <details>
-<summary><strong>2. Win32 layered click-through overlay, per-monitor DPI-aware</strong> — one QWidget per physical screen sidesteps Qt 6's mixed-DPI gotcha; ctypes flags applied AFTER show().</summary>
+<summary><strong>2. Win32 layered click-through overlay, per-monitor DPI-aware.</strong> One QWidget per physical screen sidesteps Qt 6's mixed-DPI gotcha. ctypes flags applied after show().</summary>
 
 The blue cursor that points at things has to do four things at once:
 - always on top
@@ -201,7 +201,7 @@ The click-through behavior comes from Win32 layered-window flags applied via `ct
 </details>
 
 <details>
-<summary><strong>3. A hotkey that does not break your typing</strong> — observe-only pynput Listener (suppress=False is load-bearing); three-step pivot to find an Excel-safe combo.</summary>
+<summary><strong>3. A hotkey that does not break your typing.</strong> Observe-only pynput Listener (suppress=False is load-bearing), plus a three-step pivot to find an Excel-safe combo.</summary>
 
 `pynput.Listener(suppress=False)` is observe-only. It sees keypresses, the OS still delivers them to whatever app is focused. This is load-bearing. Setting `suppress=True` installs a `WH_KEYBOARD_LL` hook that globally blocks every keystroke from reaching anything. Your typing breaks system-wide. Do not do this.
 
@@ -216,7 +216,7 @@ A clean solution for Alt+Space exists: Win32 `RegisterHotKey` claims the combo a
 </details>
 
 <details>
-<summary><strong>4. Multi-provider TTS via progressive-disclosure UX</strong> — 3-category dropdown (LLM/STT/TTS) instead of 6 password fields; ElevenLabsTTS mirrors Cartesia with 3 deliberate divergences.</summary>
+<summary><strong>4. Multi-provider TTS via progressive-disclosure UX.</strong> A 3-category dropdown (LLM/STT/TTS) instead of 6 password fields. ElevenLabsTTS mirrors Cartesia with 3 deliberate divergences.</summary>
 
 The naive way to add a second TTS provider is to add another field to the settings dialog. Three required keys becomes four. Then you add a second STT provider and it becomes five. By the time you have one option per category you are at six required password fields on a first-launch dialog. That is well past the documented onboarding-abandonment cliff.
 
@@ -233,7 +233,7 @@ Sample rate is per-provider (Cartesia 44.1kHz, ElevenLabs 22.05kHz) because Elev
 </details>
 
 <details>
-<summary><strong>5. Single-instance mutex preventing the multi-PTT chaos</strong> — observe-only hook means N processes = N overlapping voices; canonical Win32 named-mutex (Spotify/Slack/Discord pattern) acquired before QApplication.</summary>
+<summary><strong>5. Single-instance mutex preventing the multi-PTT chaos.</strong> Observe-only hook means N processes equals N overlapping voices. Canonical Win32 named-mutex (Spotify/Slack/Discord pattern) acquired before QApplication.</summary>
 
 A user reported double-clicking the installed Start Menu shortcut and seeing three blue cursor icons stacked in the system tray. Worse, every Ctrl+Alt+Space press triggered three overlapping voice responses to the same question.
 
@@ -252,7 +252,7 @@ Implementation in [`app.py`](app.py).
 </details>
 
 <details>
-<summary><strong>6. Markdown memory and a drop-in knowledge folder</strong> — two stores, plain-text .md per app, no vector DB; auto-learned memory tail + user-uploadable KB at second cache_control breakpoint.</summary>
+<summary><strong>6. Markdown memory and a drop-in knowledge folder.</strong> Two stores, plain-text .md per app, no vector DB. Auto-learned memory tail plus a user-uploadable KB at a second cache_control breakpoint.</summary>
 
 Two stores, both human-readable markdown, no vector DB.
 
@@ -263,7 +263,7 @@ Two stores, both human-readable markdown, no vector DB.
 <p align="center">
   <img src="assets/screenshots/memory-graph.png" alt="Per-app memory files viewed as an Obsidian graph" width="560" />
   <br />
-  <em>The memory folder viewed in Obsidian — one node per app Clicky has been used in. Each node is a plain-text Markdown file you can read or edit.</em>
+  <em>The memory folder viewed in Obsidian. One node per app Clicky has been used in, each a plain-text Markdown file you can read or edit.</em>
 </p>
 
 The pattern is in the lineage of [Andrej Karpathy's LLM Wiki idea](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f). Deliberately simplified for runtime context injection rather than long-form synthesis.
@@ -273,11 +273,11 @@ The pattern is in the lineage of [Andrej Karpathy's LLM Wiki idea](https://gist.
 ## FAQ
 
 <details>
-<summary><strong>Does Ollama work?</strong> — yes, via a two-stage grid locator. ~30-50px accuracy vs Claude's ~5px.</summary>
+<summary><strong>Does Ollama work?</strong> Yes, via a two-stage grid locator. ~30-50px accuracy vs Claude's ~5px.</summary>
 
-Select **Ollama (local)** from the LLM dropdown in Settings. Default Ollama host is `http://localhost:11434`. Default vision model is `llava:7b` — it works on every Ollama version with vision support. Clicky also exposes a model picker in Settings so you can switch to `llama3.2-vision`, `qwen2.5-vl`, `llava-llama3`, or type any custom model you've pulled.
+Select **Ollama (local)** from the LLM dropdown in Settings. Default Ollama host is `http://localhost:11434`. Default vision model is `llava:7b`, which works on every Ollama version with vision support. Clicky also exposes a model picker in Settings so you can switch to `llama3.2-vision`, `qwen2.5-vl`, `llava-llama3`, or type any custom model you've pulled.
 
-`llama3.2-vision` is more accurate than `llava:7b` but uses the `mllama` architecture which needs Ollama ≥0.4.x. If you pick it on an older Ollama, Clicky pops up a warning in the Settings dialog before saving — you can override and save anyway, or pick a compatible model.
+`llama3.2-vision` is more accurate than `llava:7b` but uses the `mllama` architecture which needs Ollama ≥0.4.x. If you pick it on an older Ollama, Clicky pops up a warning in the Settings dialog before saving. You can override and save anyway, or pick a compatible model.
 
 Local vision models can't return precise pixel coordinates directly, so Clicky uses a **two-stage grid** when pointing: it draws a numbered 12×8 grid on the screenshot, asks the model "which cell?", then zooms into that area with a 6×6 sub-grid and asks again. Accuracy is roughly ±30-50 px vs Claude's ~5 px. Plenty for buttons, menus, links, icons. Worse for tightly-packed UIs (small text, dense toolbars).
 
@@ -293,20 +293,34 @@ The grid-locator pattern was directly inspired by [Bitshank-2338/clicky-windows]
 </details>
 
 <details>
-<summary><strong>Which LLM should I pick — Claude, GPT-4o, or Ollama?</strong></summary>
+<summary><strong>Can I run it fully offline with no API keys?</strong> Yes, with local STT, TTS, and vision.</summary>
 
-- **Claude Sonnet 4.6 (default)** — pixel-accurate pointing (~5px). The out-of-the-box choice. You can also pick Claude Opus 4.8 from the model dropdown for a bit more accuracy.
-- **OpenAI** — pick **GPT-5.4** for pixel-accurate pointing (as good as Claude, so no grid-locator needed), or the cheaper **GPT-4o** which is weaker at exact coordinates and falls back to the grid-locator. Both are in the Settings model dropdown. Paste an [OpenAI key](https://platform.openai.com/api-keys).
-- **Ollama (local)** — free, runs on your machine, no API key. Slower and less precise, but private. See the question above.
+Every stage has a local option, so you can run Clicky with zero cloud keys:
 
-All three run through the same pipeline — switching is just a dropdown.
+- **Speech-to-text:** pick **Local (faster-whisper)** in Settings. Runs Whisper on your CPU (`base.en`). Downloads once (~150 MB), then works offline.
+- **Text-to-speech:** pick **Local (Kokoro)**. Kokoro-82M via ONNX, no torch, no key. Voice files download once (~330 MB), then it speaks offline.
+- **Vision:** pick **Ollama (local)** for the LLM (see above).
+
+Honest trade-off: local is free and private, but slower and heavier than cloud, and the first reply each session pauses a few seconds while the models load into memory. On a weak laptop, cloud stays the better default. The local libraries are lazy-loaded, so staying on cloud costs you nothing.
 
 </details>
 
 <details>
-<summary><strong>What's the GPT-Realtime voice mode?</strong> — talk to Clicky and it talks back in near real-time.</summary>
+<summary><strong>Which LLM should I pick: Claude, GPT, Gemini, or Ollama?</strong></summary>
 
-An experimental speech-to-speech mode built on [OpenAI's GPT-Realtime](https://openai.com/index/introducing-gpt-realtime/). Instead of the usual transcribe → think → speak pipeline, one connection carries your voice in and the model's voice out, with it reasoning on your screen in between — so the reply comes back near-instantly and it points at where to click in the same turn.
+- **Claude Sonnet 4.6 (default).** Pixel-accurate pointing (~5px). The out-of-the-box choice. You can also pick Claude Opus 4.8 from the model dropdown for a bit more accuracy.
+- **OpenAI.** Pick **GPT-5.4** for pixel-accurate pointing (as good as Claude, so no grid-locator needed), or the cheaper **GPT-4o** which is weaker at exact coordinates and falls back to the grid-locator. Both are in the Settings model dropdown. Paste an [OpenAI key](https://platform.openai.com/api-keys).
+- **Google Gemini.** Pick **Gemini 3.5 Flash** for cheap and fast, or **Gemini 3.1 Pro** for max grounding. Routes through OpenRouter, so paste an [OpenRouter key](https://openrouter.ai/keys) (the `sk-or-` one). Returns precise coordinates in testing, with the grid-locator as a fallback.
+- **Ollama (local).** Free, runs on your machine, no API key. Slower and less precise, but private. See the question above.
+
+They all run through the same pipeline, switching is just a dropdown.
+
+</details>
+
+<details>
+<summary><strong>What's the GPT-Realtime voice mode?</strong> Talk to Clicky and it talks back in near real-time.</summary>
+
+An experimental speech-to-speech mode built on [OpenAI's GPT-Realtime](https://openai.com/index/introducing-gpt-realtime/). Instead of the usual transcribe → think → speak pipeline, one connection carries your voice in and the model's voice out, with it reasoning on your screen in between, so the reply comes back near-instantly and it points at where to click in the same turn.
 
 It's gated behind an environment variable for now (it's a different interaction model than push-to-talk-then-wait): set `LLM_PROVIDER=openai-realtime` in your `.env`, add your `OPENAI_API_KEY`, and restart. Hold the hotkey, talk, and it talks back and points.
 
@@ -319,7 +333,7 @@ Pointing works the same way as the other vision models: the realtime model gives
 Nothing leaves your machine, except the things you explicitly send to your own APIs.
 
 - API keys live in Windows Credential Manager via DPAPI per-user encryption. Better than plaintext `.env` but does not protect against malware running as your user account.
-- Screenshots, voice, transcripts, and Claude responses go directly from your machine to Anthropic / AssemblyAI / Cartesia or ElevenLabs using YOUR keys. No proxy, no logging server, nothing routes through anyone else.
+- Screenshots, voice, transcripts, and model responses go directly from your machine to Anthropic / AssemblyAI / Cartesia or ElevenLabs using YOUR keys. No proxy, no logging server, nothing routes through anyone else. Pick the local providers (faster-whisper, Kokoro, Ollama) and that data never leaves your machine at all.
 - Per-app memory and the KB folder live on your local disk in plain markdown. You can read them, edit them, delete them.
 
 This is the BYOK model from day 1, by deliberate contrast with the upstream Clicky which uses a Cloudflare Worker proxy that holds the API keys server-side.

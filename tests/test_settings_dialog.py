@@ -109,7 +109,7 @@ class TestProviderCategoriesData:
         from settings_dialog import _PROVIDER_CATEGORIES
         llm = next(c for c in _PROVIDER_CATEGORIES if c.category_key == "LLM")
         assert [p.provider_id for p in llm.providers] == [
-            "anthropic", "openai", "openai-realtime", "ollama",
+            "anthropic", "openai", "openai-realtime", "ollama", "gemini",
         ]
         assert llm.default_index == 0  # Anthropic stays default
 
@@ -155,15 +155,21 @@ class TestProviderCategoriesData:
         assert ollama.display_name == "Ollama (local)"
         assert "ollama.com" in ollama.signup_url
 
-    def test_stt_category_has_only_assemblyai(self):
+    def test_stt_category_has_assemblyai_and_faster_whisper(self):
+        """Default AssemblyAI (cloud, index 0) + opt-in local faster-whisper."""
         from settings_dialog import _PROVIDER_CATEGORIES
         stt = next(c for c in _PROVIDER_CATEGORIES if c.category_key == "STT")
-        assert [p.provider_id for p in stt.providers] == ["assemblyai"]
+        assert [p.provider_id for p in stt.providers] == [
+            "assemblyai", "faster-whisper",
+        ]
+        assert stt.default_index == 0  # AssemblyAI (cloud) stays default
 
     def test_tts_category_has_cartesia_and_elevenlabs(self):
         from settings_dialog import _PROVIDER_CATEGORIES
         tts = next(c for c in _PROVIDER_CATEGORIES if c.category_key == "TTS")
-        assert [p.provider_id for p in tts.providers] == ["cartesia", "elevenlabs"]
+        assert [p.provider_id for p in tts.providers] == [
+            "cartesia", "elevenlabs", "kokoro",
+        ]
         assert tts.default_index == 0  # Cartesia default
 
     def test_each_provider_has_env_var_and_signup_url(self):
@@ -173,12 +179,40 @@ class TestProviderCategoriesData:
         from settings_dialog import _PROVIDER_CATEGORIES
         for category in _PROVIDER_CATEGORIES:
             for provider in category.providers:
+                # Cloud providers use an _API_KEY slot; Ollama reuses the field
+                # for OLLAMA_HOST; local providers (requires_key=False) need no
+                # key so their slot is a benign unused placeholder.
                 assert (
                     provider.api_key_env_var.endswith("_API_KEY")
                     or provider.api_key_env_var == "OLLAMA_HOST"
+                    or not provider.requires_key
                 ), f"{provider.provider_id!r} has unexpected slot {provider.api_key_env_var!r}"
                 assert provider.signup_url.startswith("https://")
                 assert provider.display_name  # non-empty
+
+    def test_gemini_provider_data(self):
+        """v0.3.x: Gemini re-enabled via OpenRouter. Uses GEMINI_API_KEY slot,
+        offers 3.5 Flash (default, index 0) + 3.1 Pro, persists GEMINI_MODEL_VISION."""
+        from settings_dialog import _PROVIDER_CATEGORIES
+        llm = next(c for c in _PROVIDER_CATEGORIES if c.category_key == "LLM")
+        gem = next(p for p in llm.providers if p.provider_id == "gemini")
+        assert gem.api_key_env_var == "GEMINI_API_KEY"
+        ids = [m.model_id for m in gem.models]
+        assert ids[0] == "google/gemini-3.5-flash"  # cheap default
+        assert "google/gemini-3.1-pro-preview" in ids
+        assert gem.model_setting == "GEMINI_MODEL_VISION"
+
+    def test_local_providers_require_no_key(self):
+        """faster-whisper + kokoro are local (no API key): requires_key=False so
+        Save isn't gated on a credential and the startup modal never forces one."""
+        from settings_dialog import _PROVIDER_CATEGORIES
+        found = {
+            p.provider_id: p.requires_key
+            for c in _PROVIDER_CATEGORIES
+            for p in c.providers
+            if p.provider_id in {"faster-whisper", "kokoro"}
+        }
+        assert found == {"faster-whisper": False, "kokoro": False}
 
 
 # --- Sprint 4: dialog render tests (qapp fixture) ---------------------------
@@ -237,13 +271,13 @@ class TestSettingsDialogRender:
         dlg = SettingsDialog()
         assert set(dlg._signup_buttons.keys()) == {"LLM", "STT", "TTS"}
 
-    def test_tts_dropdown_has_two_options(self, qapp, mocker):
+    def test_tts_dropdown_has_three_options(self, qapp, mocker):
         mocker.patch("settings_dialog.keyring.get_password", return_value=None)
         from settings_dialog import SettingsDialog
         dlg = SettingsDialog()
         tts_dropdown = dlg._dropdowns["TTS"]
         items = [tts_dropdown.itemText(i) for i in range(tts_dropdown.count())]
-        assert items == ["Cartesia", "ElevenLabs"]
+        assert items == ["Cartesia", "ElevenLabs", "Local (Kokoro)"]
 
     def test_llm_dropdown_has_anthropic_openai_realtime_and_ollama(self, qapp, mocker):
         """v0.3.0: LLM dropdown has Anthropic, OpenAI, OpenAI Realtime, Ollama.
@@ -252,10 +286,20 @@ class TestSettingsDialogRender:
         from settings_dialog import SettingsDialog
         dlg = SettingsDialog()
         llm_dropdown = dlg._dropdowns["LLM"]
-        assert llm_dropdown.count() == 4
+        assert llm_dropdown.count() == 5
         ids = [llm_dropdown.itemData(i) for i in range(llm_dropdown.count())]
-        assert ids == ["anthropic", "openai", "openai-realtime", "ollama"]
+        assert ids == ["anthropic", "openai", "openai-realtime", "ollama", "gemini"]
         assert llm_dropdown.currentIndex() == 0
+
+    def test_stt_dropdown_has_two_options(self, qapp, mocker):
+        """v0.3.x: STT dropdown has AssemblyAI (default) + Local (faster-whisper)."""
+        mocker.patch("settings_dialog.keyring.get_password", return_value=None)
+        from settings_dialog import SettingsDialog
+        dlg = SettingsDialog()
+        stt_dropdown = dlg._dropdowns["STT"]
+        ids = [stt_dropdown.itemData(i) for i in range(stt_dropdown.count())]
+        assert ids == ["assemblyai", "faster-whisper"]
+        assert stt_dropdown.currentIndex() == 0
 
 class TestSettingsDialogDropdownSwap:
     """Switching the TTS dropdown from Cartesia → ElevenLabs must:

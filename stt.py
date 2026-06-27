@@ -32,6 +32,7 @@ Top-to-bottom order (so ``python -m stt`` works -- see MEMORY.md feedback note
 from __future__ import annotations
 
 import threading
+import time
 from abc import ABC, abstractmethod
 from typing import Callable, Optional
 
@@ -49,7 +50,11 @@ from config import (
     ASSEMBLYAI_SPEECH_MODEL,
     ASSEMBLYAI_STREAMING_URL,
     AUDIO_CHUNK_FRAMES,
+    AUDIO_POWER_BOOST,
     AUDIO_SAMPLE_RATE,
+    FASTER_WHISPER_COMPUTE,
+    FASTER_WHISPER_DEVICE,
+    FASTER_WHISPER_MODEL,
 )
 
 
@@ -580,6 +585,166 @@ class AssemblyAIStreamingSTT(STT):
 
 
 # --- Manual live-API verification entry point -------------------------------
+
+# --- FasterWhisperSTT (Phase 2 local offline provider) ----------------------
+
+class FasterWhisperSTT(STT):
+    """Local offline STT via faster-whisper (CTranslate2 Whisper).
+
+    Batch transcription adapted to the connect / start_recording /
+    stop_recording lifecycle app.py drives (the same public surface
+    AssemblyAIStreamingSTT exposes). The mic stays hot after connect();
+    start_recording() flips a buffering flag; stop_recording() runs the model
+    on the buffered audio and returns the transcript. No network, no API key.
+
+    Heavy deps (faster_whisper / ctranslate2) and sounddevice are
+    LAZY-IMPORTED inside connect() / stop_recording() so cloud users who never
+    select this provider never load them. Model weights download to the
+    Hugging Face cache on first transcription.
+    """
+
+    def __init__(
+        self,
+        model_size: str = FASTER_WHISPER_MODEL,
+        device: str = FASTER_WHISPER_DEVICE,
+        compute_type: str = FASTER_WHISPER_COMPUTE,
+        sample_rate: int = AUDIO_SAMPLE_RATE,
+        chunk_frames: int = AUDIO_CHUNK_FRAMES,
+        model_factory: Optional[Callable[..., object]] = None,
+        audio_stream_factory: Optional[Callable[..., object]] = None,
+    ) -> None:
+        self._model_size = model_size
+        self._device = device
+        self._compute_type = compute_type
+        self._sample_rate = sample_rate
+        self._chunk_frames = chunk_frames
+        self._model_factory = model_factory
+        self._audio_stream_factory = audio_stream_factory
+        self._model = None
+        self._audio_stream = None
+        self._connected = False
+        self._recording = False
+        self._buffer = bytearray()
+        self._partial_cb: Optional[Callable[[str], None]] = None
+        self._audio_level_cb: Optional[Callable[[float], None]] = None
+        self._tts_grace_until: float = 0.0
+        self._chunk_count = 0
+        self._latest_partial = ""
+
+    def _default_model_factory(self):
+        from faster_whisper import WhisperModel  # lazy import
+        return WhisperModel(
+            self._model_size, device=self._device, compute_type=self._compute_type
+        )
+
+    def _default_audio_stream_factory(self, callback):
+        import sounddevice as sd  # lazy import
+        return sd.RawInputStream(
+            samplerate=self._sample_rate,
+            blocksize=self._chunk_frames,
+            dtype="int16",
+            channels=1,
+            callback=callback,
+        )
+
+    def connect(self) -> None:
+        """Load the model + open the mic once. Idempotent."""
+        if self._connected:
+            return
+        self._model = (self._model_factory or self._default_model_factory)()
+        factory = self._audio_stream_factory or self._default_audio_stream_factory
+        self._audio_stream = factory(self._on_audio)
+        if hasattr(self._audio_stream, "start"):
+            self._audio_stream.start()
+        self._connected = True
+
+    def _on_audio(self, indata, frames, time_info, status) -> None:
+        """Mic callback: emit RMS level always; buffer PCM only while recording
+        and past the post-TTS grace window."""
+        import numpy as np
+        buf = bytes(indata)
+        arr = np.frombuffer(buf, dtype=np.int16).astype(np.float32) / 32768.0
+        if arr.size and self._audio_level_cb is not None:
+            rms = float(np.sqrt(np.mean(arr * arr)))
+            try:
+                self._audio_level_cb(min(1.0, rms * AUDIO_POWER_BOOST))
+            except Exception:
+                pass
+        if self._recording and time.time() >= self._tts_grace_until:
+            self._buffer.extend(buf)
+            self._chunk_count += 1
+
+    def start_recording(self) -> None:
+        self._buffer = bytearray()
+        self._chunk_count = 0
+        self._recording = True
+
+    def stop_recording(self) -> str:
+        """Stop buffering, transcribe the buffer, return the text."""
+        self._recording = False
+        if not self._buffer:
+            return ""
+        import numpy as np
+        audio = (
+            np.frombuffer(bytes(self._buffer), dtype=np.int16).astype(np.float32)
+            / 32768.0
+        )
+        segments, _info = self._model.transcribe(audio, language="en", beam_size=1)
+        text = " ".join(seg.text for seg in segments).strip()
+        self._latest_partial = text
+        if self._partial_cb is not None:
+            try:
+                self._partial_cb(text)
+            except Exception:
+                pass
+        return text
+
+    def disconnect(self) -> None:
+        if self._audio_stream is not None:
+            try:
+                self._audio_stream.stop()
+                self._audio_stream.close()
+            except Exception:
+                pass
+        self._audio_stream = None
+        self._connected = False
+
+    def on_partial_transcript(self, callback: Callable[[str], None]) -> None:
+        self._partial_cb = callback
+
+    def on_audio_level(self, callback: Callable[[float], None]) -> None:
+        self._audio_level_cb = callback
+
+    def set_tts_grace_until(self, epoch_ts: float) -> None:
+        self._tts_grace_until = epoch_ts
+
+    def start(self) -> None:
+        self.connect()
+        self.start_recording()
+
+    def stop(self) -> str:
+        return self.stop_recording()
+
+
+# --- Factory: route STT_PROVIDER to the right STT subclass -------------------
+
+def create_stt_client(provider: str, api_key: str) -> STT:
+    """Construct the right STT subclass based on a provider string.
+
+    Mirrors tts.create_tts_client. app.py dispatches on STT_PROVIDER
+    (resolved via config.resolve_setting). faster-whisper is local (no key).
+    """
+    p = provider.lower()
+    if p == "assemblyai":
+        return AssemblyAIStreamingSTT(api_key=api_key)
+    if p in ("faster-whisper", "local"):
+        return FasterWhisperSTT()
+    raise ValueError(
+        f"Unsupported STT provider: {provider!r}. "
+        f"Supported: 'assemblyai', 'faster-whisper'. To add a new provider, "
+        f"subclass STT in stt.py and extend create_stt_client() with a branch."
+    )
+
 
 if __name__ == "__main__":
     # Manual live-API acceptance gate. Run: py -3.13 -m stt

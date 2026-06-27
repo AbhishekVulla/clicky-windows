@@ -1627,3 +1627,10 @@ class TestAnnotationPrompt:
         assert "dimension" in p.lower()
         assert "pixel" in p.lower()
         assert "0,0" in p or "origin" in p.lower()
+
+
+def test_create_ai_client_routes_gemini_3_5_flash():
+    """v0.3.x re-enable: a google/* model id routes to GeminiClient (OpenRouter)."""
+    from ai import GeminiClient, create_ai_client
+    c = create_ai_client(model_id="google/gemini-3.5-flash", api_key="sk-or-test")
+    assert isinstance(c, GeminiClient)

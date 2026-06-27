@@ -99,6 +99,7 @@ class _Provider:
     model_setting: str = ""           # keyring slot for the chosen model
     models_editable: bool = False     # True → user can type a custom model
     hides_other_categories: bool = False  # True → collapse STT+TTS (realtime)
+    requires_key: bool = True         # False → local provider, no key field
 
 
 @dataclass(frozen=True)
@@ -168,6 +169,22 @@ _PROVIDER_CATEGORIES: tuple[_ProviderCategory, ...] = (
                 model_setting="OLLAMA_MODEL_VISION",
                 models_editable=True,
             ),
+            # v0.3.x: Google Gemini via OpenRouter (re-enabled with current
+            # computer-use models). GEMINI_API_KEY holds the user's OpenRouter
+            # (sk-or-) key. 3.5 Flash is cheap + computer-use; 3.1 Pro is max
+            # grounding (84.4% ScreenSpot-Pro). Appended last to keep existing
+            # provider indices (realtime=2, ollama=3) stable for tests.
+            _Provider(
+                provider_id="gemini",
+                display_name="Google Gemini",
+                api_key_env_var="GEMINI_API_KEY",
+                signup_url="https://openrouter.ai/keys",
+                models=(
+                    _Model("Gemini 3.5 Flash (cheap, fast)", "google/gemini-3.5-flash"),
+                    _Model("Gemini 3.1 Pro (max accuracy)", "google/gemini-3.1-pro-preview"),
+                ),
+                model_setting="GEMINI_MODEL_VISION",
+            ),
         ),
         default_index=0,
     ),
@@ -180,6 +197,16 @@ _PROVIDER_CATEGORIES: tuple[_ProviderCategory, ...] = (
                 display_name="AssemblyAI",
                 api_key_env_var="ASSEMBLYAI_API_KEY",
                 signup_url="https://www.assemblyai.com/dashboard/signup",
+            ),
+            # Local offline STT (faster-whisper). No API key; model weights
+            # download on first use. requires_key=False so Save isn't gated on
+            # a credential and the startup modal never forces one.
+            _Provider(
+                provider_id="faster-whisper",
+                display_name="Local (faster-whisper)",
+                api_key_env_var="FASTER_WHISPER_LOCAL",
+                signup_url="https://github.com/SYSTRAN/faster-whisper",
+                requires_key=False,
             ),
         ),
         default_index=0,
@@ -199,6 +226,15 @@ _PROVIDER_CATEGORIES: tuple[_ProviderCategory, ...] = (
                 display_name="ElevenLabs",
                 api_key_env_var="ELEVENLABS_API_KEY",
                 signup_url="https://elevenlabs.io/app/sign-up",
+            ),
+            # Local offline TTS (Kokoro-82M). No API key; model files download
+            # on first use. requires_key=False (see faster-whisper note).
+            _Provider(
+                provider_id="kokoro",
+                display_name="Local (Kokoro)",
+                api_key_env_var="KOKORO_LOCAL",
+                signup_url="https://github.com/thewh1teagle/kokoro-onnx",
+                requires_key=False,
             ),
         ),
         default_index=0,
@@ -445,6 +481,17 @@ class SettingsDialog(QDialog):
         data = combo.currentData()
         return data if data else combo.currentText().strip()
 
+    def _selected_requires_key(self, category_key: str) -> bool:
+        """True if the category's currently-selected provider needs an API key.
+        Local providers (faster-whisper / kokoro) return False."""
+        dropdown = self._dropdowns.get(category_key)
+        category = next(
+            (c for c in _PROVIDER_CATEGORIES if c.category_key == category_key), None
+        )
+        if dropdown is None or category is None:
+            return True
+        return category.providers[dropdown.currentIndex()].requires_key
+
     def _collapsed_categories(self) -> set[str]:
         """Categories collapsed because the selected LLM provider does speech
         end-to-end (realtime). Returns {"STT","TTS"} or an empty set."""
@@ -478,6 +525,10 @@ class SettingsDialog(QDialog):
         key_input.setPlaceholderText(
             _mask(existing) if existing else f"paste {provider.api_key_env_var} here"
         )
+        # Local providers (faster-whisper / kokoro) need no key — hide the key
+        # field + Get-key button so the dialog shows just the provider dropdown.
+        key_input.setVisible(provider.requires_key)
+        self._signup_buttons[category.category_key].setVisible(provider.requires_key)
 
     # ---------- Slots ----------------------------------------------------
 
@@ -532,7 +583,7 @@ class SettingsDialog(QDialog):
         all_filled = all(
             key_input.text().strip()
             for key, key_input in self._key_inputs.items()
-            if key not in collapsed
+            if key not in collapsed and self._selected_requires_key(key)
         )
         self._buttons.button(
             QDialogButtonBox.StandardButton.Save
@@ -668,6 +719,8 @@ def required_keys_present() -> bool:
         # so consider it always-present from the launcher's perspective.
         if provider.api_key_env_var == "OLLAMA_HOST":
             continue
+        if not provider.requires_key:
+            continue  # local provider (faster-whisper / kokoro) — no key needed
         if not resolve_api_key(provider.api_key_env_var):
             return False
     return True

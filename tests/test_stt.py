@@ -483,3 +483,82 @@ class TestAssemblyAIStreamingSTT:
             "but it was only triggering on turn_is_formatted=True."
         )
         assert stt_obj._final_transcript == "How do I make my repo public?"
+
+
+class TestFasterWhisperSTT:
+    """Local offline STT. Batch transcription adapted to the
+    connect/start_recording/stop_recording lifecycle app.py drives."""
+
+    @staticmethod
+    def _seg(text):
+        s = type("Seg", (), {})()
+        s.text = text
+        return s
+
+    def test_records_then_transcribes_buffer(self, mocker):
+        from stt import FasterWhisperSTT
+        fake_model = mocker.MagicMock()
+        fake_model.transcribe.return_value = ([self._seg("hello world")], None)
+        stt = FasterWhisperSTT(
+            model_factory=lambda: fake_model,
+            audio_stream_factory=lambda cb: mocker.MagicMock(),
+        )
+        stt.connect()
+        stt.start_recording()
+        stt._on_audio(b"\x01\x00" * 1024, 1024, None, None)  # feed one chunk
+        text = stt.stop_recording()
+        assert text == "hello world"
+        fake_model.transcribe.assert_called_once()
+
+    def test_empty_buffer_returns_empty_string(self, mocker):
+        from stt import FasterWhisperSTT
+        stt = FasterWhisperSTT(
+            model_factory=lambda: mocker.MagicMock(),
+            audio_stream_factory=lambda cb: mocker.MagicMock(),
+        )
+        stt.connect()
+        stt.start_recording()
+        assert stt.stop_recording() == ""
+
+    def test_grace_window_drops_chunks(self, mocker):
+        """Chunks arriving before _tts_grace_until are not buffered."""
+        import time
+        from stt import FasterWhisperSTT
+        fake_model = mocker.MagicMock()
+        fake_model.transcribe.return_value = ([self._seg("x")], None)
+        stt = FasterWhisperSTT(
+            model_factory=lambda: fake_model,
+            audio_stream_factory=lambda cb: mocker.MagicMock(),
+        )
+        stt.connect()
+        stt.start_recording()
+        stt.set_tts_grace_until(time.time() + 100)  # far future → drop chunks
+        stt._on_audio(b"\x01\x00" * 1024, 1024, None, None)
+        assert stt.stop_recording() == ""  # nothing buffered
+
+    def test_lazy_no_faster_whisper_import_when_using_di(self):
+        import sys
+        sys.modules.pop("faster_whisper", None)
+        from stt import FasterWhisperSTT
+        stt = FasterWhisperSTT(
+            model_factory=lambda: __import__("unittest").mock.MagicMock(),
+            audio_stream_factory=lambda cb: __import__("unittest").mock.MagicMock(),
+        )
+        stt.connect()
+        assert "faster_whisper" not in sys.modules
+
+
+class TestCreateSTTClient:
+    def test_routes_assemblyai(self):
+        from stt import AssemblyAIStreamingSTT, create_stt_client
+        assert isinstance(create_stt_client("assemblyai", "key"), AssemblyAIStreamingSTT)
+
+    def test_routes_faster_whisper(self):
+        from stt import FasterWhisperSTT, create_stt_client
+        assert isinstance(create_stt_client("faster-whisper", ""), FasterWhisperSTT)
+
+    def test_unknown_provider_raises(self):
+        import pytest
+        from stt import create_stt_client
+        with pytest.raises(ValueError):
+            create_stt_client("nope", "")

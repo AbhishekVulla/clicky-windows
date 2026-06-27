@@ -43,6 +43,8 @@ from config import (
     ELEVENLABS_MODEL_ID,
     ELEVENLABS_OUTPUT_SAMPLE_RATE,
     ELEVENLABS_VOICE_ID,
+    KOKORO_OUTPUT_SAMPLE_RATE,
+    KOKORO_VOICE,
 )
 
 
@@ -108,6 +110,12 @@ class TTS(ABC):
         clears it.
         """
         self._first_chunk_callback = cb
+
+    def warmup(self) -> None:
+        """Optionally pre-load a heavy local model so the first speak() isn't
+        slow. Default no-op (cloud providers have nothing to pre-load). Local
+        providers like KokoroTTS override this."""
+        return None
 
 
 # --- CartesiaSonicTTS concrete implementation --------------------------------
@@ -748,6 +756,114 @@ class ElevenLabsTTS(TTS):
         return _play, stream
 
 
+# --- KokoroTTS (local offline TTS, opt-in) -----------------------------------
+
+
+def ensure_kokoro_models() -> tuple[str, str]:
+    """Download the Kokoro ONNX model + voices file on first use.
+
+    Returns (onnx_path, voices_path). No-op if already cached. ~336MB total on
+    the first call only; cached under config.KOKORO_CACHE_DIR thereafter.
+    """
+    import urllib.request
+
+    from config import KOKORO_CACHE_DIR
+
+    KOKORO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    files = {
+        "kokoro-v1.0.onnx": "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx",
+        "voices-v1.0.bin": "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin",
+    }
+    paths: dict[str, str] = {}
+    for name, url in files.items():
+        dest = KOKORO_CACHE_DIR / name
+        if not dest.exists():
+            print(f"[tts] downloading Kokoro model {name} (one-time)...", flush=True)
+            urllib.request.urlretrieve(url, dest)
+        paths[name] = str(dest)
+    return paths["kokoro-v1.0.onnx"], paths["voices-v1.0.bin"]
+
+
+class KokoroTTS(CartesiaSonicTTS):
+    """Local offline TTS via Kokoro-82M (ONNX runtime, no torch, no API key).
+
+    Reuses CartesiaSonicTTS's two-thread prefetch/playback machinery verbatim;
+    only response generation + playback differ. kokoro_onnx + onnxruntime are
+    LAZY-IMPORTED so cloud users never load them. Model files download on first
+    use (see ensure_kokoro_models). Kokoro emits 24kHz float32 audio.
+    """
+
+    def __init__(
+        self,
+        api_key: str = "",
+        sample_rate: int = KOKORO_OUTPUT_SAMPLE_RATE,
+        voice: str = KOKORO_VOICE,
+        kokoro_factory: Callable | None = None,
+        player_factory: Callable | None = None,
+    ) -> None:
+        super().__init__(
+            api_key="", sample_rate=sample_rate, player_factory=player_factory
+        )
+        self._voice = voice
+        self._kokoro_factory = kokoro_factory
+        self._kokoro = None
+
+    def _ensure_kokoro(self):
+        if self._kokoro is None:
+            if self._kokoro_factory is not None:
+                self._kokoro = self._kokoro_factory()
+            else:
+                from kokoro_onnx import Kokoro  # lazy import
+
+                onnx_path, voices_path = ensure_kokoro_models()
+                self._kokoro = Kokoro(onnx_path, voices_path)
+        return self._kokoro
+
+    def warmup(self) -> None:
+        """Pre-load the Kokoro model so the first spoken reply isn't blocked by
+        a cold model load. app.py calls this in a background thread at startup."""
+        self._ensure_kokoro()
+
+    def _generate_response(self, text: str):
+        """Synthesize the whole sentence to a float32 numpy array. Stands in for
+        Cartesia's HTTP response in the prefetch worker; _play_response plays it."""
+        kokoro = self._ensure_kokoro()
+        samples, _sr = kokoro.create(text, voice=self._voice, speed=1.0, lang="en-us")
+        return np.asarray(samples, dtype=np.float32)
+
+    def _play_response(self, text: str, response, cancel: threading.Event) -> None:
+        """Play the synthesized samples in ~0.25s blocks (mirrors Cartesia's
+        per-chunk loop so cancel + first-chunk callback behave identically).
+        `response` is the numpy array from _generate_response."""
+        if cancel.is_set():
+            return
+        samples = np.asarray(response, dtype=np.float32)
+        audio_stream = None
+        try:
+            play, audio_stream = self._build_player()
+            self._active_audio_stream = audio_stream
+            block = max(1, int(self.sample_rate * 0.25))
+            for i in range(0, samples.size, block):
+                if cancel.is_set():
+                    return
+                play(samples[i : i + block])
+                cb = self._first_chunk_callback
+                if cb is not None:
+                    self._first_chunk_callback = None
+                    try:
+                        cb()
+                    except Exception:
+                        pass
+        finally:
+            self._active_audio_stream = None
+            if audio_stream is not None:
+                try:
+                    audio_stream.abort()
+                    audio_stream.close()
+                except Exception:
+                    pass
+
+
 # --- Factory: route provider string to the right TTS subclass ----------------
 
 
@@ -774,9 +890,11 @@ def create_tts_client(provider: str, api_key: str) -> TTS:
         return CartesiaSonicTTS(api_key=api_key)
     if p == "elevenlabs":
         return ElevenLabsTTS(api_key=api_key)
+    if p == "kokoro":
+        return KokoroTTS()
     raise ValueError(
         f"Unsupported TTS provider: {provider!r}. "
-        f"Supported: 'cartesia', 'elevenlabs'. To add a new provider, "
+        f"Supported: 'cartesia', 'elevenlabs', 'kokoro'. To add a new provider, "
         f"subclass TTS in tts.py and extend create_tts_client() with a new branch."
     )
 

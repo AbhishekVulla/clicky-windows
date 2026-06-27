@@ -17,6 +17,11 @@ python-dotenv>=1.0.1       # Load ANTHROPIC_API_KEY + ASSEMBLYAI_API_KEY + CARTE
 keyring>=25.0              # Windows Credential Manager (DPAPI per-user) for BYOK key storage post-Sprint-3 — auto-migrates from .env on first launch
 scipy>=1.11                # Mann-Whitney U + bootstrap CI for tools/bench_path_a.py (Path A latency measurement; NOT bundled in PyInstaller spec — script-only)
 
+# Local offline providers (opt-in; lazy-imported so cloud users pay zero runtime cost; bundled in the installer, model weights download on first use)
+faster-whisper>=1.2.0      # Local STT (CTranslate2 Whisper) — FasterWhisperSTT, no API key
+kokoro-onnx>=0.4.0         # Local TTS (Kokoro-82M via ONNX, no torch) — KokoroTTS, no API key
+soundfile>=0.13.0          # Audio I/O helper for the local providers
+
 # Dev / test
 pytest>=8.3.0              # Unit tests (target ~50-80 in Phase 1)
 pytest-mock>=3.14.0        # Mock Anthropic client, audio device, screen capture in tests

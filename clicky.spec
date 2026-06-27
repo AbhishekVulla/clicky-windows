@@ -72,6 +72,14 @@ a = Analysis(
         "cartesia",
         "elevenlabs",  # Sprint 4 — opt-in alternative TTS
         "assemblyai",
+        # Local offline providers (opt-in) — faster-whisper STT + Kokoro TTS.
+        # Lazy-imported at runtime; bundled so one installer carries both the
+        # cloud (default) and local lanes. Model weights download on first use.
+        "faster_whisper",
+        "ctranslate2",
+        "onnxruntime",
+        "kokoro_onnx",
+        "soundfile",
         # HTTP / networking deps used transitively by the SDKs
         "websockets",
         "httpx",
@@ -112,7 +120,7 @@ a = Analysis(
         "pyarrow",        # 76MB — Apache Arrow
         "av",             # 65MB — PyAV / FFmpeg bindings
         "scipy",          # 53MB — scientific computing
-        "onnxruntime",    # 32MB — ONNX inference
+        # onnxruntime is NO LONGER excluded — Kokoro local TTS requires it.
         "pandas",         # 17MB — dataframes
         # Dev / interactive tooling — never used at runtime
         "IPython",
