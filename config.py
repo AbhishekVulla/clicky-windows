@@ -449,12 +449,15 @@ Gemini routes through OpenRouter's OpenAI-compat endpoint (see GeminiClient)."""
 
 GEMINI_MODEL_VISION: str = os.getenv(
     "GEMINI_MODEL_VISION",
-    resolve_setting("GEMINI_MODEL_VISION", "google/gemini-3.5-flash"),
+    resolve_setting("GEMINI_MODEL_VISION", "google/gemini-3.1-pro-preview"),
 )
-"""Gemini model. 'google/gemini-3.5-flash' (cheap, computer-use, default) or
-'google/gemini-3.1-pro' (max grounding, 84.4% ScreenSpot-Pro). The earlier
-rejected models were gemini-2.5-flash + gemini-3-flash-preview (weak coords);
-the 3.5/3.1 generation is grounding-competitive. Live-test before trusting."""
+"""Gemini model. Default is 'google/gemini-3.1-pro-preview' — the most
+pixel-accurate Gemini for pointing (84.4% ScreenSpot-Pro, the Pro tier).
+v0.4.1 bumped the default off 'google/gemini-3.5-flash' because Flash's
+coordinates were noticeably off in real use; there is no 3.5-pro, so the
+3.1 Pro preview is the strongest grounding option on OpenRouter. The full
+'-preview' suffix is the valid OpenRouter slug (bare 'google/gemini-3.1-pro'
+404s). Cheaper/faster alternative via env: GEMINI_MODEL_VISION=google/gemini-3.5-flash."""
 
 
 # ── Memory ───────────────────────────────────────────────────────────────────

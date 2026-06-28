@@ -24,7 +24,15 @@ Build tooling installed via pip:
 Inno Setup (separate install — not a Python dep):
     https://jrsoftware.org/isdl.php  (free, ~3MB)
 """
-from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
+import glob
+import os
+
+from PyInstaller.utils.hooks import (
+    collect_all,
+    collect_data_files,
+    collect_dynamic_libs,
+    collect_submodules,
+)
 
 
 # Qt 6 plugins required at runtime — the platform shim DLL (windows.dll
@@ -41,12 +49,55 @@ pyqt6_data = collect_data_files(
 )
 pyqt6_libs = collect_dynamic_libs("PyQt6")
 
+# v0.4.1: collect_all the local-provider stack so the frozen EXE includes their
+# native libs + data files, not just the Python modules. v0.4.0 listed these in
+# hiddenimports but PyInstaller did not recurse into faster-whisper's own imports,
+# so `av` (PyAV, the audio decoder) was missing and local STT crashed on launch.
+_local_datas, _local_bins, _local_hidden = [], [], []
+for _pkg in (
+    "faster_whisper", "ctranslate2", "onnxruntime",
+    "kokoro_onnx", "soundfile", "tokenizers",
+    # Kokoro TTS grapheme->phoneme: espeakng_loader ships espeak-ng.dll +
+    # ~15MB espeak-ng-data; phonemizer-fork drives it. Both resolve their
+    # paths via __file__ so collect_all (in-package data) bundles them safely.
+    "espeakng_loader", "phonemizer",
+    # phonemizer-fork imports its `segments` backend at module load (even
+    # though Kokoro only uses espeak), which drags in segments -> csvw ->
+    # jsonschema. Each needs its bundled data or the frozen import crashes.
+    # Verified end-to-end in a frozen test EXE (synth + transcribe). The
+    # rfc3987_syntax/lark URI checker that jsonschema *optionally* pulls is
+    # NOT needed and is excluded below so jsonschema skips it cleanly.
+    "segments", "csvw", "language_tags",
+    "jsonschema", "jsonschema_specifications", "referencing",
+):
+    try:
+        _d, _b, _h = collect_all(_pkg)
+        _local_datas += _d
+        _local_bins += _b
+        _local_hidden += _h
+    except Exception:
+        pass  # not installed in this build env; skip
+
+# av (PyAV) needs special handling: collect_all misclassifies its .pyd as datas
+# (returns 0 binaries) and its ffmpeg DLLs live in a sibling `av.libs` dir
+# (delvewheel layout). collect_submodules forces the .pyd to bundle as proper
+# extensions; the av.libs DLLs go in as binaries. This combo was verified
+# importable inside a frozen test EXE before shipping (v0.4.0 crashed without it).
+_local_hidden += collect_submodules("av")
+try:
+    import av as _av
+    _av_libs = os.path.dirname(_av.__file__) + ".libs"
+    if os.path.isdir(_av_libs):
+        _local_bins += [(_f, "av.libs") for _f in glob.glob(os.path.join(_av_libs, "*.dll"))]
+except Exception:
+    pass
+
 
 a = Analysis(
     ["app.py"],
     pathex=[],
-    binaries=pyqt6_libs,
-    datas=pyqt6_data + [
+    binaries=pyqt6_libs + _local_bins,
+    datas=pyqt6_data + _local_datas + [
         # Tray icon — referenced by tray.py at runtime via Path-relative
         # lookup. Without this entry, the .ico is missing from the
         # bundle and the tray icon shows blank.
@@ -92,6 +143,7 @@ a = Analysis(
         "keyring",
         "keyring.backends",
         "keyring.backends.Windows",
+        *_local_hidden,  # v0.4.1: submodules pulled by collect_all for the local stack
     ],
     hookspath=[],
     hooksconfig={},
@@ -118,10 +170,16 @@ a = Analysis(
         "llvmlite",       # 102MB — LLVM bindings (numba transitive)
         "numba",          # JIT — not used
         "pyarrow",        # 76MB — Apache Arrow
-        "av",             # 65MB — PyAV / FFmpeg bindings
+        # av is NO LONGER excluded — faster-whisper (local STT) imports PyAV.
         "scipy",          # 53MB — scientific computing
         # onnxruntime is NO LONGER excluded — Kokoro local TTS requires it.
         "pandas",         # 17MB — dataframes
+        # jsonschema's OPTIONAL URI-format checkers. Kokoro/phonemizer never
+        # use them; excluding lets jsonschema skip them so we don't bundle
+        # rfc3987_syntax's .lark grammar. Verified safe in a frozen test EXE.
+        "rfc3987_syntax",
+        "rfc3987",
+        "lark",
         # Dev / interactive tooling — never used at runtime
         "IPython",
         "ipykernel",

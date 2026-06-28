@@ -471,6 +471,10 @@ class GeminiClient(AIClient):
     ) -> None:
         self.client = OpenAI(api_key=api_key, base_url=base_url, timeout=60.0)
         self.model_id = model_id
+        # OpenRouter (Gemini) accepts the classic `max_tokens` param.
+        # OpenAIVisionClient overrides this to `max_completion_tokens` because
+        # OpenAI's gpt-5-series rejects `max_tokens` (400 unsupported_parameter).
+        self._max_tokens_param = "max_tokens"
 
     def ask_stream(
         self,
@@ -548,8 +552,8 @@ class GeminiClient(AIClient):
             sdk_iterator = self.client.chat.completions.create(
                 model=self.model_id,
                 messages=openai_messages,
-                max_tokens=max_tokens,
                 stream=True,
+                **{self._max_tokens_param: max_tokens},
             )
         except Exception as exc:
             raise RuntimeError(
@@ -662,6 +666,11 @@ class OpenAIVisionClient(GeminiClient):
         # Explicit base_url allows pointing at Azure/proxy if ever needed.
         self.client = OpenAI(api_key=api_key, base_url=base_url, timeout=60.0)
         self.model_id = model_id
+        # gpt-5-series (incl. gpt-5.4) rejects `max_tokens` and requires
+        # `max_completion_tokens` (400 otherwise). gpt-4o accepts it too, so
+        # this is safe across both OpenAI models. v0.4.1 fix (gpt-5.4 was 400ing
+        # on every call -> no response -> no audio).
+        self._max_tokens_param = "max_completion_tokens"
 
 
 # --- OllamaClient (v0.2.0 local LLM support) ---------------------------------
@@ -1020,6 +1029,20 @@ def create_ai_client(
         )
     if mid.startswith("google/") or mid.startswith("gemini"):
         from config import OPENROUTER_BASE_URL
+        # Dual routing by key type (mirrors the OpenAI gpt-5.4 pattern):
+        #  - an sk-or-* OpenRouter key -> OpenRouter endpoint, keep the
+        #    'google/...' slug OpenRouter expects.
+        #  - any other key (a direct Google AI Studio key) -> Google's native
+        #    OpenAI-compatible endpoint, with the 'google/' prefix stripped to
+        #    the bare 'gemini-...' name Google expects.
+        # This lets a user with NO OpenRouter account paste a Google key.
+        if base_url is None and api_key and not api_key.startswith("sk-or-"):
+            bare = model_id.split("/", 1)[1] if "/" in model_id else model_id
+            return GeminiClient(
+                api_key=api_key,
+                model_id=bare,
+                base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+            )
         return GeminiClient(
             api_key=api_key,
             model_id=model_id,

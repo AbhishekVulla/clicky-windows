@@ -825,15 +825,31 @@ class TestCreateAIClient:
         )
         assert isinstance(client, AnthropicClient)
 
-    def test_routes_google_prefix_to_gemini_client(self, mocker):
+    def test_routes_google_prefix_to_gemini_via_openrouter(self, mocker):
+        """sk-or- OpenRouter key -> OpenRouter endpoint, keeps the google/ slug."""
         from ai import create_ai_client, GeminiClient
-        mocker.patch("ai.OpenAI")
+        mock_openai = mocker.patch("ai.OpenAI")
         client = create_ai_client(
             model_id="google/gemini-3-flash-preview",
-            api_key="test-key",
+            api_key="sk-or-v1-testkey",
         )
         assert isinstance(client, GeminiClient)
         assert client.model_id == "google/gemini-3-flash-preview"
+        assert "openrouter" in mock_openai.call_args.kwargs["base_url"]
+
+    def test_routes_google_prefix_to_native_gemini_with_direct_key(self, mocker):
+        """v0.4.1: a non-sk-or key (direct Google AI Studio key) routes to
+        Google's native OpenAI-compat endpoint with the 'google/' prefix
+        stripped — lets a user with no OpenRouter account paste a Google key."""
+        from ai import create_ai_client, GeminiClient
+        mock_openai = mocker.patch("ai.OpenAI")
+        client = create_ai_client(
+            model_id="google/gemini-3.1-pro-preview",
+            api_key="AIzaSyDirectGoogleKey",
+        )
+        assert isinstance(client, GeminiClient)
+        assert client.model_id == "gemini-3.1-pro-preview"  # prefix stripped
+        assert "generativelanguage.googleapis.com" in mock_openai.call_args.kwargs["base_url"]
 
     def test_routes_gemini_prefix_to_gemini_client(self, mocker):
         from ai import create_ai_client, GeminiClient

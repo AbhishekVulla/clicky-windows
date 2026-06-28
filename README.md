@@ -54,7 +54,7 @@ Everything runs through your own API keys. Nothing routes through a proxy server
 
 ## Quick install
 
-1. Download the latest `Clicky-Windows-Setup.exe` from the [Releases](https://github.com/AbhishekVulla/clicky-windows/releases/latest) page (around 123 MB, it bundles the optional local model runtimes).
+1. Download the latest `Clicky-Windows-Setup.exe` from the [Releases](https://github.com/AbhishekVulla/clicky-windows/releases/latest) page (around 160 MB, it bundles the optional local model runtimes).
 2. Run it. Windows SmartScreen will warn you (the EXE is unsigned for v0; SignPath OSS application is in flight). Click **More info** → **Run anyway**.
 3. Launch Clicky from the Start Menu. A modal asks for your API keys (fewer if you pick local options, none if you go fully local):
    - [Anthropic](https://console.anthropic.com/settings/keys) for Claude Sonnet 4.6 (vision and reasoning). You can also pick **OpenAI (GPT-5.4)**, **Google Gemini**, or **Ollama (local)** from the dropdown instead. See the [FAQ](#faq) for the trade-offs.
@@ -128,19 +128,6 @@ graph TD
 ```
 
 The hotkey listener observes Ctrl+Alt+Space without consuming the keys. On release, four things kick off in parallel: speech-to-text finalizes, the screen gets captured, per-app memory gets recalled, and a knowledge-base file gets looked up if one exists. Claude Sonnet 4.6 receives the screenshot plus the transcript plus the memory plus the KB, and streams a response. Sentences flush to the TTS provider as soon as a `.!?` boundary is hit, so the user starts hearing audio while Claude is still generating. A `[POINT:x,y:label]` tag in the response drives a per-monitor PyQt6 overlay to point at the exact pixel.
-
-### The experimental GPT-Realtime path
-
-The default pipeline above is a four-stage chain (transcribe → think → speak → point). The experimental **GPT-Realtime** mode (`LLM_PROVIDER=openai-realtime`) collapses it into a single speech-to-speech WebSocket: your voice streams in, the model's voice streams back, and it reasons on the screenshot in between, so the reply is near-instant. This genuinely doesn't fit the speech-to-text → model → text-to-speech abstraction (there's no intermediate text to parse for a pointing tag), so it runs as its own parallel pipeline rather than being forced into the chain. Pointing comes from a function call the model makes, then gets refined by the same grid-locator.
-
-```mermaid
-graph LR
-    U[Hold hotkey + talk] --> WS[GPT-Realtime WebSocket]
-    SS[Screenshot on release] --> WS
-    WS -->|spoken audio, near-instant| SPK[Speaker]
-    WS -->|point_at function call| GL[Grid-locator refine]
-    GL --> OV[Blue cursor points]
-```
 
 ## Engineering decisions worth highlighting
 
@@ -308,23 +295,12 @@ Honest trade-off: local is free and private, but slower and heavier than cloud, 
 <details>
 <summary><strong>Which LLM should I pick: Claude, GPT, Gemini, or Ollama?</strong></summary>
 
-- **Claude Sonnet 4.6 (default).** Pixel-accurate pointing (~5px). The out-of-the-box choice. You can also pick Claude Opus 4.8 from the model dropdown for a bit more accuracy.
-- **OpenAI.** Pick **GPT-5.4** for pixel-accurate pointing (as good as Claude, so no grid-locator needed), or the cheaper **GPT-4o** which is weaker at exact coordinates and falls back to the grid-locator. Both are in the Settings model dropdown. Paste an [OpenAI key](https://platform.openai.com/api-keys).
-- **Google Gemini.** Pick **Gemini 3.5 Flash** for cheap and fast, or **Gemini 3.1 Pro** for max grounding. Routes through OpenRouter, so paste an [OpenRouter key](https://openrouter.ai/keys) (the `sk-or-` one). Returns precise coordinates in testing, with the grid-locator as a fallback.
+- **Claude Sonnet 4.6 (default).** Pixel-accurate pointing (~5px). The out-of-the-box choice.
+- **OpenAI (GPT-5.4).** Pixel-accurate pointing, as good as Claude. Paste an [OpenAI key](https://platform.openai.com/api-keys).
+- **Google Gemini (3.1 Pro).** Strong grounding, a little less pixel-precise than Claude. Routes through OpenRouter, so it reuses your `sk-or-` key with no separate key to enter.
 - **Ollama (local).** Free, runs on your machine, no API key. Slower and less precise, but private. See the question above.
 
 They all run through the same pipeline, switching is just a dropdown.
-
-</details>
-
-<details>
-<summary><strong>What's the GPT-Realtime voice mode?</strong> Talk to Clicky and it talks back in near real-time.</summary>
-
-An experimental speech-to-speech mode built on [OpenAI's GPT-Realtime](https://openai.com/index/introducing-gpt-realtime/). Instead of the usual transcribe → think → speak pipeline, one connection carries your voice in and the model's voice out, with it reasoning on your screen in between, so the reply comes back near-instantly and it points at where to click in the same turn.
-
-It's gated behind an environment variable for now (it's a different interaction model than push-to-talk-then-wait): set `LLM_PROVIDER=openai-realtime` in your `.env`, add your `OPENAI_API_KEY`, and restart. Hold the hotkey, talk, and it talks back and points.
-
-Pointing works the same way as the other vision models: the realtime model gives a rough target, and the two-stage grid-locator refines it.
 
 </details>
 

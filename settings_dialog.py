@@ -99,7 +99,9 @@ class _Provider:
     model_setting: str = ""           # keyring slot for the chosen model
     models_editable: bool = False     # True → user can type a custom model
     hides_other_categories: bool = False  # True → collapse STT+TTS (realtime)
-    requires_key: bool = True         # False → local provider, no key field
+    requires_key: bool = True         # False → key not required (Save not gated)
+    hide_key_field: bool = False      # True → no key field at all (pure-local)
+    key_hint: str = ""                # custom empty-field placeholder text
 
 
 @dataclass(frozen=True)
@@ -123,11 +125,9 @@ _PROVIDER_CATEGORIES: tuple[_ProviderCategory, ...] = (
                 display_name="Anthropic",
                 api_key_env_var="ANTHROPIC_API_KEY",
                 signup_url="https://console.anthropic.com/settings/keys",
-                models=(
-                    _Model("Claude Sonnet 4.6 (fast, accurate)", "claude-sonnet-4-6"),
-                    _Model("Claude Opus 4.8 (max accuracy)", "claude-opus-4-8"),
-                ),
-                model_setting="ANTHROPIC_MODEL",
+                # No model sub-picker (v0.4.1 minimal UX): defaults to Claude
+                # Sonnet 4.6, the best all-round default. Opus 4.8 stays reachable
+                # via the ANTHROPIC_MODEL env var for the rare power user.
             ),
             # v0.3.0: OpenAI native vision. Direct sk-... key (NOT the OpenRouter
             # sk-or- key). Default gpt-5.4 is pixel-accurate (grid-locator
@@ -137,23 +137,15 @@ _PROVIDER_CATEGORIES: tuple[_ProviderCategory, ...] = (
                 display_name="OpenAI",
                 api_key_env_var="OPENAI_API_KEY",
                 signup_url="https://platform.openai.com/api-keys",
-                models=(
-                    _Model("GPT-5.4 (pixel-accurate)", "gpt-5.4"),
-                    _Model("GPT-4o (cheaper, less precise)", "gpt-4o"),
-                ),
-                model_setting="OPENAI_MODEL_VISION",
+                # No model sub-picker (v0.4.1 minimal UX): defaults to gpt-5.4
+                # (pixel-accurate). gpt-4o is weaker and a footgun as a visible
+                # choice; reachable via the OPENAI_MODEL_VISION env var if needed.
             ),
-            # v0.3.0: GPT-Realtime voice-to-voice. Lowest latency — handles
-            # speech end-to-end (hear + speak + route), so the STT + TTS rows
-            # collapse when selected. Pixels go through an accurate vision pass
-            # (gpt-5.4/Claude) in app.py. Uses the same OPENAI_API_KEY.
-            _Provider(
-                provider_id="openai-realtime",
-                display_name="OpenAI Realtime (lowest latency, voice)",
-                api_key_env_var="OPENAI_API_KEY",
-                signup_url="https://platform.openai.com/api-keys",
-                hides_other_categories=True,
-            ),
+            # GPT-Realtime is intentionally NOT in this dropdown (v0.4.1). It's
+            # an experimental speech-to-speech path with known audio issues
+            # (no transcription / no playback on some setups). Still reachable
+            # for advanced use via LLM_PROVIDER=openai-realtime in .env, just not
+            # surfaced as a working option.
             # v0.2.0: Local Ollama. No API key — instead the "API key" field
             # stores the OLLAMA_HOST URL (default http://localhost:11434).
             # Repurposing the field as a host URL keeps the dialog uniform
@@ -169,21 +161,20 @@ _PROVIDER_CATEGORIES: tuple[_ProviderCategory, ...] = (
                 model_setting="OLLAMA_MODEL_VISION",
                 models_editable=True,
             ),
-            # v0.3.x: Google Gemini via OpenRouter (re-enabled with current
-            # computer-use models). GEMINI_API_KEY holds the user's OpenRouter
-            # (sk-or-) key. 3.5 Flash is cheap + computer-use; 3.1 Pro is max
-            # grounding (84.4% ScreenSpot-Pro). Appended last to keep existing
-            # provider indices (realtime=2, ollama=3) stable for tests.
+            # Google Gemini via OpenRouter. ONE option, no model sub-picker
+            # (minimal UX) — defaults to 3.1 Pro (most pixel-accurate Gemini).
+            # requires_key=False so Save isn't gated: leave the field BLANK and
+            # it reuses your existing OpenRouter (sk-or-) key from the Anthropic
+            # slot (see app._resolve_llm_credentials gemini branch). The field is
+            # still SHOWN (hide_key_field stays False) so a user who wants a
+            # separate OpenRouter key for Gemini can paste one.
             _Provider(
                 provider_id="gemini",
                 display_name="Google Gemini",
                 api_key_env_var="GEMINI_API_KEY",
                 signup_url="https://openrouter.ai/keys",
-                models=(
-                    _Model("Gemini 3.5 Flash (cheap, fast)", "google/gemini-3.5-flash"),
-                    _Model("Gemini 3.1 Pro (max accuracy)", "google/gemini-3.1-pro-preview"),
-                ),
-                model_setting="GEMINI_MODEL_VISION",
+                requires_key=False,
+                key_hint="optional OpenRouter key - blank reuses your Claude key",
             ),
         ),
         default_index=0,
@@ -207,6 +198,7 @@ _PROVIDER_CATEGORIES: tuple[_ProviderCategory, ...] = (
                 api_key_env_var="FASTER_WHISPER_LOCAL",
                 signup_url="https://github.com/SYSTRAN/faster-whisper",
                 requires_key=False,
+                hide_key_field=True,  # truly local — no key field at all
             ),
         ),
         default_index=0,
@@ -235,6 +227,7 @@ _PROVIDER_CATEGORIES: tuple[_ProviderCategory, ...] = (
                 api_key_env_var="KOKORO_LOCAL",
                 signup_url="https://github.com/thewh1teagle/kokoro-onnx",
                 requires_key=False,
+                hide_key_field=True,  # truly local — no key field at all
             ),
         ),
         default_index=0,
@@ -522,13 +515,18 @@ class SettingsDialog(QDialog):
         existing = keyring.get_password(KEYRING_SERVICE, provider.api_key_env_var) or ""
         key_input = self._key_inputs[category.category_key]
         key_input.setText(existing)
-        key_input.setPlaceholderText(
-            _mask(existing) if existing else f"paste {provider.api_key_env_var} here"
-        )
-        # Local providers (faster-whisper / kokoro) need no key — hide the key
-        # field + Get-key button so the dialog shows just the provider dropdown.
-        key_input.setVisible(provider.requires_key)
-        self._signup_buttons[category.category_key].setVisible(provider.requires_key)
+        if existing:
+            placeholder = _mask(existing)
+        elif provider.key_hint:
+            placeholder = provider.key_hint
+        else:
+            placeholder = f"paste {provider.api_key_env_var} here"
+        key_input.setPlaceholderText(placeholder)
+        # Pure-local providers (faster-whisper / kokoro) need no key — hide the
+        # key field + Get-key button entirely. Everything else shows the field
+        # (Gemini shows an OPTIONAL field: blank reuses the OpenRouter key).
+        key_input.setVisible(not provider.hide_key_field)
+        self._signup_buttons[category.category_key].setVisible(not provider.hide_key_field)
 
     # ---------- Slots ----------------------------------------------------
 

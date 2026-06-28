@@ -102,14 +102,14 @@ class TestProviderCategoriesData:
         from settings_dialog import _PROVIDER_CATEGORIES
         assert [c.category_key for c in _PROVIDER_CATEGORIES] == ["LLM", "STT", "TTS"]
 
-    def test_llm_category_has_anthropic_openai_realtime_and_ollama(self):
-        """v0.2.0 added 'ollama'; v0.3.0 added 'openai' + 'openai-realtime'.
-        Order: anthropic, openai, openai-realtime, ollama. Default index 0
-        (Anthropic) so existing users see no behavior change."""
+    def test_llm_category_has_anthropic_openai_ollama_gemini(self):
+        """v0.4.1: LLM dropdown is anthropic, openai, ollama, gemini (in that
+        order). GPT-Realtime was removed (experimental, audio issues — reachable
+        only via LLM_PROVIDER=openai-realtime env). Default index 0 (Anthropic)."""
         from settings_dialog import _PROVIDER_CATEGORIES
         llm = next(c for c in _PROVIDER_CATEGORIES if c.category_key == "LLM")
         assert [p.provider_id for p in llm.providers] == [
-            "anthropic", "openai", "openai-realtime", "ollama", "gemini",
+            "anthropic", "openai", "ollama", "gemini",
         ]
         assert llm.default_index == 0  # Anthropic stays default
 
@@ -123,26 +123,23 @@ class TestProviderCategoriesData:
         assert openai.display_name == "OpenAI"
         assert "platform.openai.com" in openai.signup_url
 
-    def test_realtime_provider_uses_openai_key_and_collapses_categories(self):
-        """v0.3.0: openai-realtime shares OPENAI_API_KEY and hides STT+TTS
-        (it does speech end-to-end). It has no model picker."""
+    def test_realtime_not_in_dropdown(self):
+        """v0.4.1: GPT-Realtime removed from the Settings dropdown (experimental,
+        audio issues on some setups). Still reachable via the env var
+        LLM_PROVIDER=openai-realtime, just not surfaced as a working option."""
         from settings_dialog import _PROVIDER_CATEGORIES
         llm = next(c for c in _PROVIDER_CATEGORIES if c.category_key == "LLM")
-        rt = next(p for p in llm.providers if p.provider_id == "openai-realtime")
-        assert rt.api_key_env_var == "OPENAI_API_KEY"
-        assert rt.hides_other_categories is True
-        assert rt.models == ()
+        assert "openai-realtime" not in [p.provider_id for p in llm.providers]
 
-    def test_anthropic_provider_offers_sonnet_default_and_opus_models(self):
-        """v0.3.0: Anthropic exposes a model picker — Sonnet 4.6 (default,
-        index 0) + Opus 4.8 (max accuracy). Persists to ANTHROPIC_MODEL."""
+    def test_anthropic_provider_has_no_model_picker(self):
+        """v0.4.1 minimal UX: Anthropic has no model sub-picker — it defaults to
+        Claude Sonnet 4.6 (pixel-tight). Opus 4.8 reachable via ANTHROPIC_MODEL
+        env for the rare power user, but not a visible, overwhelming choice."""
         from settings_dialog import _PROVIDER_CATEGORIES
         llm = next(c for c in _PROVIDER_CATEGORIES if c.category_key == "LLM")
         ant = next(p for p in llm.providers if p.provider_id == "anthropic")
-        ids = [m.model_id for m in ant.models]
-        assert ids[0] == "claude-sonnet-4-6"  # default
-        assert "claude-opus-4-8" in ids
-        assert ant.model_setting == "ANTHROPIC_MODEL"
+        assert ant.models == ()
+        assert ant.model_setting == ""
 
     def test_ollama_llm_provider_has_host_field_not_api_key(self):
         """Ollama is special: its 'api_key_env_var' slot stores OLLAMA_HOST
@@ -191,16 +188,16 @@ class TestProviderCategoriesData:
                 assert provider.display_name  # non-empty
 
     def test_gemini_provider_data(self):
-        """v0.3.x: Gemini re-enabled via OpenRouter. Uses GEMINI_API_KEY slot,
-        offers 3.5 Flash (default, index 0) + 3.1 Pro, persists GEMINI_MODEL_VISION."""
+        """v0.4.1: Gemini is ONE keyless option (no model sub-picker — minimal
+        UX). It reuses the user's OpenRouter (sk-or-) key at runtime, so
+        requires_key=False and no separate key field renders. The default model
+        (3.1 Pro, most accurate) lives in config.GEMINI_MODEL_VISION."""
         from settings_dialog import _PROVIDER_CATEGORIES
         llm = next(c for c in _PROVIDER_CATEGORIES if c.category_key == "LLM")
         gem = next(p for p in llm.providers if p.provider_id == "gemini")
         assert gem.api_key_env_var == "GEMINI_API_KEY"
-        ids = [m.model_id for m in gem.models]
-        assert ids[0] == "google/gemini-3.5-flash"  # cheap default
-        assert "google/gemini-3.1-pro-preview" in ids
-        assert gem.model_setting == "GEMINI_MODEL_VISION"
+        assert gem.models == ()
+        assert gem.requires_key is False
 
     def test_local_providers_require_no_key(self):
         """faster-whisper + kokoro are local (no API key): requires_key=False so
@@ -279,16 +276,16 @@ class TestSettingsDialogRender:
         items = [tts_dropdown.itemText(i) for i in range(tts_dropdown.count())]
         assert items == ["Cartesia", "ElevenLabs", "Local (Kokoro)"]
 
-    def test_llm_dropdown_has_anthropic_openai_realtime_and_ollama(self, qapp, mocker):
-        """v0.3.0: LLM dropdown has Anthropic, OpenAI, OpenAI Realtime, Ollama.
-        Anthropic stays default (index 0)."""
+    def test_llm_dropdown_has_anthropic_openai_ollama_gemini(self, qapp, mocker):
+        """v0.4.1: LLM dropdown has Anthropic, OpenAI, Ollama, Gemini (Realtime
+        removed). Anthropic stays default (index 0)."""
         mocker.patch("settings_dialog.keyring.get_password", return_value=None)
         from settings_dialog import SettingsDialog
         dlg = SettingsDialog()
         llm_dropdown = dlg._dropdowns["LLM"]
-        assert llm_dropdown.count() == 5
+        assert llm_dropdown.count() == 4
         ids = [llm_dropdown.itemData(i) for i in range(llm_dropdown.count())]
-        assert ids == ["anthropic", "openai", "openai-realtime", "ollama", "gemini"]
+        assert ids == ["anthropic", "openai", "ollama", "gemini"]
         assert llm_dropdown.currentIndex() == 0
 
     def test_stt_dropdown_has_two_options(self, qapp, mocker):
@@ -438,73 +435,28 @@ class TestOllamaModelDropdown:
         assert _OLLAMA_MODEL_SUGGESTIONS[0] == "llava:7b"
         assert "llama3.2-vision" in _OLLAMA_MODEL_SUGGESTIONS
 
-    def test_model_row_visible_for_anthropic_default(self, qapp, mocker):
-        """v0.3.0: Anthropic now HAS a model picker (Sonnet/Opus), so the
-        model row is VISIBLE when Anthropic (the default) is selected.
+    def test_model_row_hidden_for_anthropic_default(self, qapp, mocker):
+        """v0.4.1: Anthropic has no model sub-picker (minimal UX), so the model
+        row is HIDDEN when Anthropic (the default) is selected.
         (isHidden() not isVisible() — the dialog is never .show()-n in tests.)"""
         mocker.patch("settings_dialog.keyring.get_password", return_value=None)
         from settings_dialog import SettingsDialog
         dlg = SettingsDialog()
-        assert dlg._model_rows["LLM"].isHidden() is False
-        combo = dlg._model_combos["LLM"]
-        ids = [combo.itemData(i) for i in range(combo.count())]
-        assert "claude-sonnet-4-6" in ids and "claude-opus-4-8" in ids
-
-    def test_model_row_hidden_for_realtime_provider(self, qapp, mocker):
-        """Realtime has no model picker → model row hidden when selected."""
-        mocker.patch("settings_dialog.keyring.get_password", return_value=None)
-        from settings_dialog import SettingsDialog
-        dlg = SettingsDialog()
-        dlg._dropdowns["LLM"].setCurrentIndex(2)  # openai-realtime
         assert dlg._model_rows["LLM"].isHidden() is True
 
     def test_model_combo_repopulates_for_ollama(self, qapp, mocker):
-        """Switching LLM to Ollama (index 3) repopulates the model combo with
-        Ollama suggestions, keeps it visible + editable."""
+        """Switching LLM to Ollama (index 2: ant=0, openai=1, ollama=2, gemini=3)
+        repopulates the model combo with Ollama suggestions, keeps it visible +
+        editable."""
         mocker.patch("settings_dialog.keyring.get_password", return_value=None)
         from settings_dialog import SettingsDialog
         dlg = SettingsDialog()
-        dlg._dropdowns["LLM"].setCurrentIndex(3)  # ollama
+        dlg._dropdowns["LLM"].setCurrentIndex(2)  # ollama
         assert dlg._model_rows["LLM"].isHidden() is False
         combo = dlg._model_combos["LLM"]
         assert combo.isEditable() is True
         items = [combo.itemText(i) for i in range(combo.count())]
         assert "llava:7b" in items
-
-    def test_realtime_collapses_stt_and_tts_rows(self, qapp, mocker):
-        """Selecting OpenAI Realtime hides the STT + TTS category rows + shows
-        the realtime note; switching back restores them."""
-        mocker.patch("settings_dialog.keyring.get_password", return_value=None)
-        from settings_dialog import SettingsDialog
-        dlg = SettingsDialog()
-        dlg._dropdowns["LLM"].setCurrentIndex(2)  # openai-realtime
-        assert dlg._category_widgets["STT"].isHidden() is True
-        assert dlg._category_widgets["TTS"].isHidden() is True
-        assert dlg._realtime_note.isHidden() is False
-        dlg._dropdowns["LLM"].setCurrentIndex(0)  # back to Anthropic
-        assert dlg._category_widgets["STT"].isHidden() is False
-        assert dlg._realtime_note.isHidden() is True
-
-    def test_save_persists_anthropic_model_when_opus_selected(
-        self, qapp, mocker, monkeypatch
-    ):
-        """Picking Opus 4.8 in the Anthropic model dropdown persists
-        ANTHROPIC_MODEL=claude-opus-4-8 on Save."""
-        saved: dict[tuple[str, str], str] = {}
-        monkeypatch.setattr("settings_dialog.keyring.get_password", lambda s, n: None)
-        monkeypatch.setattr(
-            "settings_dialog.keyring.set_password",
-            lambda s, n, v: saved.update({(s, n): v}),
-        )
-        from settings_dialog import SettingsDialog
-        dlg = SettingsDialog()
-        combo = dlg._model_combos["LLM"]
-        combo.setCurrentIndex(combo.findData("claude-opus-4-8"))
-        dlg._key_inputs["LLM"].setText("sk-llm")
-        dlg._key_inputs["STT"].setText("stt")
-        dlg._key_inputs["TTS"].setText("tts")
-        dlg._on_save()
-        assert saved[("clicky-windows", "ANTHROPIC_MODEL")] == "claude-opus-4-8"
 
     def test_save_persists_ollama_model_to_keyring(
         self, qapp, mocker, monkeypatch
@@ -521,7 +473,7 @@ class TestOllamaModelDropdown:
 
         from settings_dialog import SettingsDialog
         dlg = SettingsDialog()
-        dlg._dropdowns["LLM"].setCurrentIndex(3)  # ollama (0=ant,1=openai,2=realtime,3=ollama)
+        dlg._dropdowns["LLM"].setCurrentIndex(2)  # ollama (0=ant,1=openai,2=ollama,3=gemini)
         dlg._key_inputs["LLM"].setText("http://localhost:11434")
         dlg._key_inputs["STT"].setText("stt-key")
         dlg._key_inputs["TTS"].setText("tts-key")
@@ -567,7 +519,7 @@ class TestOllamaModelDropdown:
 
         from settings_dialog import SettingsDialog
         dlg = SettingsDialog()
-        dlg._dropdowns["LLM"].setCurrentIndex(3)  # ollama
+        dlg._dropdowns["LLM"].setCurrentIndex(2)  # ollama
         dlg._key_inputs["LLM"].setText("http://localhost:11434")
         dlg._key_inputs["STT"].setText("stt-key")
         dlg._key_inputs["TTS"].setText("tts-key")

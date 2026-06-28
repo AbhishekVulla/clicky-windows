@@ -830,14 +830,23 @@ class ClickyApp(QObject):
         ``max(STT, capture)`` instead of ``STT + capture``.
         """
         dbg = DebugSession.start(app_name, window_title)
+        # v0.4.1: log the ACTUAL providers this interaction used. The old
+        # "AssemblyAI"/"CLAUDE" log labels were hardcoded and lied about which
+        # provider ran; this line lets you open any interaction.log and see
+        # exactly what was used (STT, LLM, TTS).
+        dbg.log(
+            f"PROVIDERS: STT={type(self._stt).__name__} | "
+            f"LLM={getattr(self._ai, 'model_id', None) or type(self._ai).__name__} | "
+            f"TTS={type(self._tts).__name__}"
+        )
         try:
             if cancel.is_set():
                 return
 
             dbg.log("STT: calling stop_recording()...")
             transcript = self._stt.stop_recording()
-            dbg.log(f"STT: {self._stt._chunk_count} chunks forwarded to AssemblyAI")
-            dbg.log(f"STT: latest_partial before ForceEndpoint: {self._stt._latest_partial!r}")
+            dbg.log(f"STT: {self._stt._chunk_count} audio chunks captured")
+            dbg.log(f"STT: latest partial: {self._stt._latest_partial!r}")
             dbg.log(f"STT: final transcript ({len(transcript)} chars): {transcript!r}")
             _log(f"Transcript: {transcript!r}")
             if not transcript.strip():
@@ -934,7 +943,7 @@ class ClickyApp(QObject):
             if cancel.is_set():
                 return
 
-            dbg.log("CLAUDE: streaming started...")
+            dbg.log("LLM: streaming started...")
             _log("Asking Claude...")
 
             # Arm one-shot first-audible-word log. Fires on the first
@@ -999,9 +1008,9 @@ class ClickyApp(QObject):
             if cancel.is_set():
                 return
 
-            dbg.log(f"CLAUDE: done ({len(result.spoken_text)} chars)")
-            dbg.log(f"CLAUDE: spoken_text: {result.spoken_text!r}")
-            dbg.log(f"CLAUDE: coordinate={result.coordinate}, label={result.element_label!r}, screen={result.screen_number}")
+            dbg.log(f"LLM: done ({len(result.spoken_text)} chars)")
+            dbg.log(f"LLM: spoken_text: {result.spoken_text!r}")
+            dbg.log(f"LLM: coordinate={result.coordinate}, label={result.element_label!r}, screen={result.screen_number}")
 
             # v0.3.0 annotation mode: the shape tags ([ARROW]/[CIRCLE]/...) are
             # still in result.spoken_text — ai.py's parser only strips [POINT].
@@ -1447,11 +1456,14 @@ def _resolve_llm_credentials() -> tuple[str, str]:
         # path's grid-locator refinement, harmless otherwise.
         return f"openai/{OPENAI_MODEL_VISION}", OPENAI_API_KEY or ""
     if provider == "gemini":
-        # v0.3.x: Google Gemini via OpenRouter. The 'google/' model prefix
-        # routes create_ai_client → GeminiClient at the OpenRouter endpoint.
-        # GEMINI_API_KEY holds the user's OpenRouter (sk-or-) key. Pointing is
-        # refined by the grid-locator if the model returns no [POINT] tag.
-        return GEMINI_MODEL_VISION, GEMINI_API_KEY or ""
+        # Gemini routes via OpenRouter — the SAME endpoint Claude uses. Reuse
+        # the user's OpenRouter (sk-or-) key from the Anthropic slot if no
+        # separate GEMINI_API_KEY is set, so there's no extra key to enter
+        # (v0.4.1 minimal-UX). Pointing is refined by the grid-locator.
+        gem_key = GEMINI_API_KEY or ""
+        if not gem_key and (ANTHROPIC_API_KEY or "").startswith("sk-or-"):
+            gem_key = ANTHROPIC_API_KEY
+        return GEMINI_MODEL_VISION, gem_key
     if provider == "ollama":
         # v0.2.1 (Issue #1 fix D): log detected Ollama version + warn
         # about model/version mismatches at startup. Stderr only — the
@@ -1653,9 +1665,29 @@ if __name__ == "__main__":
             clicky._stt.on_partial_transcript(
                 lambda text: print(f"[stt partial] {text}", flush=True)
             )
-        except RuntimeError as exc:
-            print(f"\nERROR: {exc}")
-            sys.exit(1)
+        except Exception as exc:
+            # v0.4.1: a provider that fails to load at startup (a local model
+            # with a missing bundled dep, or a stale keyring setting) must NOT
+            # brick the app with a traceback. If we exit here the user can't
+            # reach Settings to fix it. Show a friendly message and keep going
+            # so the tray + Settings open and they can switch providers.
+            import traceback
+            print(f"\nERROR: STT failed to start: {exc}")
+            traceback.print_exc()
+            try:
+                ctypes.windll.user32.MessageBoxW(
+                    None,
+                    "Clicky's speech-to-text provider failed to start:\n\n"
+                    f"{exc}\n\n"
+                    "Right-click the Clicky tray icon and open Settings to switch "
+                    "to a different provider (for example AssemblyAI cloud), then "
+                    "restart Clicky.",
+                    "Speech-to-text failed to load",
+                    0x10,  # MB_ICONERROR
+                )
+            except Exception:
+                pass
+            # Do NOT sys.exit — let the app open so the user can recover via Settings.
     else:
         _log("REALTIME: skipping AssemblyAI STT mic (GPT-Realtime owns the mic)")
 
@@ -1673,10 +1705,24 @@ if __name__ == "__main__":
 
     def _show_settings() -> None:
         dlg = SettingsDialog()
-        if dlg.exec() == dlg.DialogCode.Accepted:
-            _log(
-                "Settings saved. Restart Clicky for new keys to take effect."
-            )
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            return
+        _log("Settings saved.")
+        # v0.4.1: providers/models are built ONCE at startup, so a Settings
+        # change can't affect the already-running instance. An earlier attempt
+        # to auto-relaunch popped a stray terminal and sometimes failed, so we
+        # do the reliable thing: close cleanly and tell the user to reopen.
+        # One manual click, but it always works.
+        ctypes.windll.user32.MessageBoxW(
+            None,
+            "Settings saved.\n\nClicky will now close so your change can take "
+            "effect. Reopen it from the Start Menu (or your desktop shortcut) "
+            "to continue.",
+            "Clicky - reopen to apply",
+            0x40,  # MB_ICONINFORMATION (OK only)
+        )
+        clicky.stop()
+        qt_app.quit()
 
     # Tray construction can raise RuntimeError if the user's Windows
     # has no system tray available (rare — kiosk mode, custom shells,
