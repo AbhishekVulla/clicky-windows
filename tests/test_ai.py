@@ -1627,6 +1627,29 @@ class TestCreateAIClientOpenAI:
         client = create_ai_client(model_id="ollama/llava:7b", api_key="")
         assert isinstance(client, OllamaClient)
 
+    def test_openai_with_openrouter_key_routes_to_openrouter(self, mocker):
+        """v0.4.x dual routing: an sk-or- key for OpenAI points at OpenRouter
+        and KEEPS the namespaced openai/ slug (OpenRouter expects it). Token
+        param is the classic max_tokens (OpenRouter normalizes it)."""
+        from ai import create_ai_client, OpenAIVisionClient
+        mock_openai = mocker.patch("ai.OpenAI")
+        client = create_ai_client(model_id="openai/gpt-5.4", api_key="sk-or-v1-test")
+        assert isinstance(client, OpenAIVisionClient)
+        assert client.model_id == "openai/gpt-5.4"  # slug kept for OpenRouter
+        assert "openrouter.ai" in mock_openai.call_args.kwargs["base_url"]
+        assert client._max_tokens_param == "max_tokens"
+
+    def test_openai_with_direct_key_hits_openai_native(self, mocker):
+        """A direct OpenAI key strips the prefix, leaves base_url None
+        (api.openai.com), and uses max_completion_tokens (gpt-5 requirement)."""
+        from ai import create_ai_client, OpenAIVisionClient
+        mock_openai = mocker.patch("ai.OpenAI")
+        client = create_ai_client(model_id="openai/gpt-5.4", api_key="sk-proj-direct")
+        assert isinstance(client, OpenAIVisionClient)
+        assert client.model_id == "gpt-5.4"  # prefix stripped for native API
+        assert mock_openai.call_args.kwargs.get("base_url") is None
+        assert client._max_tokens_param == "max_completion_tokens"
+
 
 class TestAnnotationPrompt:
     """v0.3.0 hackathon: draw-on-screen annotation system prompt."""

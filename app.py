@@ -1419,6 +1419,22 @@ def _resolve_stt_credentials() -> tuple[str, str]:
     return "assemblyai", resolve_api_key("ASSEMBLYAI_API_KEY") or ""
 
 
+def _openrouter_key() -> str:
+    """Any OpenRouter (sk-or-) key the user pasted in ANY LLM slot.
+
+    One OpenRouter key works for every model namespace (anthropic/, openai/,
+    google/), so a power user pastes it once and it is reused across all LLM
+    providers (cache + reuse). Direct provider keys (sk-ant-, sk-..., Google
+    AIza) are NOT reused here — they only authenticate their own provider, so
+    each is matched by its own slot. create_ai_client then routes an sk-or-
+    key to OpenRouter and a direct key to that provider's native endpoint.
+    """
+    for k in (ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY):
+        if (k or "").startswith("sk-or-"):
+            return k
+    return ""
+
+
 def _resolve_llm_credentials() -> tuple[str, str]:
     """Resolve (effective_model_id, api_key) at startup based on LLM_PROVIDER (v0.2.0).
 
@@ -1454,16 +1470,19 @@ def _resolve_llm_credentials() -> tuple[str, str]:
         # session runs as a parallel pipeline (see _setup_realtime); the main
         # ai_client built here is a valid GPT-4o client used by the realtime
         # path's grid-locator refinement, harmless otherwise.
-        return f"openai/{OPENAI_MODEL_VISION}", OPENAI_API_KEY or ""
+        # Direct OpenAI key (sk-...) → api.openai.com; an OpenRouter key →
+        # OpenRouter (create_ai_client routes by prefix). If the OpenAI slot is
+        # empty, reuse a cached OpenRouter key so one sk-or- key serves OpenAI too.
+        return f"openai/{OPENAI_MODEL_VISION}", OPENAI_API_KEY or _openrouter_key()
     if provider == "gemini":
         # Gemini routes via OpenRouter — the SAME endpoint Claude uses. Reuse
         # the user's OpenRouter (sk-or-) key from the Anthropic slot if no
         # separate GEMINI_API_KEY is set, so there's no extra key to enter
         # (v0.4.1 minimal-UX). Pointing is refined by the grid-locator.
-        gem_key = GEMINI_API_KEY or ""
-        if not gem_key and (ANTHROPIC_API_KEY or "").startswith("sk-or-"):
-            gem_key = ANTHROPIC_API_KEY
-        return GEMINI_MODEL_VISION, gem_key
+        # Own slot first (a direct Google AI Studio key, or a per-Gemini
+        # OpenRouter key), else reuse any cached OpenRouter key so one sk-or-
+        # key serves Gemini too. create_ai_client routes by key prefix.
+        return GEMINI_MODEL_VISION, GEMINI_API_KEY or _openrouter_key()
     if provider == "ollama":
         # v0.2.1 (Issue #1 fix D): log detected Ollama version + warn
         # about model/version mismatches at startup. Stderr only — the
@@ -1501,10 +1520,11 @@ def _resolve_llm_credentials() -> tuple[str, str]:
     # anthropic (default). v0.3.0: the Settings model dropdown persists
     # ANTHROPIC_MODEL (e.g. claude-opus-4-8 for max accuracy) — honor it. An
     # explicitly-set MODEL_ID env var still takes precedence (advanced override).
+    ant_key = ANTHROPIC_API_KEY or _openrouter_key()
     if os.getenv("MODEL_ID"):
-        return MODEL_ID, ANTHROPIC_API_KEY or ""
+        return MODEL_ID, ant_key
     ant_model = resolve_setting("ANTHROPIC_MODEL", default="claude-sonnet-4-6")
-    return f"anthropic/{ant_model}", ANTHROPIC_API_KEY or ""
+    return f"anthropic/{ant_model}", ant_key
 
 
 def _should_connect_stt(realtime) -> bool:

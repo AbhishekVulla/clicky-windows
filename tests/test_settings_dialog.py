@@ -6,6 +6,15 @@ from __future__ import annotations
 import pytest
 
 
+def _dropdown_index(dropdown, provider_id: str) -> int:
+    """Find a provider's index in a dropdown by its id, so tests don't hardcode
+    positions that shift when providers are added or reordered."""
+    for i in range(dropdown.count()):
+        if dropdown.itemData(i) == provider_id:
+            return i
+    raise AssertionError(f"{provider_id!r} not found in dropdown")
+
+
 # --- _mask helper ------------------------------------------------------------
 
 class TestMask:
@@ -102,16 +111,16 @@ class TestProviderCategoriesData:
         from settings_dialog import _PROVIDER_CATEGORIES
         assert [c.category_key for c in _PROVIDER_CATEGORIES] == ["LLM", "STT", "TTS"]
 
-    def test_llm_category_has_anthropic_openai_ollama_gemini(self):
-        """v0.4.1: LLM dropdown is anthropic, openai, ollama, gemini (in that
-        order). GPT-Realtime was removed (experimental, audio issues — reachable
-        only via LLM_PROVIDER=openai-realtime env). Default index 0 (Anthropic)."""
+    def test_llm_category_has_expected_providers(self):
+        """The LLM category includes anthropic, openai, ollama, gemini (Realtime
+        removed). Order-independent membership so adding/reordering a provider
+        doesn't break this; the load-bearing fact is that Anthropic is default."""
         from settings_dialog import _PROVIDER_CATEGORIES
         llm = next(c for c in _PROVIDER_CATEGORIES if c.category_key == "LLM")
-        assert [p.provider_id for p in llm.providers] == [
-            "anthropic", "openai", "ollama", "gemini",
-        ]
-        assert llm.default_index == 0  # Anthropic stays default
+        ids = {p.provider_id for p in llm.providers}
+        assert {"anthropic", "openai", "ollama", "gemini"} <= ids
+        assert "openai-realtime" not in ids  # hidden from the dropdown
+        assert llm.providers[llm.default_index].provider_id == "anthropic"
 
     def test_openai_llm_provider_uses_openai_api_key_slot(self):
         """v0.3.0: OpenAI provider stores a direct OPENAI_API_KEY (NOT the
@@ -276,17 +285,18 @@ class TestSettingsDialogRender:
         items = [tts_dropdown.itemText(i) for i in range(tts_dropdown.count())]
         assert items == ["Cartesia", "ElevenLabs", "Local (Kokoro)"]
 
-    def test_llm_dropdown_has_anthropic_openai_ollama_gemini(self, qapp, mocker):
-        """v0.4.1: LLM dropdown has Anthropic, OpenAI, Ollama, Gemini (Realtime
-        removed). Anthropic stays default (index 0)."""
+    def test_llm_dropdown_has_expected_providers(self, qapp, mocker):
+        """LLM dropdown includes Anthropic, OpenAI, Ollama, Gemini (Realtime
+        removed) and defaults to Anthropic. Order-independent so adding a
+        provider doesn't break it."""
         mocker.patch("settings_dialog.keyring.get_password", return_value=None)
         from settings_dialog import SettingsDialog
         dlg = SettingsDialog()
         llm_dropdown = dlg._dropdowns["LLM"]
-        assert llm_dropdown.count() == 4
-        ids = [llm_dropdown.itemData(i) for i in range(llm_dropdown.count())]
-        assert ids == ["anthropic", "openai", "ollama", "gemini"]
-        assert llm_dropdown.currentIndex() == 0
+        ids = {llm_dropdown.itemData(i) for i in range(llm_dropdown.count())}
+        assert {"anthropic", "openai", "ollama", "gemini"} <= ids
+        assert "openai-realtime" not in ids
+        assert llm_dropdown.itemData(llm_dropdown.currentIndex()) == "anthropic"
 
     def test_stt_dropdown_has_two_options(self, qapp, mocker):
         """v0.3.x: STT dropdown has AssemblyAI (default) + Local (faster-whisper)."""
@@ -451,7 +461,7 @@ class TestOllamaModelDropdown:
         mocker.patch("settings_dialog.keyring.get_password", return_value=None)
         from settings_dialog import SettingsDialog
         dlg = SettingsDialog()
-        dlg._dropdowns["LLM"].setCurrentIndex(2)  # ollama
+        dlg._dropdowns["LLM"].setCurrentIndex(_dropdown_index(dlg._dropdowns["LLM"], "ollama"))
         assert dlg._model_rows["LLM"].isHidden() is False
         combo = dlg._model_combos["LLM"]
         assert combo.isEditable() is True
@@ -473,7 +483,7 @@ class TestOllamaModelDropdown:
 
         from settings_dialog import SettingsDialog
         dlg = SettingsDialog()
-        dlg._dropdowns["LLM"].setCurrentIndex(2)  # ollama (0=ant,1=openai,2=ollama,3=gemini)
+        dlg._dropdowns["LLM"].setCurrentIndex(_dropdown_index(dlg._dropdowns["LLM"], "ollama"))
         dlg._key_inputs["LLM"].setText("http://localhost:11434")
         dlg._key_inputs["STT"].setText("stt-key")
         dlg._key_inputs["TTS"].setText("tts-key")
@@ -519,7 +529,7 @@ class TestOllamaModelDropdown:
 
         from settings_dialog import SettingsDialog
         dlg = SettingsDialog()
-        dlg._dropdowns["LLM"].setCurrentIndex(2)  # ollama
+        dlg._dropdowns["LLM"].setCurrentIndex(_dropdown_index(dlg._dropdowns["LLM"], "ollama"))
         dlg._key_inputs["LLM"].setText("http://localhost:11434")
         dlg._key_inputs["STT"].setText("stt-key")
         dlg._key_inputs["TTS"].setText("tts-key")

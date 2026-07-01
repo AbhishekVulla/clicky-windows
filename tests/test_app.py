@@ -1124,15 +1124,46 @@ class TestResolveLLMCredentials:
         assert api_key == "sk-proj-test"
 
     def test_openai_path_handles_none_api_key(self, mocker):
-        """OPENAI_API_KEY None → empty string, not None (create_ai_client wants str)."""
+        """OPENAI_API_KEY None + no cached OpenRouter key anywhere → empty
+        string, not None (create_ai_client wants str)."""
         from app import _resolve_llm_credentials
 
         mocker.patch("app.resolve_setting", return_value="openai")
         mocker.patch("app.OPENAI_MODEL_VISION", "gpt-4o")
         mocker.patch("app.OPENAI_API_KEY", None)
+        mocker.patch("app.ANTHROPIC_API_KEY", None)
+        mocker.patch("app.GEMINI_API_KEY", None)
 
         model_id, api_key = _resolve_llm_credentials()
         assert api_key == ""
+
+    def test_openai_reuses_cached_openrouter_key(self, mocker):
+        """v0.4.x: OpenAI slot empty but an sk-or- key cached (here in the
+        Anthropic slot) → OpenAI reuses it. One OpenRouter key serves all."""
+        from app import _resolve_llm_credentials
+
+        mocker.patch("app.resolve_setting", return_value="openai")
+        mocker.patch("app.OPENAI_MODEL_VISION", "gpt-5.4")
+        mocker.patch("app.OPENAI_API_KEY", None)
+        mocker.patch("app.ANTHROPIC_API_KEY", "sk-or-v1-test")
+        mocker.patch("app.GEMINI_API_KEY", None)
+
+        model_id, api_key = _resolve_llm_credentials()
+        assert model_id == "openai/gpt-5.4"
+        assert api_key == "sk-or-v1-test"
+
+    def test_direct_key_wins_over_cached_openrouter(self, mocker):
+        """A direct key in the provider's own slot beats a cached OpenRouter key."""
+        from app import _resolve_llm_credentials
+
+        mocker.patch("app.resolve_setting", return_value="openai")
+        mocker.patch("app.OPENAI_MODEL_VISION", "gpt-5.4")
+        mocker.patch("app.OPENAI_API_KEY", "sk-proj-direct")
+        mocker.patch("app.ANTHROPIC_API_KEY", "sk-or-v1-test")
+        mocker.patch("app.GEMINI_API_KEY", None)
+
+        _, api_key = _resolve_llm_credentials()
+        assert api_key == "sk-proj-direct"
 
     def test_openai_realtime_resolves_to_gpt4o_vision_client(self, mocker):
         """v0.3.0: LLM_PROVIDER=openai-realtime still builds a valid GPT-4o
@@ -1157,6 +1188,8 @@ class TestResolveLLMCredentials:
         mocker.patch("app.resolve_setting", return_value="anthropic")
         mocker.patch("app.MODEL_ID", "anthropic/claude-sonnet-4-6")
         mocker.patch("app.ANTHROPIC_API_KEY", None)
+        mocker.patch("app.OPENAI_API_KEY", None)
+        mocker.patch("app.GEMINI_API_KEY", None)
 
         model_id, api_key = _resolve_llm_credentials()
         assert api_key == ""

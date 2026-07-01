@@ -57,12 +57,12 @@ Everything runs through your own API keys. Nothing routes through a proxy server
 1. Download the latest `Clicky-Windows-Setup.exe` from the [Releases](https://github.com/AbhishekVulla/clicky-windows/releases/latest) page (around 160 MB, it bundles the optional local model runtimes).
 2. Run it. Windows SmartScreen will warn you (the EXE is unsigned for v0; SignPath OSS application is in flight). Click **More info** → **Run anyway**.
 3. Launch Clicky from the Start Menu. A modal asks for your API keys (fewer if you pick local options, none if you go fully local):
-   - [Anthropic](https://console.anthropic.com/settings/keys) for Claude Sonnet 4.6 (vision and reasoning). You can also pick **OpenAI (GPT-5.4)**, **Google Gemini**, or **Ollama (local)** from the dropdown instead. See the [FAQ](#faq) for the trade-offs.
+   - [Anthropic](https://console.anthropic.com/settings/keys) for Claude Sonnet 4.6 (vision and reasoning). You can also pick **OpenAI (GPT-5.4)**, **Google Gemini**, or **Ollama (local)** from the dropdown. Each cloud model takes its own key (Anthropic, OpenAI, or Google AI Studio), or one OpenRouter key works for all of them. See the [FAQ](#faq) for the trade-offs.
    - [AssemblyAI](https://www.assemblyai.com/dashboard/signup) for Universal-3 streaming speech-to-text, or pick **Local (faster-whisper)** for free offline transcription with no key
    - [Cartesia](https://play.cartesia.ai/sign-in) for Sonic-3 voice output (or pick ElevenLabs, or **Local (Kokoro)** for a free offline voice with no key)
 4. Hit `Ctrl+Alt+Space`, ask something, release.
 
-Free tier signups exist for all three cloud providers. A typical 30-second interaction on the default Anthropic + AssemblyAI + Cartesia stack costs around $0.016. You can also go fully local and offline with no keys at all (Ollama + faster-whisper + Kokoro), it is just slower and heavier on your machine. See the FAQ.
+Free-tier signups exist for the cloud providers. A typical 30-second interaction on the default Anthropic + AssemblyAI + Cartesia stack costs around $0.016. You can also go fully local and offline with no keys at all (Ollama + faster-whisper + Kokoro), it is just slower and heavier on your machine. See the FAQ.
 
 <p align="center">
   <img src="assets/screenshots/settings-dialog.png" alt="First-launch API keys dialog" width="520" />
@@ -296,11 +296,11 @@ Honest trade-off: local is free and private, but slower and heavier than cloud, 
 <summary><strong>Which LLM should I pick: Claude, GPT, Gemini, or Ollama?</strong></summary>
 
 - **Claude Sonnet 4.6 (default).** Pixel-accurate pointing (~5px). The out-of-the-box choice.
-- **OpenAI (GPT-5.4).** Pixel-accurate pointing, as good as Claude. Paste an [OpenAI key](https://platform.openai.com/api-keys).
-- **Google Gemini (3.1 Pro).** Strong grounding, a little less pixel-precise than Claude. Routes through OpenRouter, so it reuses your `sk-or-` key with no separate key to enter.
+- **OpenAI (GPT-5.4).** Pixel-accurate pointing, as good as Claude.
+- **Google Gemini (3.1 Pro).** Strong grounding, a little less pixel-precise than Claude.
 - **Ollama (local).** Free, runs on your machine, no API key. Slower and less precise, but private. See the question above.
 
-They all run through the same pipeline, switching is just a dropdown.
+For the three cloud options you can paste either the provider's own key (from Anthropic, OpenAI, or Google AI Studio) or a single OpenRouter (`sk-or-`) key. One OpenRouter key covers all three, so if you have one you can switch between Claude, GPT, and Gemini without entering a new key each time. Switching provider is just a dropdown.
 
 </details>
 
@@ -309,7 +309,7 @@ They all run through the same pipeline, switching is just a dropdown.
 Nothing leaves your machine, except the things you explicitly send to your own APIs.
 
 - API keys live in Windows Credential Manager via DPAPI per-user encryption. Better than plaintext `.env` but does not protect against malware running as your user account.
-- Screenshots, voice, transcripts, and model responses go directly from your machine to Anthropic / AssemblyAI / Cartesia or ElevenLabs using YOUR keys. No proxy, no logging server, nothing routes through anyone else. Pick the local providers (faster-whisper, Kokoro, Ollama) and that data never leaves your machine at all.
+- Screenshots, voice, transcripts, and model responses go directly from your machine to whichever providers you pick, using YOUR keys, with no proxy in between. The LLM provider gets the screenshot and transcript (Anthropic, OpenAI, or Google Gemini), AssemblyAI gets the audio to transcribe, and Cartesia or ElevenLabs speaks the reply. If your key is an OpenRouter key, that LLM call routes through OpenRouter to the model. No logging server, nothing routes through anyone else. Pick the local providers (Ollama, faster-whisper, Kokoro) and that data never leaves your machine at all.
 - Per-app memory and the KB folder live on your local disk in plain markdown. You can read them, edit them, delete them.
 
 This is the BYOK model from day 1, by deliberate contrast with the upstream Clicky which uses a Cloudflare Worker proxy that holds the API keys server-side.

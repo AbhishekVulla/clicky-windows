@@ -463,18 +463,30 @@ class GeminiClient(AIClient):
     dual-SDK routing rationale.
     """
 
+    # OpenRouter accepts the classic `max_tokens` for every model + normalizes
+    # it. A provider's NATIVE endpoint may need a different param (OpenAI's
+    # gpt-5-series requires `max_completion_tokens`), so subclasses override
+    # this; it is used only on the native (non-OpenRouter) path.
+    _native_token_param: str = "max_tokens"
+
     def __init__(
         self,
         api_key: str,
         model_id: str,
         base_url: str = "https://openrouter.ai/api/v1",
     ) -> None:
+        # OpenRouter wants the NAMESPACED slug (google/..., openai/...); a
+        # provider's native OpenAI-compatible endpoint wants the BARE name, so
+        # strip the prefix. Detect which by the base_url.
+        via_openrouter = bool(base_url) and "openrouter.ai" in base_url
+        if via_openrouter:
+            self.model_id = model_id
+        else:
+            self.model_id = model_id.split("/", 1)[1] if "/" in model_id else model_id
         self.client = OpenAI(api_key=api_key, base_url=base_url, timeout=60.0)
-        self.model_id = model_id
-        # OpenRouter (Gemini) accepts the classic `max_tokens` param.
-        # OpenAIVisionClient overrides this to `max_completion_tokens` because
-        # OpenAI's gpt-5-series rejects `max_tokens` (400 unsupported_parameter).
-        self._max_tokens_param = "max_tokens"
+        self._max_tokens_param = (
+            "max_tokens" if via_openrouter else self._native_token_param
+        )
 
     def ask_stream(
         self,
@@ -652,25 +664,23 @@ class OpenAIVisionClient(GeminiClient):
     pixel pass also goes through this client (gpt-5.4) — see app.py.
     """
 
+    # gpt-5-series rejects `max_tokens` on OpenAI's NATIVE endpoint and requires
+    # `max_completion_tokens` (400 otherwise; v0.4.1 fix — gpt-5.4 was 400ing
+    # every call → no audio). Via OpenRouter, max_tokens works (the base class
+    # handles that). Used only on the native path.
+    _native_token_param: str = "max_completion_tokens"
+
     def __init__(
         self,
         api_key: str,
         model_id: str,
         base_url: str | None = None,
     ) -> None:
-        # Strip the ``openai/`` routing prefix — OpenAI's API wants the bare
-        # model name (e.g. "gpt-4o", not "openai/gpt-4o"). Mirrors OllamaClient.
-        if model_id.lower().startswith("openai/"):
-            model_id = model_id[len("openai/"):]
-        # base_url=None → OpenAI SDK default (https://api.openai.com/v1).
-        # Explicit base_url allows pointing at Azure/proxy if ever needed.
-        self.client = OpenAI(api_key=api_key, base_url=base_url, timeout=60.0)
-        self.model_id = model_id
-        # gpt-5-series (incl. gpt-5.4) rejects `max_tokens` and requires
-        # `max_completion_tokens` (400 otherwise). gpt-4o accepts it too, so
-        # this is safe across both OpenAI models. v0.4.1 fix (gpt-5.4 was 400ing
-        # on every call -> no response -> no audio).
-        self._max_tokens_param = "max_completion_tokens"
+        # Same dual routing as the GeminiClient base: OpenRouter keeps the
+        # namespaced openai/ slug; a direct OpenAI key (base_url=None →
+        # api.openai.com) strips to the bare model name. create_ai_client picks
+        # base_url by key prefix via _provider_base_url.
+        super().__init__(api_key=api_key, model_id=model_id, base_url=base_url)
 
 
 # --- OllamaClient (v0.2.0 local LLM support) ---------------------------------
@@ -962,6 +972,27 @@ class _OllamaStreamingResponse:
 _OLLAMA_BARE_PREFIXES = ("llama", "qwen", "llava", "mistral", "phi", "gemma")
 
 
+def _provider_base_url(
+    api_key: str,
+    base_url: str | None,
+    openrouter_url: str,
+    native_url: str | None = None,
+) -> str | None:
+    """Shared endpoint decision for every LLM provider. An explicit base_url
+    wins; else an OpenRouter (sk-or-) key routes to openrouter_url; else the
+    provider's native endpoint (native_url, or None = the SDK's own default).
+
+    Centralizing this is the point: no provider can 'forget' OpenRouter routing.
+    OpenAI did, pre-v0.4.x — an sk-or- key was silently sent to api.openai.com
+    and 401'd. Every branch in create_ai_client now calls this.
+    """
+    if base_url is not None:
+        return base_url
+    if api_key and api_key.startswith("sk-or-"):
+        return openrouter_url
+    return native_url
+
+
 def create_ai_client(
     model_id: str,
     api_key: str,
@@ -1022,41 +1053,35 @@ def create_ai_client(
         # Direct Anthropic keys (sk-ant-*) leave base_url=None so the
         # SDK uses its default api.anthropic.com endpoint, where those
         # keys are valid.
-        if base_url is None and api_key and api_key.startswith("sk-or-"):
-            base_url = "https://openrouter.ai/api"
+        base_url = _provider_base_url(api_key, base_url, "https://openrouter.ai/api")
         return AnthropicClient(
             api_key=api_key, model_id=model_id, base_url=base_url,
         )
     if mid.startswith("google/") or mid.startswith("gemini"):
         from config import OPENROUTER_BASE_URL
-        # Dual routing by key type (mirrors the OpenAI gpt-5.4 pattern):
-        #  - an sk-or-* OpenRouter key -> OpenRouter endpoint, keep the
-        #    'google/...' slug OpenRouter expects.
-        #  - any other key (a direct Google AI Studio key) -> Google's native
-        #    OpenAI-compatible endpoint, with the 'google/' prefix stripped to
-        #    the bare 'gemini-...' name Google expects.
-        # This lets a user with NO OpenRouter account paste a Google key.
-        if base_url is None and api_key and not api_key.startswith("sk-or-"):
-            bare = model_id.split("/", 1)[1] if "/" in model_id else model_id
-            return GeminiClient(
-                api_key=api_key,
-                model_id=bare,
-                base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-            )
-        return GeminiClient(
-            api_key=api_key,
-            model_id=model_id,
-            base_url=base_url or OPENROUTER_BASE_URL,
+        # sk-or- key → OpenRouter (GeminiClient keeps the google/ slug); a
+        # direct Google AI Studio key → Google's native OpenAI-compat endpoint
+        # (GeminiClient strips the google/ prefix). One OpenRouter key OR a
+        # direct Google key both work.
+        base_url = _provider_base_url(
+            api_key, base_url, OPENROUTER_BASE_URL,
+            native_url="https://generativelanguage.googleapis.com/v1beta/openai/",
         )
+        return GeminiClient(api_key=api_key, model_id=model_id, base_url=base_url)
     # OpenAI native (v0.3.0): 'openai/gpt-4o' etc. The GPT-Realtime
     # speech-to-speech path uses LLM_PROVIDER='openai-realtime' and is
     # handled separately in app.py (realtime.py), NOT through this factory —
     # so 'gpt-realtime*' should never reach here as a vision MODEL_ID.
     if mid.startswith("openai/"):
+        from config import OPENROUTER_BASE_URL
+        # sk-or- key → OpenRouter (OpenAIVisionClient keeps the openai/ slug); a
+        # direct OpenAI key → base_url None so the SDK uses api.openai.com (the
+        # client strips the openai/ prefix + uses max_completion_tokens there).
+        base_url = _provider_base_url(api_key, base_url, OPENROUTER_BASE_URL)
         return OpenAIVisionClient(
             api_key=api_key,
             model_id=model_id,
-            base_url=base_url,  # None → OpenAI SDK default api.openai.com
+            base_url=base_url,
         )
     raise ValueError(
         f"Unsupported MODEL_ID prefix: {model_id!r}. "

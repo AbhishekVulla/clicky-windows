@@ -125,6 +125,7 @@ _PROVIDER_CATEGORIES: tuple[_ProviderCategory, ...] = (
                 display_name="Anthropic",
                 api_key_env_var="ANTHROPIC_API_KEY",
                 signup_url="https://console.anthropic.com/settings/keys",
+                key_hint="Anthropic key (sk-ant-) or an OpenRouter key (sk-or-)",
                 # No model sub-picker (v0.4.1 minimal UX): defaults to Claude
                 # Sonnet 4.6, the best all-round default. Opus 4.8 stays reachable
                 # via the ANTHROPIC_MODEL env var for the rare power user.
@@ -137,6 +138,7 @@ _PROVIDER_CATEGORIES: tuple[_ProviderCategory, ...] = (
                 display_name="OpenAI",
                 api_key_env_var="OPENAI_API_KEY",
                 signup_url="https://platform.openai.com/api-keys",
+                key_hint="OpenAI key (sk-...) or an OpenRouter key (sk-or-)",
                 # No model sub-picker (v0.4.1 minimal UX): defaults to gpt-5.4
                 # (pixel-accurate). gpt-4o is weaker and a footgun as a visible
                 # choice; reachable via the OPENAI_MODEL_VISION env var if needed.
@@ -172,9 +174,9 @@ _PROVIDER_CATEGORIES: tuple[_ProviderCategory, ...] = (
                 provider_id="gemini",
                 display_name="Google Gemini",
                 api_key_env_var="GEMINI_API_KEY",
-                signup_url="https://openrouter.ai/keys",
+                signup_url="https://aistudio.google.com/apikey",
                 requires_key=False,
-                key_hint="optional OpenRouter key - blank reuses your Claude key",
+                key_hint="Google AI Studio key, or an OpenRouter key (sk-or-); blank reuses your OpenRouter key",
             ),
         ),
         default_index=0,
@@ -506,6 +508,16 @@ class SettingsDialog(QDialog):
         if self._realtime_note is not None:
             self._realtime_note.setVisible(bool(collapsed))
 
+    def _cached_openrouter_key(self) -> str:
+        """An sk-or- OpenRouter key already saved for any LLM provider slot.
+        One OpenRouter key serves all LLM providers, so reuse it (cache +
+        reuse) instead of making the user re-enter it per provider."""
+        for slot in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"):
+            k = keyring.get_password(KEYRING_SERVICE, slot) or ""
+            if k.startswith("sk-or-"):
+                return k
+        return ""
+
     def _refresh_key_field_for_category(self, category: _ProviderCategory) -> None:
         """Read the keyring slot for the dropdown's currently-selected
         provider, set the key field's text + placeholder accordingly.
@@ -513,6 +525,14 @@ class SettingsDialog(QDialog):
         dropdown = self._dropdowns[category.category_key]
         provider = category.providers[dropdown.currentIndex()]
         existing = keyring.get_password(KEYRING_SERVICE, provider.api_key_env_var) or ""
+        # v0.4.x cache + reuse: one OpenRouter (sk-or-) key works for every LLM
+        # provider. If this provider's own slot is empty but you pasted an
+        # OpenRouter key for another LLM provider, reuse it here so you don't
+        # re-enter it and Save isn't gated on an empty field. The _API_KEY
+        # filter skips Ollama (its field holds OLLAMA_HOST, not a key).
+        if (not existing and category.category_key == "LLM"
+                and provider.api_key_env_var.endswith("_API_KEY")):
+            existing = self._cached_openrouter_key()
         key_input = self._key_inputs[category.category_key]
         key_input.setText(existing)
         if existing:
