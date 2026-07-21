@@ -37,7 +37,13 @@ DefaultGroupName={#AppName}
 ; per-user always for portfolio scope).
 PrivilegesRequired=lowest
 OutputDir=Output
-OutputBaseFilename=Clicky-Windows-Setup-v{#AppVersion}
+; Version-free filename ON PURPOSE (2026-07-21). GitHub serves
+; /releases/latest/download/<asset-name>, so a stable name gives a permanent
+; one-click download link for the README button, the YouTube description, and
+; comment replies. A versioned name breaks that link on every release. The
+; version is still on the release page, in the installer metadata, and in
+; Add/Remove Programs, so nothing is actually lost.
+OutputBaseFilename=Clicky-Windows-Setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern

@@ -5,7 +5,7 @@
 <h1 align="center">Clicky Windows</h1>
 
 <p align="center">
-  A voice-driven, screen-aware AI buddy for Windows. Hold a hotkey, ask anything about whatever app you are looking at, and Clicky talks back and points at the answer with a blue cursor.
+  A voice-driven, screen-aware AI buddy for Windows. Hold a hotkey, ask anything about whatever app you are looking at, and Clicky talks back and points at the answer with a blue cursor. It points, you click.
 </p>
 
 <p align="center">
@@ -40,7 +40,9 @@ The #1 community request on [Farza's Clicky](https://github.com/farzaa/clicky) w
 
 ## What it does
 
-You are working in some app. You hit a wall. You hold `Ctrl+Alt+Space`, ask a question out loud, release. Within about 1.7 seconds you hear the answer, and a blue cursor lands on the exact button or menu item you needed to click.
+You are working in some app. You hit a wall. You hold `Ctrl+Alt+Space`, ask a question out loud, release. A couple of seconds later you hear the answer, and a blue cursor lands on the exact button or menu item you needed to click.
+
+Clicky never touches your mouse or keyboard. It shows you where to go, you do the clicking, and you come out of it actually knowing the app.
 
 Three real ways people are using it:
 
@@ -62,7 +64,7 @@ Everything runs through your own API keys. Nothing routes through a proxy server
    - [Cartesia](https://play.cartesia.ai/sign-in) for Sonic-3 voice output (or pick ElevenLabs, or **Local (Kokoro)** for a free offline voice with no key)
 4. Hit `Ctrl+Alt+Space`, ask something, release.
 
-Free-tier signups exist for the cloud providers. A typical 30-second interaction on the default Anthropic + AssemblyAI + Cartesia stack costs around $0.016. You can also go fully local and offline with no keys at all (Ollama + faster-whisper + Kokoro), it is just slower and heavier on your machine. See the FAQ.
+Free-tier signups exist for the cloud providers. A typical 30-second interaction on the default Anthropic + AssemblyAI + Cartesia stack costs around $0.016 as of July 2026. You can also go fully local and offline with no keys at all (Ollama + faster-whisper + Kokoro), it is just slower and heavier on your machine. See the FAQ.
 
 <p align="center">
   <img src="assets/screenshots/settings-dialog.png" alt="First-launch API keys dialog" width="520" />
@@ -196,7 +198,7 @@ The hotkey choice itself was a three-step pivot:
 
 - **Alt+Space.** Conflicts with Windows window menu and Copilot. Killed.
 - **Ctrl+Shift+Space.** Conflicts with Excel's "Select entire worksheet" binding. Because the listener is observe-only, Excel ALSO receives the keypress and wipes your selection every time you invoke Clicky. Killed during the Excel demo.
-- **Ctrl+Alt+Space.** No known conflicts. Ergonomic enough. Three fingers but all on the left side. Shipped.
+- **Ctrl+Alt+Space.** Three fingers, all on the left. Only clash is Claude Desktop, unbind it there. Shipped.
 
 A clean solution for Alt+Space exists: Win32 `RegisterHotKey` claims the combo at the OS level so other apps never see it. That is a Phase 1.5 drop-in replacement.
 
@@ -205,7 +207,7 @@ A clean solution for Alt+Space exists: Win32 `RegisterHotKey` claims the combo a
 <details>
 <summary><strong>4. Multi-provider TTS via progressive-disclosure UX.</strong> A 3-category dropdown (LLM/STT/TTS) instead of 6 password fields. ElevenLabsTTS mirrors Cartesia with 3 deliberate divergences.</summary>
 
-The naive way to add a second TTS provider is to add another field to the settings dialog. Three required keys becomes four. Then you add a second STT provider and it becomes five. By the time you have one option per category you are at six required password fields on a first-launch dialog. That is well past the documented onboarding-abandonment cliff.
+The naive way to add a second TTS provider is to add another field to the settings dialog. Three required keys becomes four. Then you add a second STT provider and it becomes five. By the time you have one option per category you are at six required password fields on a first-launch dialog. Nobody fills in six password boxes to try an app for the first time.
 
 What shipped instead: three category rows (LLM / STT / TTS), each with a dropdown for provider plus a single API key field for whichever provider is currently selected. Switch the dropdown, the field rebinds to that provider's keyring slot. One key visible at a time, vendor flexibility preserved.
 

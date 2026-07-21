@@ -43,7 +43,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from config import KEYRING_SERVICE
+from config import KEYRING_SERVICE, OLLAMA_HOST
 
 
 # v0.2.1 (Issue #1 fix B): pre-populated Ollama vision model suggestions
@@ -154,11 +154,19 @@ _PROVIDER_CATEGORIES: tuple[_ProviderCategory, ...] = (
             # (single field per provider) without adding a separate "host"
             # input row. Pixel-pointing for local vision models is handled
             # by locator.py's two-stage grid pattern (see ai.OllamaClient).
+            # requires_key=False (2026-07-21): Ollama needs no key, but it was
+            # inheriting the True default, so Save stayed disabled until the
+            # user typed a URL into a box that looks exactly like every other
+            # API-key box. That made the one "free, no signup" path feel like
+            # it needed a signup. The field is prefilled with the documented
+            # localhost default below, so it's now genuinely zero-input.
             _Provider(
                 provider_id="ollama",
                 display_name="Ollama (local)",
                 api_key_env_var="OLLAMA_HOST",
                 signup_url="https://ollama.com/download",
+                requires_key=False,
+                key_hint="Ollama server address (leave the default unless you moved it)",
                 models=tuple(_Model(m, m) for m in _OLLAMA_MODEL_SUGGESTIONS),
                 model_setting="OLLAMA_MODEL_VISION",
                 models_editable=True,
@@ -296,13 +304,20 @@ class SettingsDialog(QDialog):
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
 
-        # Lean privacy framing — one sentence (USER decision 2026-05-06,
+        # Lean privacy framing — two sentences (USER decision 2026-05-06,
         # rejected the multi-line splash version as too loud / suspicious).
         # Wording revised 2026-05-07 from "No server, no telemetry." after
         # USER feedback that "telemetry" is jargon for non-tech users.
+        # Revised again 2026-07-21: the old second sentence ("Nothing leaves
+        # your machine.") was FALSE on the cloud defaults — screenshots and
+        # audio do leave, straight to the providers picked below. Replaced
+        # with a plain statement of where they go. Deliberately NOT phrased
+        # as a denial ("no server", "no telemetry"): denying something the
+        # user never suspected reads as defensive, and the lean one-sentence
+        # framing was the original 2026-05-06 call for exactly that reason.
         privacy = QLabel(
-            "🔒 Stored locally, encrypted via Windows Credential Manager. "
-            "Nothing leaves your machine."
+            "🔒 Keys stored locally, encrypted by Windows Credential Manager. "
+            "Your screen and voice go to the providers you pick below."
         )
         privacy.setWordWrap(True)
         privacy.setStyleSheet("color: gray; padding-bottom: 4px;")
@@ -533,6 +548,10 @@ class SettingsDialog(QDialog):
         if (not existing and category.category_key == "LLM"
                 and provider.api_key_env_var.endswith("_API_KEY")):
             existing = self._cached_openrouter_key()
+        # Ollama's field holds a server address, not a key. Prefill the
+        # documented default so the no-signup path needs zero typing.
+        if not existing and provider.provider_id == "ollama":
+            existing = OLLAMA_HOST
         key_input = self._key_inputs[category.category_key]
         key_input.setText(existing)
         if existing:

@@ -249,15 +249,20 @@ class TestSettingsDialogRender:
             if "encrypted" in l.text()
         ]
         assert len(privacy_texts) >= 1, "Privacy line not rendered"
-        privacy = privacy_texts[0]
-        # Tolerate the historical phrasings ("No server, no telemetry") and
-        # the current plain-English one ("Nothing leaves your machine.") so
-        # a future copy tweak doesn't break the test silently.
-        assert (
-            "leaves your machine" in privacy.lower()
-            or "no telemetry" in privacy.lower()
-            or "no server" in privacy.lower()
-        ), f"privacy line does not assert no-egress; got: {privacy!r}"
+        privacy = privacy_texts[0].lower()
+        # The line must say where the keys live. That part is true and it is
+        # the reassurance a first-time user is actually looking for.
+        assert "credential manager" in privacy, (
+            f"privacy line does not say where keys are stored; got: {privacy!r}"
+        )
+        # And it must NOT claim nothing leaves the machine. It used to, and it
+        # was false on the cloud defaults: screenshots go to the LLM provider
+        # and audio goes to the STT provider. This guard exists so that claim
+        # cannot quietly come back in a future copy tweak.
+        assert "nothing leaves your machine" not in privacy, (
+            "privacy line claims no egress, which is false on the cloud "
+            f"defaults; got: {privacy!r}"
+        )
 
     def test_dialog_has_three_dropdowns(self, qapp, mocker):
         mocker.patch("settings_dialog.keyring.get_password", return_value=None)
