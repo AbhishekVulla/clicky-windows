@@ -104,6 +104,9 @@ Python port of CompanionManager.parsePointingCoordinates
 (CompanionManager.swift:784-828).
 """
 
+# A [POINT tag the stream cut off before its closing bracket.
+_CUT_OFF_POINT_RE = re.compile(r"\s*\[point(?::[^\]]*)?$", re.IGNORECASE)
+
 _CLICKY_MAX_TOKENS = 1024
 """Token budget matching Clicky's analyzeImageStreaming call."""
 
@@ -140,12 +143,13 @@ def parse_point_tag(text: str) -> PointParseResult:
     """Extract coordinate from a trailing [POINT:x,y:label] tag and strip it.
 
     Returns PointParseResult with coordinate=None on [POINT:none] or no match.
-    The spoken_text field has the tag removed so TTS never reads it aloud.
+    The spoken_text field has the tag removed so TTS never reads it aloud,
+    including a tag the stream cut off before its closing bracket.
     """
     match = _POINT_TAG_RE.search(text)
     if not match:
         return PointParseResult(
-            spoken_text=text.strip(),
+            spoken_text=_CUT_OFF_POINT_RE.sub("", text).strip(),
             coordinate=None,
             element_label=None,
             screen_number=None,

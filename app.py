@@ -98,6 +98,19 @@ def flush_sentences(buffer: str) -> tuple[list[str], str]:
     return sentences, buffer
 
 
+def unspoken_tail(spoken_text: str, spoken: list[str]) -> str:
+    """The part of spoken_text the voice hasn't said yet. The sentences already
+    spoken are found in order, any run of whitespace matching any other, rather
+    than counted: extra spaces between sentences, or draw mode tidying the
+    whitespace, can't move the cut into a sentence that was already said."""
+    pos = 0
+    for sentence in spoken:
+        found = re.compile(r"\s+".join(map(re.escape, sentence.split()))).search(spoken_text, pos)
+        if found:
+            pos = found.end()
+    return spoken_text[pos:].strip()
+
+
 # --- Grid-locator fallback (Ollama pixel-pointing) ---------------------------
 
 _DIRECTIONAL_QUERY_WORDS = (
@@ -1039,7 +1052,7 @@ class ClickyApp(QObject):
             # result.spoken_text (tag-stripped) to compute + flush the tail.
             sentence_buffer = ""
             tag_started = False
-            already_flushed_chars = 0
+            flushed: list[str] = []
 
             # Draw-on-screen teaching mode. Uses the module-level cached
             # config.ANNOTATION_MODE (resolved ONCE at import), NOT a fresh
@@ -1078,8 +1091,7 @@ class ClickyApp(QObject):
                             if cancel.is_set():
                                 return
                             self._tts.speak_sentence(s)
-                            # +1 for the separator space matched by [.!?]\s
-                            already_flushed_chars += len(s) + 1
+                            flushed.append(s)
 
                 result = stream.final_result()
                 dbg.log(f"LLM: usage {stream.usage()}")
@@ -1120,7 +1132,7 @@ class ClickyApp(QObject):
             # sent to TTS). Uses the tag-stripped spoken_text so the
             # [POINT:x,y:label] and shape tags are never spoken aloud.
             if spoken_text:
-                tail = spoken_text[already_flushed_chars:].strip()
+                tail = unspoken_tail(spoken_text, flushed)
                 if tail:
                     dbg.log(f"TTS: flushing tail ({len(tail)} chars)")
                     self._tts.speak_sentence(tail)
