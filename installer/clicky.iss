@@ -13,7 +13,7 @@
 ; Inno Setup 6+ required: https://jrsoftware.org/isdl.php (free).
 
 #define AppName "Clicky Windows"
-#define AppVersion "0.5.1"
+#define AppVersion "0.5.2"
 #define AppPublisher "Abhishek Vulla"
 #define AppURL "https://github.com/AbhishekVulla/clicky-windows"
 #define AppExeName "Clicky.exe"
