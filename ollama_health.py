@@ -28,18 +28,24 @@ from typing import Optional
 import httpx
 
 
-# Known vision-model minimum-Ollama-version requirements.
-#
-# llama3.2-vision uses the mllama architecture. Ollama added mllama
-# support in the 0.4.x line (commit 6f25f73, 2024-10). Versions older
-# than that return HTTP 500 at model-load time.
-#
-# llava, llava-llama3, qwen2.5-vl, and bakllava all use widely-supported
-# architectures (llava-1.5 family + Qwen) that work on every Ollama
-# version with any vision support (>=0.1.30 ish). No minimum recorded.
+# Minimum Ollama version per model family (the name before the ":tag").
+# llama3.2-vision needs the mllama architecture (0.4.0). Qwen 2.5 VL arrived
+# in 0.7.0 and stopped crashing in 0.7.1; Qwen3-VL arrived in 0.12.7 (Ollama
+# release notes). llava and bakllava run on any Ollama with vision support.
 MODEL_MIN_OLLAMA: dict[str, str] = {
     "llama3.2-vision": "0.4.0",
+    "qwen2.5vl": "0.7.1",
+    "qwen2.5-vl": "0.7.1",
+    "qwen3-vl": "0.12.7",
 }
+
+
+def model_family(model: str) -> str:
+    """A model's family as the tables here know it: the last part of the name,
+    before any ":tag", lowercased. So registry.ollama.ai/library/qwen3-vl:4b
+    and hf.co/Qwen/Qwen3-VL-4B-Instruct-GGUF read as the qwen3-vl family."""
+    name = model.strip().lower().removeprefix("ollama/")
+    return name.rsplit("/", 1)[-1].split(":", 1)[0]
 
 
 def detect_ollama_version(host: str, timeout: float = 2.0) -> Optional[str]:
@@ -123,7 +129,10 @@ def check_model_compatibility(
     if model_clean.lower().startswith("ollama/"):
         model_clean = model_clean[len("ollama/"):]
 
-    min_required = MODEL_MIN_OLLAMA.get(model_clean)
+    family = model_family(model_clean)
+    min_required = next(
+        (v for k, v in MODEL_MIN_OLLAMA.items() if family.startswith(k)), None
+    )
     if min_required is None:
         return None  # no known minimum, assume compatible
 
@@ -137,5 +146,5 @@ def check_model_compatibility(
 
     return (
         f"{model_clean} needs Ollama {min_required} or newer; yours is "
-        f"{ollama_version}. Switch to llava:7b or upgrade Ollama."
+        f"{ollama_version}. Update it from ollama.com/download."
     )

@@ -210,9 +210,10 @@ def _maybe_locate_via_grid(
     """Grid-locator fallback for weak-vision responses lacking a [POINT:x,y] tag.
 
     Triggers ONLY if:
-        1. ai_client is a local Ollama model. Cloud models point accurately on
-           their own, so a missing point from them means there is nothing to
-           point at, not a miss worth extra calls.
+        1. ai_client is a local Ollama model without its own box format. Cloud
+           models and local Qwen-VL models point on their own, so a missing
+           point from them means there is nothing to point at, not a miss
+           worth extra calls.
         2. result.coordinate is None (model didn't emit a usable [POINT:x,y])
         3. query is directional (contains 'where' / 'click' / 'show me' / etc.)
 
@@ -236,6 +237,8 @@ def _maybe_locate_via_grid(
         return None
     if result.coordinate is not None:
         return None
+    if ai_client.box_style is not None:
+        return None  # it answers in its own box format; no box means nothing to point at
     if not _looks_directional(query):
         if dbg is not None:
             dbg.log(
@@ -1047,9 +1050,10 @@ class ClickyApp(QObject):
             # sentence 1 (~1200ms into the stream) instead of
             # after the full response (~3700ms). Saves ~2s perceived latency.
             #
-            # Tag-safety: stop flushing the moment '[' appears in the buffer
-            # (start of [POINT:x,y:label] tag). On stream close, use
-            # result.spoken_text (tag-stripped) to compute + flush the tail.
+            # Tag-safety: stop flushing the moment '[', '{' or '`' appears in the
+            # buffer (a [POINT] tag, or a local model's JSON box, which may put
+            # its label first). On stream close, use result.spoken_text
+            # (tag-stripped) to compute + flush the tail.
             sentence_buffer = ""
             tag_started = False
             flushed: list[str] = []
@@ -1083,7 +1087,7 @@ class ClickyApp(QObject):
                         dbg.log("LLM: first token")
                         first_token = False
                     sentence_buffer += delta
-                    if "[" in sentence_buffer:
+                    if any(mark in sentence_buffer for mark in "[{`"):
                         tag_started = True
                     if not tag_started:
                         sentences, sentence_buffer = flush_sentences(sentence_buffer)

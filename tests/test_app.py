@@ -444,6 +444,46 @@ class TestClickyApp:
             "Batch tts.speak() should be replaced with sentence-level streaming"
         )
 
+    def test_a_label_written_before_the_box_is_never_spoken(self, mocker):
+        """A local model may write the label first; its '?' must not flush the
+        JSON to the voice before the coordinates arrive."""
+        import queue as _queue
+        import threading
+        from PIL import Image
+        app = self._make_app(mocker)
+        fake_cap = mocker.MagicMock()
+        fake_cap.image = Image.new("RGB", (1280, 800))
+        fake_cap.label = "screen 1 of 1"
+        fake_cap.scale_x = 1.0; fake_cap.scale_y = 1.0
+        fake_cap.monitor = {"left": 0, "top": 0, "width": 1920, "height": 1080}
+        fake_cap.target_width = 1280; fake_cap.target_height = 800
+        fake_cap.is_cursor_screen = True
+        app._press_captures = [fake_cap]
+        app._press_memory = ""
+        app._press_cursor_pos = (100, 100)
+        app._stt.stop_recording.return_value = "how do I reset my password"
+
+        def fake_deltas():
+            yield "click reset. "
+            yield "```json\n"
+            yield '{"label": "Forgot password? '
+            yield 'Reset it", "bbox_2d": [10, 20, 30, 40]}\n```'
+
+        fake_stream = mocker.MagicMock()
+        fake_stream.text_deltas.return_value = iter(fake_deltas())
+        fake_stream.final_result.return_value = mocker.MagicMock(
+            spoken_text="click reset.", coordinate=(20, 30), element_label="Reset it", screen_number=None,
+        )
+        app._ai.ask_stream.return_value.__enter__ = mocker.MagicMock(return_value=fake_stream)
+        app._ai.ask_stream.return_value.__exit__ = mocker.MagicMock(return_value=False)
+        capture_queue: _queue.Queue = _queue.Queue(maxsize=1)
+        capture_queue.put(([fake_cap], "", "test: reusing press-time captures"))
+        app._pipeline_worker("TEST.EXE", "TestWindow", threading.Event(), capture_queue)
+
+        spoken = " ".join(c.args[0] for c in app._tts.speak_sentence.call_args_list)
+        assert "click reset." in spoken
+        assert not any(bit in spoken for bit in ("{", "```", "label", "Forgot password"))
+
     @pytest.mark.parametrize("deltas,said", [
         (["Click reset.      ", "Then save.\n\n", "It is done."], ["Click reset.", "Then save.", "It is done."]),
         (["Click\nreset. ", "Then\tsave. ", "Done."], ["Click\nreset.", "Then\tsave.", "Done."]),
@@ -928,6 +968,22 @@ class TestMaybeLocateViaGrid:
             ai_client=mock_anthropic,
             result=result,
             cursor_capture=capture,
+            query="where is the save button",
+        )
+        assert out is None
+        mock_locator.assert_not_called()
+
+    def test_skipped_for_local_models_that_point_in_their_own_format(self, mocker):
+        """A local Qwen model that gave no box has nothing to point at; the grid
+        locator would only add minutes of image calls."""
+        from app import _maybe_locate_via_grid
+        from ai import OllamaClient
+        mock_locator = mocker.patch("app.locate_via_grid")
+        client = OllamaClient(host="http://localhost:11434", model_id="ollama/qwen3-vl:4b-instruct")
+        out = _maybe_locate_via_grid(
+            ai_client=client,
+            result=self._mock_result(coordinate=None),
+            cursor_capture=self._mock_capture(mocker),
             query="where is the save button",
         )
         assert out is None

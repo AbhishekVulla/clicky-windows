@@ -323,13 +323,11 @@ Ollama is supported, so no API-key field is needed."""
 
 OLLAMA_MODEL_VISION: str = os.getenv(
     "OLLAMA_MODEL_VISION",
-    resolve_setting("OLLAMA_MODEL_VISION", "llava:7b"),
+    resolve_setting("OLLAMA_MODEL_VISION", "qwen3-vl:4b-instruct"),
 )
-"""Ollama vision-capable model used when screenshots are present.
-Default ``llava:7b`` works on every Ollama version with vision support
-(~4.5 GB). ``llama3.2-vision`` is more accurate but needs Ollama
->=0.4.x (uses ``mllama`` arch). User can switch via Settings dialog;
-``ollama_health.check_model_compatibility`` warns on mismatch."""
+"""Ollama vision model. Default ``qwen3-vl:4b-instruct`` (about 3.3 GB, Ollama
+0.12.7 or newer) points when asked in its own box format. Switch in Settings;
+``ollama_health.check_model_compatibility`` warns when Ollama is too old."""
 
 
 # ── OpenAI (vision + GPT-Realtime) ────────────────────────────────────────────
