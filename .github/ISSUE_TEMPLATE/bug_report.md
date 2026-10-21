@@ -24,7 +24,7 @@ A clear description of what went wrong.
 ## Environment
 
 - Windows version (10 / 11, build number from `winver`):
-- Clicky version (from the Setup.exe filename or About dialog):
+- Clicky version (Windows Settings > Apps > Installed apps shows it):
 - Install method (Setup.exe / `py -3.13 -m app` from source):
 - Python version (only if running from source):
 

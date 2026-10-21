@@ -2,16 +2,14 @@
 
 All tests are mock-based. Zero real Qt runtime or real HWND dependency.
 Green in <2s. Covers: _CLICKTHROUGH_FLAGS constant sanity, physical_to_local_logical,
-screen_for_monitor, OverlayController._overlay_for_screen lookup. See
-docs/superpowers/plans/2026-04-11-overlay.md (or the source plan at
-~/.claude/plans/streamed-tumbling-sunbeam.md) for the full test plan.
+screen_for_monitor, OverlayController._overlay_for_screen lookup.
 
 What's NOT tested here (manual verification gate only):
 - Actual Win32 click-through behavior (needs real HWND)
 - OverlayWindow Qt widget transparency, visibility, animation smoothness
 - Focus stealing / taskbar entry absence
 - Real multi-monitor spanning
-All of the above are verified by `py -3.13 -m overlay` in Task 9.
+All of the above are verified by `py -3.13 -m overlay`.
 """
 
 def test_overlay_module_importable():
@@ -23,10 +21,9 @@ def test_overlay_module_importable():
 class TestClickthroughFlagsConstant:
     """Sanity test for the Win32 ex-style OR bit pattern.
 
-    This is the one ceremony test we keep for overlay.py because a typo in
-    the Win32 constants (e.g., WS_EX_LAYERED = 0x00080000 vs 0x00800000)
-    would silently break click-through without raising any error. The bit
-    pattern is load-bearing and deserves a test that catches drift.
+    A typo in the Win32 constants (e.g., WS_EX_LAYERED = 0x00080000 vs
+    0x00800000) would silently break click-through without raising any
+    error, so a test pins the bit pattern.
     """
 
     def test_clickthrough_flags_bit_pattern(self):
@@ -71,7 +68,7 @@ class _MockScreen:
     devicePixelRatio() returning a float.
 
     Using a real QScreen would require a QApplication instance which needs
-    a real display — defeats the "mock-based, no real hardware" test target.
+    a real display, which defeats the "mock-based, no real hardware" test target.
     """
 
     def __init__(self, x: int, y: int, w: int, h: int, ratio: float,
@@ -88,6 +85,15 @@ class _MockScreen:
 
     def name(self) -> str:
         return self._name
+
+
+def _qt_screen(left: int, top: int, phys_w: int, phys_h: int, ratio: float,
+               name: str = "Mock") -> _MockScreen:
+    """A screen the way Qt 6 reports it on Windows: the top-left stays at the
+    monitor's physical position and only the size is divided by the scale
+    (qscreen.cpp, QScreenPrivate::updateGeometry)."""
+    return _MockScreen(x=left, y=top, w=round(phys_w / ratio), h=round(phys_h / ratio),
+                       ratio=ratio, name=name)
 
 
 # --- physical_to_local_logical -----------------------------------------------
@@ -108,8 +114,7 @@ class TestPhysicalToLocalLogical:
 
     def test_200pct_dpi_primary_at_origin(self):
         """User's machine: 2880x1800 physical, 200% DPI, DIP (0,0,1440,900).
-        Physical (1440, 900) -> local (720, 450) — dead center.
-        Matches Step 1 verified coordinate math."""
+        Physical (1440, 900) -> local (720, 450), dead center."""
         from overlay import physical_to_local_logical
         screen = _MockScreen(x=0, y=0, w=1440, h=900, ratio=2.0)
         assert physical_to_local_logical(1440, 900, screen) == (720, 450)
@@ -122,13 +127,17 @@ class TestPhysicalToLocalLogical:
         assert physical_to_local_logical(3880, 500, screen) == (1000, 500)
 
     def test_200pct_secondary_with_offset(self):
-        """Secondary at DIP (1440, 0), 960x600 @ 200%.
-        Physical left = 1440*2 = 2880. Physical (3880, 1100):
-          local_phys_x = 3880 - 2880 = 1000, local_phys_y = 1100 - 0 = 1100
-          local_log_x = 1000 / 2 = 500, local_log_y = 1100 / 2 = 550"""
+        """Secondary 1920x1200 @ 200% whose physical left edge is 2880.
+        Physical (3880, 1100) is 1000, 1100 physical pixels into it: (500, 550)."""
         from overlay import physical_to_local_logical
-        screen = _MockScreen(x=1440, y=0, w=960, h=600, ratio=2.0)
+        screen = _qt_screen(2880, 0, 1920, 1200, 2.0)
         assert physical_to_local_logical(3880, 1100, screen) == (500, 550)
+
+    def test_150pct_secondary_with_offset(self):
+        """A 4K monitor at 150% to the right of the laptop."""
+        from overlay import physical_to_local_logical
+        screen = _qt_screen(2880, 0, 3840, 2160, 1.5)
+        assert physical_to_local_logical(2880 + 300, 600, screen) == (200, 400)
 
 
 # --- screen_for_monitor ------------------------------------------------------
@@ -167,12 +176,28 @@ class TestScreenForMonitor:
         (2880, 0, 1920, 1080) resolves to the external screen."""
         from overlay import screen_for_monitor
         laptop = _MockScreen(x=0, y=0, w=1440, h=900, ratio=2.0, name="Laptop")
-        external = _MockScreen(x=1440, y=0, w=1920, h=1080, ratio=1.0, name="External")
+        external = _qt_screen(2880, 0, 1920, 1080, 1.0, name="External")
         screens = [laptop, external]
-        monitor = {"left": 1440, "top": 0, "width": 1920, "height": 1080}
+        monitor = {"left": 2880, "top": 0, "width": 1920, "height": 1080}
         result = screen_for_monitor(monitor, screens)
         assert result is external
         assert result.name() == "External"
+
+    def test_secondary_at_150pct_matches_its_monitor(self):
+        """Laptop at 200% plus a 4K monitor at 150% to its right."""
+        from overlay import screen_for_monitor
+        laptop = _qt_screen(0, 0, 2880, 1800, 2.0, name="Laptop")
+        external = _qt_screen(2880, 0, 3840, 2160, 1.5, name="External")
+        monitor = {"left": 2880, "top": 0, "width": 3840, "height": 2160}
+        assert screen_for_monitor(monitor, [laptop, external]) is external
+
+    def test_monitor_left_of_the_primary_matches(self):
+        """A 150% monitor placed left of the primary has a negative origin."""
+        from overlay import screen_for_monitor
+        laptop = _qt_screen(0, 0, 2880, 1800, 2.0, name="Laptop")
+        left = _qt_screen(-3840, 0, 3840, 2160, 1.5, name="Left")
+        monitor = {"left": -3840, "top": 0, "width": 3840, "height": 2160}
+        assert screen_for_monitor(monitor, [laptop, left]) is left
 
     def test_no_match_falls_back_to_first(self):
         """If the monitor dict doesn't match any screen (stale mss state,
@@ -340,12 +365,12 @@ class TestOverlayControllerLifecycle:
             )
 
 
-# --- Path A Task 8: Bezier flight arc math ----------------------------------
+# --- Bezier flight arc math -------------------------------------------------
 
 class TestBezierFlightMath:
     """Tests for the pure math helpers driving the quadratic Bezier flight arc.
 
-    Ported from farzaa/clicky leanring-buddy/OverlayWindow.swift:491-568.
+    Ported from farzaa/clicky OverlayWindow.swift:491-568.
     Deviation: no tangent rotation (our cursor is a tip-anchored polygon,
     keep the tip pointing at the target throughout flight).
     """
@@ -360,7 +385,7 @@ class TestBezierFlightMath:
 
     def test_bezier_position_at_midpoint(self):
         """B(0.5) = 0.25·P0 + 0.5·P1 + 0.25·P2. With a control point lifted
-        upward, the midpoint lands above the straight line — that's the arc."""
+        upward, the midpoint lands above the straight line: that's the arc."""
         from overlay import _bezier_position
         x, y = _bezier_position(0.5, (0, 0), (100, 50), (200, 0))
         assert abs(x - 100.0) < 1e-6
@@ -391,11 +416,11 @@ class TestBezierFlightMath:
         assert abs(_scale_pulse(1.0) - 1.0) < 1e-6
 
 
-# --- Path A Task 9: Waveform widget math -------------------------------------
+# --- Waveform widget math ----------------------------------------------------
 
 class TestWaveformBarHeight:
-    """Tests for _waveform_bar_height — ports farzaa/clicky
-    leanring-buddy/OverlayWindow.swift:728-740 verbatim.
+    """Tests for _waveform_bar_height, which ports farzaa/clicky
+    OverlayWindow.swift:728-740 verbatim.
 
     Bar height = base (3) + reactive (audio-driven) + idle_pulse (sine).
     Profile [0.4, 0.7, 1.0, 0.7, 0.4] makes the center bar tallest.
@@ -439,7 +464,7 @@ class TestWaveformBarHeight:
 
 
 class TestSpinnerWidgetMath:
-    """Tests for SpinnerWidget math helpers — ports Clicky's
+    """Tests for SpinnerWidget math helpers, which port Clicky's
     BlueCursorSpinnerView from OverlayWindow.swift:749-773.
     """
 
@@ -456,13 +481,13 @@ class TestSpinnerWidgetMath:
         assert abs(_spinner_angle_deg(_SPINNER_PERIOD_S * 1.5) - 180.0) < 1e-6
 
 
-# --- Hackathon: teaching-annotation coordinate transform --------------------
+# --- Teaching-annotation coordinate transform -------------------------------
 
 class TestAnnotationsToLocal:
-    """Tests for overlay.annotations_to_local — maps annotation coords from
-    PHYSICAL virtual-desktop pixels to a screen's LOCAL-logical DIP coords.
-    Pure function, same Space A->B math the [POINT] path uses (proven: the
-    253,52->569,117 marker landed on the button). Mock-based, no QApplication.
+    """Tests for overlay.annotations_to_local, which maps annotation coords
+    from PHYSICAL virtual-desktop pixels to a screen's LOCAL-logical DIP
+    coords. Pure function, same Space A->B math the [POINT] path uses.
+    Mock-based, no QApplication.
     """
 
     def test_circle_center_and_radius_transformed(self):
@@ -500,8 +525,7 @@ class TestAnnotationsToLocal:
         origin subtracted before the ratio divide (per-screen DPI, not global)."""
         from overlay import annotations_to_local
         from annotations import Circle
-        # geometry is in DIP; origin_phys = left*ratio = 1280*2.0 = 2560.
-        screen = _MockScreen(x=1280, y=0, w=960, h=540, ratio=2.0, name="Ext")
+        screen = _qt_screen(2560, 0, 1920, 1080, 2.0, name="Ext")
         out = annotations_to_local([Circle(2660, 100, 20, "")], screen)
         # (2660 - 2560)/2.0 = 50 ; 100/2.0 = 50 ; r 20/2.0 = 10
         assert out == [Circle(50, 50, 10, "")]
@@ -510,3 +534,31 @@ class TestAnnotationsToLocal:
         from overlay import annotations_to_local
         screen = _MockScreen(x=0, y=0, w=1280, h=800, ratio=1.0, name="Mock")
         assert annotations_to_local([], screen) == []
+
+
+class TestCircleLabelPlacement:
+    """A circle's label sits centred above it, so labels on circles side by
+    side in one line of text never run over each other."""
+
+    def test_a_label_never_covers_the_next_circle_or_its_label(self):
+        from overlay import _circle_label_origin
+        width, ascent = 120, 14  # "should be minus" in 12pt bold
+        def box(x, y):  # label baseline origin -> (left, top, right, bottom)
+            return (x, y - ascent, x + width, y)
+        def hits(a, b):
+            return not (a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1])
+        label_a = box(*_circle_label_origin(435, 507, 16, width, ascent))
+        label_b = box(*_circle_label_origin(591, 509, 16, width, ascent))
+        circle_b = (591 - 16, 509 - 16, 591 + 16, 509 + 16)
+        assert not hits(label_a, circle_b)
+        assert not hits(label_a, label_b)
+
+    def test_label_is_centred_above_the_circle(self):
+        from overlay import _circle_label_origin
+        x, y = _circle_label_origin(400, 300, 20, 100, 14)
+        assert x == 350 and y < 300 - 20
+
+    def test_label_goes_below_when_there_is_no_room_above(self):
+        from overlay import _circle_label_origin
+        x, y = _circle_label_origin(400, 25, 20, 100, 14)
+        assert y - 14 > 25 + 20

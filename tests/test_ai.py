@@ -1,8 +1,8 @@
 """Unit tests for ai.py.
 
 All tests are mock-based. Zero real-API dependency. Green in <2s.
-Covers: parse_point_tag, image_to_base64_jpeg, parse_response_text,
-AIClient abstract, AnthropicClient.ask_stream, AnthropicClient.ask.
+Covers: parse_point_tag, image_to_base64_jpeg, the AIClient base, and each
+provider client's ask_stream and ask.
 """
 
 import pytest
@@ -15,7 +15,7 @@ def test_ai_module_importable():
 # --- parse_point_tag ----------------------------------------------------------
 
 class TestParsePointTag:
-    """Tests for ai.parse_point_tag — Python port of Clicky's
+    """Tests for ai.parse_point_tag, the Python port of Clicky's
     CompanionManager.parsePointingCoordinates regex parser."""
 
     def test_happy_path_with_label(self):
@@ -119,31 +119,6 @@ class TestImageToBase64Jpeg:
         assert len(low_q) < len(high_q)
 
 
-# --- parse_response_text -----------------------------------------------------
-
-class TestParseResponseText:
-    """Tests for ai.parse_response_text. Extracts text content for TTS."""
-
-    def test_single_text_block(self):
-        from ai import parse_response_text
-        fake_response = {
-            "content": [
-                {"type": "text", "text": "The Save button is in the top-left."},
-            ]
-        }
-        assert parse_response_text(fake_response) == "The Save button is in the top-left."
-
-    def test_multiple_text_blocks_joined(self):
-        from ai import parse_response_text
-        fake_response = {
-            "content": [
-                {"type": "text", "text": "Part one."},
-                {"type": "text", "text": "Part two."},
-            ]
-        }
-        assert parse_response_text(fake_response) == "Part one. Part two."
-
-
 # --- AIClient abstract base --------------------------------------------------
 
 class TestAIClient:
@@ -192,7 +167,7 @@ class TestAnthropicClientAskStream:
         call_kwargs = fake_client.messages.stream.call_args.kwargs
         assert call_kwargs["model"] == "claude-test"
         assert call_kwargs["max_tokens"] == 1024
-        # system= is now a list-of-blocks carrying cache_control (Path A Task 3).
+        # system= is a list-of-blocks carrying cache_control.
         assert call_kwargs["system"] == [
             {
                 "type": "text",
@@ -317,13 +292,10 @@ class TestAnthropicClientAskStream:
         assert system_arg[0]["text"] == _CLICKY_SYSTEM_PROMPT
         assert system_arg[0]["cache_control"] == {"type": "ephemeral"}
 
-    def test_ask_stream_memory_prefix_gets_cache_control(self, mocker):
-        """Memory-context prefix of user transcript must be split into its own
-        cached text block; the current transcript stays uncached.
-
-        Avoids the full-context-caching latency paradox (arxiv 2601.06007) —
-        we only cache the stable prefix, never per-turn dynamic content.
-        """
+    def test_user_turn_carries_no_cache_breakpoint(self, mocker):
+        """The screenshot changes every turn, so a breakpoint at or after it is a
+        cache write that is never read. Memory and question go in as one block,
+        intact even when the memory itself has blank lines."""
         from PIL import Image
         from ai import AnthropicClient
 
@@ -340,10 +312,11 @@ class TestAnthropicClientAskStream:
         transcript_with_memory = (
             "[context from past sessions — use silently, don't summarize or reference it:]\n"
             "User asked about freeze panes in Excel yesterday.\n\n"
+            "They also asked about charts.\n\n"
             "how do I hide gridlines"
         )
 
-        client = AnthropicClient(api_key="test-key", model_id="anthropic/claude-sonnet-4-6")
+        client = AnthropicClient(api_key="test-key", model_id="anthropic/claude-haiku-5-5")
         img = Image.new("RGB", (1280, 800))
         with client.ask_stream(
             images=[(img, "label")], transcript=transcript_with_memory, history=[],
@@ -351,28 +324,8 @@ class TestAnthropicClientAskStream:
             list(stream.text_deltas())
 
         content = fake_client.messages.stream.call_args.kwargs["messages"][-1]["content"]
-        # Find the memory-context text block
-        memory_block = next(
-            (b for b in content
-             if b.get("type") == "text" and "context from past sessions" in b.get("text", "")),
-            None,
-        )
-        assert memory_block is not None, (
-            "Memory-context block not found in user message content"
-        )
-        assert memory_block.get("cache_control") == {"type": "ephemeral"}, (
-            "Memory-context block must have cache_control: ephemeral"
-        )
-        # And the current transcript must be a SEPARATE block without cache_control
-        current_block = next(
-            (b for b in content
-             if b.get("type") == "text" and "hide gridlines" in b.get("text", "")),
-            None,
-        )
-        assert current_block is not None
-        assert "cache_control" not in current_block, (
-            "Current-turn transcript must NOT be cached (dynamic per turn)"
-        )
+        assert not any("cache_control" in b for b in content)
+        assert transcript_with_memory in [b["text"] for b in content if b.get("type") == "text"]
 
     def test_ask_stream_with_kb_content_appends_second_system_block(self, mocker):
         """When kb_content is provided, system_blocks must have TWO entries:
@@ -433,7 +386,7 @@ class TestAnthropicClientAskStream:
 
     def test_ask_stream_without_kb_content_keeps_one_system_block(self, mocker):
         """When kb_content is empty (default), system_blocks must have only
-        the persona block — no second KB block. This is the 'Claude already
+        the persona block, no second KB block. This is the 'Claude already
         knows that software' path."""
         from PIL import Image
         from ai import AnthropicClient
@@ -452,7 +405,7 @@ class TestAnthropicClientAskStream:
             api_key="test-key", model_id="anthropic/claude-sonnet-4-6"
         )
         img = Image.new("RGB", (1280, 800))
-        # Call with NO kb_content / kb_app_name — should default to empty
+        # Call with NO kb_content / kb_app_name; should default to empty
         with client.ask_stream(
             images=[(img, "label")], transcript="hello", history=[],
         ) as stream:
@@ -557,6 +510,7 @@ class TestGeminiClient:
             api_key="test-key",
             base_url="https://openrouter.ai/api/v1",
             timeout=60.0,
+            http_client=client._http,
         )
         assert client.model_id == "google/gemini-3-flash-preview"
 
@@ -564,7 +518,7 @@ class TestGeminiClient:
         from PIL import Image
         client, mock_instance, _ = self._make_client(mocker)
 
-        # Mock the streaming iterator — ask_stream must not consume it here,
+        # Mock the streaming iterator. ask_stream must not consume it here,
         # just build the request.
         fake_stream = mocker.MagicMock(name="openai_stream")
         mock_instance.chat.completions.create.return_value = fake_stream
@@ -604,7 +558,7 @@ class TestGeminiClient:
     def test_ask_stream_converts_history_content_blocks_to_plain_strings(self, mocker):
         """History is stored in Anthropic format (list of content blocks).
         OpenAI API expects plain string content for assistant/user turns.
-        GeminiClient must convert — concatenate all text blocks."""
+        GeminiClient must convert by concatenating all text blocks."""
         from PIL import Image
         client, mock_instance, _ = self._make_client(mocker)
         fake_stream = mocker.MagicMock()
@@ -804,7 +758,7 @@ class TestGeminiClient:
 # --- create_ai_client factory ------------------------------------------------
 
 class TestCreateAIClient:
-    """Tests for ai.create_ai_client — routes model_id prefix to right subclass."""
+    """Tests for ai.create_ai_client, which routes model_id prefix to right subclass."""
 
     def test_routes_anthropic_prefix_to_anthropic_client(self, mocker):
         from ai import create_ai_client, AnthropicClient
@@ -814,7 +768,7 @@ class TestCreateAIClient:
             api_key="test-key",
         )
         assert isinstance(client, AnthropicClient)
-        assert client.model_id == "anthropic/claude-sonnet-4-6"
+        assert client.model_id == "claude-sonnet-4-6"
 
     def test_routes_claude_prefix_to_anthropic_client(self, mocker):
         from ai import create_ai_client, AnthropicClient
@@ -838,9 +792,9 @@ class TestCreateAIClient:
         assert "openrouter" in mock_openai.call_args.kwargs["base_url"]
 
     def test_routes_google_prefix_to_native_gemini_with_direct_key(self, mocker):
-        """v0.4.1: a non-sk-or key (direct Google AI Studio key) routes to
+        """A non-sk-or key (direct Google AI Studio key) routes to
         Google's native OpenAI-compat endpoint with the 'google/' prefix
-        stripped — lets a user with no OpenRouter account paste a Google key."""
+        stripped, so a user with no OpenRouter account can paste a Google key."""
         from ai import create_ai_client, GeminiClient
         mock_openai = mocker.patch("ai.OpenAI")
         client = create_ai_client(
@@ -862,14 +816,14 @@ class TestCreateAIClient:
 
     def test_unknown_prefix_raises_value_error(self):
         from ai import create_ai_client
-        # 'cohere/' is a genuinely unsupported prefix (openai/ became valid in v0.3.0).
+        # 'cohere/' is a genuinely unsupported prefix.
         with pytest.raises(ValueError) as excinfo:
             create_ai_client(model_id="cohere/command-r", api_key="test-key")
         msg = str(excinfo.value)
         assert "cohere/command-r" in msg
         assert "anthropic/" in msg
         assert "google/" in msg
-        assert "openai/" in msg  # openai/ now listed as supported
+        assert "openai/" in msg  # openai/ is listed as supported
 
     def test_base_url_override_forwarded_to_anthropic_client(self, mocker):
         """Tier 2.2 fix: base_url override must reach AnthropicClient, not be silently dropped."""
@@ -886,10 +840,10 @@ class TestCreateAIClient:
 
     def test_anthropic_with_openrouter_key_auto_routes_to_openrouter(self, mocker):
         """sk-or-v1-* OpenRouter key prefix triggers OpenRouter base URL
-        even when no explicit base_url is passed. Closes the bundled-EXE
-        401 bug where .env isn't loaded so ANTHROPIC_BASE_URL env var
-        is missing — without this fallback the Anthropic SDK defaults
-        to api.anthropic.com which rejects OpenRouter-namespaced keys.
+        even when no explicit base_url is passed. The bundled EXE doesn't
+        load .env, so the ANTHROPIC_BASE_URL env var is missing; without
+        this fallback the Anthropic SDK defaults to api.anthropic.com,
+        which rejects OpenRouter-namespaced keys with a 401.
         """
         mock_anthropic = mocker.patch("ai.Anthropic")
         from ai import create_ai_client
@@ -904,7 +858,7 @@ class TestCreateAIClient:
 
     def test_anthropic_with_direct_key_does_not_set_base_url(self, mocker):
         """sk-ant-* direct Anthropic keys must NOT trigger any base_url
-        override — they're valid for Anthropic SDK's default endpoint
+        override: they're valid for Anthropic SDK's default endpoint
         (api.anthropic.com). Auto-routing is opt-in via prefix."""
         mock_anthropic = mocker.patch("ai.Anthropic")
         from ai import create_ai_client
@@ -913,14 +867,14 @@ class TestCreateAIClient:
             api_key="sk-ant-api03-real-anthropic-key",
         )
         kwargs = mock_anthropic.call_args.kwargs
-        # Anthropic SDK gets called without base_url — uses its default.
+        # Anthropic SDK gets called without base_url, so it uses its default.
         assert "base_url" not in kwargs, (
             "Direct Anthropic keys must not have base_url overridden"
         )
 
     def test_explicit_base_url_overrides_openrouter_auto_detect(self, mocker):
         """If caller passes an explicit base_url, the auto-detect logic
-        must NOT override it — explicit choice wins. This protects
+        must NOT override it: explicit choice wins. This protects
         against edge cases like staging environments or proxy services."""
         mock_anthropic = mocker.patch("ai.Anthropic")
         from ai import create_ai_client
@@ -963,8 +917,9 @@ class TestGeminiClientExtraCoverage:
 
     def test_ask_batch_wrapper_returns_dict_with_coordinate(self, mocker):
         from PIL import Image
+        # Gemini answers per-mille: 500,500 is the centre of a 1280x800 shot.
         client, _ = self._make_client_with_stream(
-            mocker, ["click save. ", "[POINT:640,400:save button]"]
+            mocker, ["click save. ", "[POINT:500,500:save button]"]
         )
         img = Image.new("RGB", (1280, 800))
         result = client.ask(
@@ -1010,7 +965,7 @@ class TestGeminiClientExtraCoverage:
         assert user_msg["content"] == [{"type": "text", "text": "what time is it"}]
 
     def test_history_with_non_text_blocks_drops_them(self, mocker):
-        """Phase 2 edge case: history turn contains image blocks alongside text.
+        """Edge case: history turn contains image blocks alongside text.
         GeminiClient must extract only text blocks, drop non-text blocks."""
         from PIL import Image
         client, mock_instance = self._make_client_with_stream(mocker, [])
@@ -1063,12 +1018,11 @@ class TestGeminiClientExtraCoverage:
         assert messages[1] == {"role": "user", "content": "real question"}
 
     def test_split_point_tag_across_chunks_still_parses(self, mocker):
-        """OpenRouter chunk boundaries are arbitrary. [POINT:640,400:save] might
-        arrive as ["[POI", "NT:640,", "400:save]"]. parse_point_tag operates on
-        the accumulated string so this should still work."""
+        """Chunk boundaries are arbitrary, so a tag can arrive split across
+        chunks. Parsing runs on the accumulated text."""
         client, _ = self._make_client_with_stream(
             mocker,
-            ["click save. [POI", "NT:640,", "400:save button]"],
+            ["click save. [POI", "NT:500,", "500:save button]"],
         )
         from PIL import Image
         img = Image.new("RGB", (1280, 800))
@@ -1083,17 +1037,17 @@ class TestGeminiClientExtraCoverage:
         assert result["points"] == [{"x": 640, "y": 400, "label": "save button"}]
 
     def test_request_failure_raises_runtime_error_with_diagnostic(self, mocker):
-        """Tier 2.1 fix: OpenRouter errors (401, 402, 404) must be wrapped with
-        a diagnostic RuntimeError that points at the likely causes."""
+        """Provider errors (401, 402, 404) are wrapped with a diagnostic
+        RuntimeError that names the model and points at the likely causes."""
         from ai import GeminiClient
         mock_openai_instance = mocker.MagicMock(name="openai_client")
         mocker.patch("ai.OpenAI", return_value=mock_openai_instance)
         mock_openai_instance.chat.completions.create.side_effect = (
-            ConnectionError("404: model gemini-3-flash-preview not available")
+            ConnectionError("404: model gemini-4-argon not available")
         )
         client = GeminiClient(
             api_key="test-key",
-            model_id="google/gemini-3-flash-preview",
+            model_id="google/gemini-4-argon",
             base_url="https://openrouter.ai/api/v1",
         )
         from PIL import Image
@@ -1105,17 +1059,17 @@ class TestGeminiClientExtraCoverage:
                 history=[],
             )
         msg = str(exc_info.value)
-        assert "gemini-3-flash-preview" in msg
-        assert "OpenRouter" in msg
-        assert "preview" in msg.lower() or "gemini-2.5-flash" in msg.lower()
+        assert "google/gemini-4-argon" in msg
+        assert "key in Settings" in msg
+        assert "not available" in msg  # the provider's own reason is kept
         # Original should be chained for debugging.
         assert isinstance(exc_info.value.__cause__, ConnectionError)
 
 
-# --- OllamaClient (v0.2.0 local LLM support) --------------------------------
+# --- OllamaClient (local LLM support) ---------------------------------------
 
 class TestOllamaClient:
-    """Tests for ai.OllamaClient — local LLM via Ollama /api/chat.
+    """Tests for ai.OllamaClient: local LLM via Ollama /api/chat.
 
     Mirrors the DI-mock pattern from TestGeminiClient: mock httpx.Client,
     drive a fake streaming JSON-per-line response, assert on request shape
@@ -1280,11 +1234,11 @@ class TestOllamaClient:
         assert "ollama pull" in msg.lower()
 
     def test_ask_stream_skips_empty_content_chunks(self, mocker):
-        """Ollama emits metadata-only chunks with empty content — don't yield empties."""
+        """Ollama emits metadata-only chunks with empty content; don't yield empties."""
         from PIL import Image
 
         client, _, _ = self._make_client_with_stream(mocker, [
-            {"message": {"content": ""}, "done": False},     # skip — empty
+            {"message": {"content": ""}, "done": False},     # skip: empty
             {"message": {"content": "hi"}, "done": False},
             {"message": {"content": ""}, "done": True},      # skip + stop
         ])
@@ -1379,20 +1333,19 @@ class TestOllamaClient:
         assert "GrantaEduPack docs" in system_msg["content"]
 
 
-# --- Regression tests for superpowers:code-reviewer findings (v0.2.0) -------
+# --- OllamaClient failure-path regressions ----------------------------------
 
 class TestOllamaClientReviewerFixes:
-    """Regression tests for the 3 blockers caught by superpowers:code-reviewer
-    on 2026-06-05 (the v0.2.0 sprint pre-handoff review)."""
+    """OllamaClient must release its connection pool on every failure path
+    and degrade gracefully when the stream dies mid-response."""
 
     def test_blocker1_closes_httpx_client_when_stream_raises(self, mocker):
-        """BLOCKER 1 regression: if httpx.Client.stream() raises (Ollama down,
-        DNS failure, ECONNREFUSED), the previously-opened httpx_client must
-        be closed — caller's `with` block never enters, so __exit__ won't
-        fire. Without the fix, every Ollama-unreachable interaction would
-        leak a connection pool.
+        """If httpx.Client.stream() raises (Ollama down, DNS failure,
+        ECONNREFUSED), the already-opened httpx_client must be closed: the
+        caller's `with` block never enters, so __exit__ won't fire. Otherwise
+        every Ollama-unreachable interaction leaks a connection pool.
         """
-        from ai import OllamaClient, _OllamaStreamingResponse
+        from ai import OllamaClient
         from PIL import Image
 
         # Mock httpx.Client that raises on .stream()
@@ -1405,18 +1358,17 @@ class TestOllamaClientReviewerFixes:
         client = OllamaClient(host="http://localhost:11434", model_id="ollama/x")
         img = Image.new("RGB", (50, 50))
         with pytest.raises(ConnectionError):
-            with client.ask_stream(images=[(img, "x")], transcript="?", history=[]) as stream:
-                # Never reached — __enter__ raises
+            with client.ask_stream(images=[(img, "x")], transcript="?", history=[]):
+                # Never reached: __enter__ raises
                 pass
 
         # The crucial assertion: __exit__ WAS called on the httpx client to
-        # release the connection pool. Without the BLOCKER 1 fix this would
-        # be 0 (leak).
+        # release the connection pool. A count of 0 means a leak.
         assert mock_httpx_instance.__exit__.call_count == 1
 
     def test_blocker1_closes_httpx_client_when_raise_for_status_raises(self, mocker):
-        """BLOCKER 1 regression sibling: if response.raise_for_status() raises
-        (non-2xx, non-404 — e.g. 500 Internal Server Error), the httpx client
+        """Sibling of the stream() case: if response.raise_for_status() raises
+        (non-2xx, non-404, e.g. 500 Internal Server Error), the httpx client
         must still be closed before re-raising."""
         from ai import OllamaClient
         from PIL import Image
@@ -1440,7 +1392,7 @@ class TestOllamaClientReviewerFixes:
         client = OllamaClient(host="http://localhost:11434", model_id="ollama/x")
         img = Image.new("RGB", (50, 50))
         with pytest.raises(RuntimeError, match="500"):
-            with client.ask_stream(images=[(img, "x")], transcript="?", history=[]) as stream:
+            with client.ask_stream(images=[(img, "x")], transcript="?", history=[]):
                 pass
 
         # Both the stream context AND the httpx client must be cleaned up.
@@ -1448,10 +1400,10 @@ class TestOllamaClientReviewerFixes:
         assert mock_httpx_instance.__exit__.call_count == 1
 
     def test_blocker3_final_result_safe_after_text_deltas_raises(self, mocker):
-        """BLOCKER 3 regression: if text_deltas() raises mid-stream (Ollama
-        crash, network drop), final_result() must NOT re-enter the iterator
-        and re-raise — it must return parse_point_tag of whatever was
-        accumulated before the failure (graceful degradation).
+        """If text_deltas() raises mid-stream (Ollama crash, network drop),
+        final_result() must NOT re-enter the iterator and re-raise. It must
+        return parse_point_tag of whatever was accumulated before the failure
+        (graceful degradation).
         """
         from ai import OllamaClient
         from PIL import Image
@@ -1480,17 +1432,16 @@ class TestOllamaClientReviewerFixes:
         client = OllamaClient(host="http://localhost:11434", model_id="ollama/x")
         img = Image.new("RGB", (50, 50))
         with client.ask_stream(images=[(img, "x")], transcript="?", history=[]) as stream:
-            # Consume deltas — will raise mid-stream
+            # Consume deltas; will raise mid-stream
             collected = []
             try:
                 for delta in stream.text_deltas():
                     collected.append(delta)
             except ConnectionError:
                 pass  # Expected
-            # The crucial assertion: final_result() must NOT re-raise the
-            # ConnectionError. It must return a PointParseResult with what
-            # was accumulated before the failure. Without BLOCKER 3 fix
-            # this would re-iterate text_deltas() and re-raise.
+            # The crucial assertion: final_result() must NOT re-iterate
+            # text_deltas() and re-raise the ConnectionError. It must return a
+            # PointParseResult with what was accumulated before the failure.
             result = stream.final_result()
             # Accumulated text was "partial response" (no [POINT:x,y] tag)
             assert result.coordinate is None
@@ -1498,10 +1449,10 @@ class TestOllamaClientReviewerFixes:
             assert "response" in result.spoken_text
 
 
-# --- create_ai_client factory: Ollama dispatch (v0.2.0) -----------------------
+# --- create_ai_client factory: Ollama dispatch --------------------------------
 
 class TestCreateAIClientOllama:
-    """Extends TestCreateAIClient: factory now dispatches ollama/* prefix
+    """Extends TestCreateAIClient: factory dispatches ollama/* prefix
     (and bare llama*/qwen*/llava* names) to OllamaClient."""
 
     def test_routes_ollama_prefix_to_ollama_client(self, mocker):
@@ -1516,7 +1467,7 @@ class TestCreateAIClientOllama:
         assert client.model_id == "llama3.2-vision"  # prefix stripped
 
     def test_routes_bare_llama_prefix_to_ollama_client(self, mocker):
-        """If MODEL_ID=llama3.2-vision (Bitshank-style bare name), route to Ollama."""
+        """If MODEL_ID=llama3.2-vision (bare model name), route to Ollama."""
         from ai import create_ai_client, OllamaClient
         mocker.patch("ai.httpx")
         client = create_ai_client(
@@ -1552,13 +1503,13 @@ class TestCreateAIClientOllama:
         client = create_ai_client(
             model_id="ollama/llama3.2-vision",
             api_key="",
-            # ollama_host omitted — should fall back to default
+            # ollama_host omitted: should fall back to default
         )
         assert isinstance(client, OllamaClient)
         assert client.host == "http://localhost:11434"
 
     def test_ollama_routing_does_not_break_existing_anthropic_dispatch(self, mocker):
-        """Regression check: Anthropic dispatch still works alongside new Ollama branch."""
+        """Regression check: Anthropic dispatch still works alongside the Ollama branch."""
         from ai import create_ai_client, AnthropicClient
         mocker.patch("ai.Anthropic")
         client = create_ai_client(
@@ -1569,8 +1520,8 @@ class TestCreateAIClientOllama:
 
 
 class TestOpenAIVisionClient:
-    """v0.3.0: OpenAIVisionClient (GPT-4o via OpenAI native API) is a thin
-    subclass of GeminiClient — same OpenAI-chat-completions shape, just
+    """OpenAIVisionClient (OpenAI native API) is a thin subclass of
+    GeminiClient: same OpenAI-chat-completions shape, just
     OpenAI's endpoint instead of OpenRouter. Strips the 'openai/' routing
     prefix so the API gets the bare model name."""
 
@@ -1597,8 +1548,8 @@ class TestOpenAIVisionClient:
         assert kwargs.get("base_url") is None
 
     def test_inherits_ask_stream_from_gemini_client(self):
-        """OpenAIVisionClient reuses GeminiClient.ask_stream verbatim —
-        same OpenAI chat.completions streaming shape. Confirms the subclass
+        """OpenAIVisionClient reuses GeminiClient.ask_stream verbatim
+        (same OpenAI chat.completions streaming shape). Confirms the subclass
         doesn't override it."""
         from ai import OpenAIVisionClient, GeminiClient
         assert OpenAIVisionClient.ask_stream is GeminiClient.ask_stream
@@ -1615,7 +1566,7 @@ class TestCreateAIClientOpenAI:
         assert client.model_id == "gpt-4o"  # prefix stripped
 
     def test_openai_routing_does_not_break_anthropic(self, mocker):
-        """Regression: Anthropic dispatch still works alongside the new branch."""
+        """Regression: Anthropic dispatch still works alongside the OpenAI branch."""
         from ai import create_ai_client, AnthropicClient
         mocker.patch("ai.Anthropic")
         client = create_ai_client(model_id="anthropic/claude-sonnet-4-6", api_key="sk-ant-test")
@@ -1628,7 +1579,7 @@ class TestCreateAIClientOpenAI:
         assert isinstance(client, OllamaClient)
 
     def test_openai_with_openrouter_key_routes_to_openrouter(self, mocker):
-        """v0.4.x dual routing: an sk-or- key for OpenAI points at OpenRouter
+        """Dual routing: an sk-or- key for OpenAI points at OpenRouter
         and KEEPS the namespaced openai/ slug (OpenRouter expects it). Token
         param is the classic max_tokens (OpenRouter normalizes it)."""
         from ai import create_ai_client, OpenAIVisionClient
@@ -1652,7 +1603,7 @@ class TestCreateAIClientOpenAI:
 
 
 class TestAnnotationPrompt:
-    """v0.3.0 hackathon: draw-on-screen annotation system prompt."""
+    """Draw-on-screen annotation system prompt."""
 
     def test_annotation_prompt_has_four_shape_tags(self):
         from ai import _CLICKY_ANNOTATION_SYSTEM_PROMPT as p
@@ -1669,7 +1620,223 @@ class TestAnnotationPrompt:
 
 
 def test_create_ai_client_routes_gemini_3_5_flash():
-    """v0.3.x re-enable: a google/* model id routes to GeminiClient (OpenRouter)."""
+    """A google/* model id routes to GeminiClient (OpenRouter)."""
     from ai import GeminiClient, create_ai_client
     c = create_ai_client(model_id="google/gemini-3.5-flash", api_key="sk-or-test")
     assert isinstance(c, GeminiClient)
+
+
+class TestAnthropicModelIdPerEndpoint:
+    """api.anthropic.com takes bare model IDs; OpenRouter takes anthropic/ slugs."""
+
+    def _sent_model(self, mocker, api_key, model_id="anthropic/claude-sonnet-4-6"):
+        from PIL import Image
+        mock_anthropic = mocker.patch("ai.Anthropic")
+        from ai import create_ai_client
+        client = create_ai_client(model_id=model_id, api_key=api_key)
+        client.ask_stream(
+            images=[(Image.new("RGB", (8, 8)), "label")], transcript="hi", history=[],
+        )
+        return mock_anthropic.return_value.messages.stream.call_args.kwargs["model"]
+
+    def test_direct_key_sends_bare_model_id(self, mocker):
+        assert self._sent_model(mocker, "sk-ant-api03-test") == "claude-sonnet-4-6"
+
+    def test_openrouter_key_keeps_namespaced_slug(self, mocker):
+        assert self._sent_model(mocker, "sk-or-v1-test") == "anthropic/claude-sonnet-4-6"
+
+    def test_bare_model_id_on_direct_key_is_unchanged(self, mocker):
+        assert self._sent_model(mocker, "sk-ant-api03-test", "claude-opus-4-8") == "claude-opus-4-8"
+
+
+class TestGeminiPerMilleCoords:
+    """Gemini answers on a 0-1000 grid; everything downstream works in screenshot pixels."""
+
+    def _final(self, mocker, model_id, text, sizes=((1280, 800),), labels=None):
+        from PIL import Image
+        from ai import create_ai_client
+        chunk = mocker.MagicMock()
+        chunk.choices = [mocker.MagicMock()]
+        chunk.choices[0].delta.content = text
+        mocker.patch("ai.OpenAI").return_value.chat.completions.create.return_value = iter([chunk])
+        client = create_ai_client(model_id=model_id, api_key="sk-or-v1-test")
+        labels = labels or [f"screen {i + 1} of {len(sizes)}" for i in range(len(sizes))]
+        images = [(Image.new("RGB", s), label) for s, label in zip(sizes, labels)]
+        with client.ask_stream(images=images, transcript="where?", history=[]) as stream:
+            for _ in stream.text_deltas():
+                pass
+            return stream.final_result()
+
+    def test_gemini_point_lands_in_pixels(self, mocker):
+        r = self._final(mocker, "google/gemini-4-argon", "up top. [POINT:325,68:eco audit]")
+        assert r.coordinate == (416, 54)
+
+    def test_other_models_are_left_alone(self, mocker):
+        r = self._final(mocker, "openai/gpt-6.1-sol", "up top. [POINT:325,68:eco audit]")
+        assert r.coordinate == (325, 68)
+
+    def test_point_on_another_screen_uses_that_screens_size(self, mocker):
+        r = self._final(mocker, "google/gemini-4-argon", "there. [POINT:500,500:menu:screen2]",
+                        sizes=((1280, 800), (1024, 768)))
+        assert r.coordinate == (512, 384)
+        assert r.screen_number == 2
+
+    def test_screen_number_follows_the_label_not_the_cursor_first_order(self, mocker):
+        # Cursor on screen 2, so screen 2's capture is sent first.
+        r = self._final(mocker, "google/gemini-4-argon", "there. [POINT:500,500:menu:screen1]",
+                        sizes=((1024, 768), (1280, 800)),
+                        labels=["screen 2 of 2 — cursor is on this screen (primary focus)",
+                                "screen 1 of 2 — secondary screen"])
+        assert r.coordinate == (640, 400)
+        assert r.screen_number == 1
+
+    def test_draw_tags_convert_but_label_text_does_not(self, mocker):
+        r = self._final(mocker, "google/gemini-4-argon",
+                        "look [CIRCLE:500,500,50:x][ARROW:0,0->1000,1000]"
+                        "[UNDERLINE:100,200,300][LABEL:250,750:3 + 4 = 7]")
+        assert "[CIRCLE:640,400,64:x]" in r.spoken_text
+        assert "[ARROW:0,0->1280,800]" in r.spoken_text
+        assert "[UNDERLINE:128,160,384]" in r.spoken_text
+        assert "[LABEL:320,600:3 + 4 = 7]" in r.spoken_text
+
+
+class TestTokenUsage:
+    """Each turn reports provider token counts for the debug log."""
+
+    def test_anthropic_stream_reports_usage(self, mocker):
+        from types import SimpleNamespace
+        from PIL import Image
+        from ai import AnthropicClient
+
+        fake_client = mocker.patch("ai.Anthropic").return_value
+        fake_stream = mocker.MagicMock()
+        fake_stream.text_stream = iter(["ok [POINT:none]"])
+        fake_stream.get_final_message.return_value.usage = SimpleNamespace(
+            input_tokens=1500, output_tokens=40,
+            cache_read_input_tokens=1100, cache_creation_input_tokens=0,
+        )
+        mgr = mocker.MagicMock()
+        mgr.__enter__ = mocker.MagicMock(return_value=fake_stream)
+        mgr.__exit__ = mocker.MagicMock(return_value=False)
+        fake_client.messages.stream.return_value = mgr
+
+        client = AnthropicClient(api_key="sk-ant-test", model_id="claude-haiku-5-5")
+        with client.ask_stream(images=[(Image.new("RGB", (8, 8)), "s")], transcript="hi", history=[]) as stream:
+            list(stream.text_deltas())
+            stream.final_result()
+            assert stream.usage() == {"input": 1500, "output": 40, "cache_read": 1100, "cache_write": 0}
+
+    def test_openai_compatible_stream_reports_usage(self, mocker):
+        from types import SimpleNamespace
+        from PIL import Image
+        from ai import create_ai_client
+
+        text = mocker.MagicMock()
+        text.choices = [mocker.MagicMock()]
+        text.choices[0].delta.content = "ok [POINT:none]"
+        text.usage = None
+        tail = SimpleNamespace(choices=[], usage=SimpleNamespace(
+            prompt_tokens=1300, completion_tokens=35,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=0),
+        ))
+        create = mocker.patch("ai.OpenAI").return_value.chat.completions.create
+        create.return_value = iter([text, tail])
+
+        client = create_ai_client(model_id="openai/gpt-6.1-sol", api_key="sk-or-v1-test")
+        with client.ask_stream(images=[(Image.new("RGB", (8, 8)), "s")], transcript="hi", history=[]) as stream:
+            list(stream.text_deltas())
+            stream.final_result()
+            assert stream.usage() == {"input": 1300, "output": 35, "cache_read": 0, "cache_write": 0}
+        assert create.call_args.kwargs["stream_options"] == {"include_usage": True}
+
+
+class TestThinkingOff:
+    """Voice turns skip hidden thinking where the model allows it: faster first
+    token, same hits on the pointing set."""
+
+    def _anthropic_kwargs(self, mocker, model_id):
+        from PIL import Image
+        from ai import create_ai_client
+        mock = mocker.patch("ai.Anthropic")
+        client = create_ai_client(model_id=model_id, api_key="sk-or-v1-test")
+        client.ask_stream(images=[(Image.new("RGB", (8, 8)), "s")], transcript="hi", history=[])
+        return mock.return_value.messages.stream.call_args.kwargs
+
+    def _openai_kwargs(self, mocker, model_id, api_key="sk-proj-test"):
+        from PIL import Image
+        from ai import create_ai_client
+        create = mocker.patch("ai.OpenAI").return_value.chat.completions.create
+        create.return_value = iter([])
+        client = create_ai_client(model_id=model_id, api_key=api_key)
+        client.ask_stream(images=[(Image.new("RGB", (8, 8)), "s")], transcript="hi", history=[])
+        return create.call_args.kwargs
+
+    def test_haiku_5_5_does_not_think(self, mocker):
+        assert self._anthropic_kwargs(mocker, "anthropic/claude-haiku-5-5")["thinking"] == {"type": "disabled"}
+
+    def test_sonnet_5_5_thinks_only_between_tools(self, mocker):
+        assert self._anthropic_kwargs(mocker, "anthropic/claude-sonnet-5.5")["thinking"] == {"type": "between_tools"}
+
+    def test_models_without_an_off_switch_get_no_thinking_param(self, mocker):
+        assert "thinking" not in self._anthropic_kwargs(mocker, "anthropic/claude-opus-5-5")
+
+    def test_gpt_6_1_sol_reasons_low(self, mocker):
+        assert self._openai_kwargs(mocker, "openai/gpt-6.1-sol")["reasoning_effort"] == "low"
+
+    def test_gpt_6_luna_does_not_reason(self, mocker):
+        assert self._openai_kwargs(mocker, "openai/gpt-6-luna", "sk-or-v1-test")["reasoning_effort"] == "none"
+
+    def test_other_models_get_no_reasoning_param(self, mocker):
+        assert "reasoning_effort" not in self._openai_kwargs(mocker, "openai/gpt-4o")
+        assert "reasoning_effort" not in self._openai_kwargs(mocker, "google/gemini-4-argon", "sk-or-v1-test")
+
+
+class TestWarmUp:
+    """warm() opens the provider connection while the user is still talking."""
+
+    def test_anthropic_client_warms_its_own_api_origin(self, mocker):
+        from ai import create_ai_client
+        http = mocker.MagicMock()
+        mocker.patch("ai.AnthropicHttpxClient", return_value=http)
+        sdk = mocker.patch("ai.Anthropic")
+        sdk.return_value.base_url = "https://openrouter.ai/api/"
+        client = create_ai_client(model_id="anthropic/claude-haiku-5-5", api_key="sk-or-v1-test")
+        client.warm()
+        assert sdk.call_args.kwargs["http_client"] is http
+        assert http.head.call_args.args[0] == "https://openrouter.ai/api/"
+
+    def test_openai_compatible_client_warms_its_own_api_origin(self, mocker):
+        from ai import create_ai_client
+        http = mocker.MagicMock()
+        mocker.patch("ai.OpenAIHttpxClient", return_value=http)
+        sdk = mocker.patch("ai.OpenAI")
+        sdk.return_value.base_url = "https://api.openai.com/v1/"
+        client = create_ai_client(model_id="openai/gpt-6.1-sol", api_key="sk-proj-test")
+        client.warm()
+        assert sdk.call_args.kwargs["http_client"] is http
+        assert http.head.call_args.args[0] == "https://api.openai.com/v1/"
+
+    def test_warm_never_raises(self, mocker):
+        import httpx
+        from ai import create_ai_client
+        http = mocker.MagicMock()
+        http.head.side_effect = httpx.ConnectError("offline")
+        mocker.patch("ai.AnthropicHttpxClient", return_value=http)
+        mocker.patch("ai.Anthropic")
+        create_ai_client(model_id="anthropic/claude-haiku-5-5", api_key="sk-ant-test").warm()
+
+
+class TestWindowsPrompt:
+    """The prompts describe Windows, so answers don't come back in Mac terms."""
+
+    def test_no_mac_only_references(self):
+        from ai import _CLICKY_ANNOTATION_SYSTEM_PROMPT, _CLICKY_SYSTEM_PROMPT
+        for prompt in (_CLICKY_SYSTEM_PROMPT, _CLICKY_ANNOTATION_SYSTEM_PROMPT):
+            lowered = prompt.lower()
+            for mac in ("menu bar", "final cut", "xcode", "command option", "finder"):
+                assert mac not in lowered, mac
+
+    def test_shortcuts_use_windows_keys(self):
+        from ai import _CLICKY_ANNOTATION_SYSTEM_PROMPT, _CLICKY_SYSTEM_PROMPT
+        for prompt in (_CLICKY_SYSTEM_PROMPT, _CLICKY_ANNOTATION_SYSTEM_PROMPT):
+            assert "windows" in prompt.lower()

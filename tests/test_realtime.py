@@ -1,4 +1,4 @@
-"""Unit tests for realtime.py — GPT-Realtime speech-to-speech session (v0.3.0).
+"""Unit tests for realtime.py, the GPT-Realtime speech-to-speech session.
 
 The WebSocket connection, mic input, and speaker output are all injected via
 factory args, so these run with mocks: no real audio device, no network.
@@ -91,7 +91,7 @@ class TestConnect:
         tools = update["session"]["tools"]
         assert any(t["name"] == "point_at" for t in tools)
         # speaker was wired up (the default factory starts it; the injected
-        # fake just gets assigned — assert it's the one connect() will use)
+        # fake just gets assigned: assert it's the one connect() will use)
         assert s._speaker is speaker
         s.close()
 

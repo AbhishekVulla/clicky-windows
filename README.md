@@ -5,29 +5,27 @@
 <h1 align="center">Clicky Windows</h1>
 
 <p align="center">
-  A voice-driven, screen-aware AI buddy for Windows. Hold a hotkey, ask anything about whatever app you are looking at, and Clicky talks back and points at the answer with a blue cursor. It points, you click.
+  An AI that lives next to your cursor on Windows. Hold a hotkey, ask about whatever app you're in, and Clicky answers out loud and points at the spot on your screen. It points, you click.
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/license-MIT-f4d35e" alt="MIT" />
   <img src="https://img.shields.io/badge/platform-Windows%2010%2F11-0078d4" alt="Windows 10/11" />
   <a href="https://github.com/AbhishekVulla/clicky-windows/releases"><img src="https://img.shields.io/github/downloads/AbhishekVulla/clicky-windows/total?label=installs&color=ed8936" alt="installs" /></a>
 </p>
 
 <p align="center">
   <a href="https://github.com/AbhishekVulla/clicky-windows/releases/latest">Download</a> &middot;
-  <a href="#what-it-does">What it does</a> &middot;
+  <a href="#quick-install">Install</a> &middot;
   <a href="#how-it-works">How it works</a> &middot;
-  <a href="#engineering-decisions-worth-highlighting">Engineering</a> &middot;
+  <a href="#engineering">Engineering</a> &middot;
   <a href="#faq">FAQ</a> &middot;
-  <a href="#privacy">Privacy</a> &middot;
-  <a href="#license-and-support">License</a>
+  <a href="#privacy">Privacy</a>
 </p>
 
 > *"I just want to learn by doing."*
 > Farza Majeed, on why he built the original Clicky
 
-The #1 community request on [Farza's Clicky](https://github.com/farzaa/clicky) was a Windows version. I shipped it, plus the two features users asked for that the original does not have: persistent per-app memory, and a drop-in knowledge folder so Clicky understands obscure or company-internal software Claude does not already know about.
+The most requested feature on [Farza's Clicky](https://github.com/farzaa/clicky) was a Windows version. This is it, plus two things the original doesn't have: it remembers what you asked in each app, and each app can have its own knowledge base, so Clicky can help with software the AI has never seen.
 
 <p align="center">
   <a href="https://youtu.be/ajIO6p7pR6M">
@@ -35,291 +33,190 @@ The #1 community request on [Farza's Clicky](https://github.com/farzaa/clicky) w
   </a>
 </p>
 <p align="center">
-  <em>90 seconds. Me trying to navigate Granta EduPack for a class project. Clicky knows my project, sees my screen, points at where to click.</em>
+  <em>90 seconds: Granta EduPack for a class project. Clicky knows the project, sees the screen, points at where to click.</em><br />
+  1st runner-up, <a href="https://pycon.sg/hackathon_entries/results.html">PyCon Singapore 2026 Hackathon</a>.
 </p>
 
 ## What it does
 
-You are working in some app. You hit a wall. You hold `Ctrl+Alt+Space`, ask a question out loud, release. A couple of seconds later you hear the answer, and a blue cursor lands on the exact button or menu item you needed to click.
+You're in some app and you're stuck. Hold `Ctrl+Alt+Space`, ask out loud, let go. You hear the answer and a blue cursor lands on the button you needed. Clicky never clicks or types for you, so you come out of it knowing the app.
 
-Clicky never touches your mouse or keyboard. It shows you where to go, you do the clicking, and you come out of it actually knowing the app.
+- **Charts.** *"What's this MACD divergence telling me?"* on TradingView, with Clicky pointing at the peaks it means.
+- **Apps the AI doesn't know.** Your company's internal tools, or niche software from a class. Paste the manual into that app's knowledge base, `~/Documents/Clicky Wiki/<app>.exe.md`, and Clicky reads it before answering. I did this for Granta EduPack, a materials tool I had to use at SUTD, and now Clicky finds things in it like a TA who already read the manual.
+- **A first app on Lovable, Bolt or Replit.** Ask what's broken; Clicky reads your editor and shows you where to click.
 
-Three real ways people are using it:
+Turn on *Draw on screen* in Settings and Clicky also marks up the screen like a tutor: it circles the thing, draws an arrow, underlines a term or writes a short label.
 
-- **Live chart analysis on TradingView.** *"What's this MACD divergence telling me?"* Clicky reads the chart and walks you through the indicator, pointing at the relevant peaks.
-- **Niche or company-internal software the AI does not know.** Drop a markdown file with the docs into `~/Documents/Clicky Wiki/<app>.exe.md` and Clicky becomes an expert. I do this for Granta EduPack, a materials-engineering tool I had to use for an SUTD class. Clicky now points at things in EduPack like a TA who already read the manual.
-- **Building a first app on Lovable, Bolt, Replit, or a similar AI-coding platform.** Don't know what a state hook is? Hit the hotkey, ask, Clicky reads your editor and explains what is broken and where to click.
-
-There is also a **teaching mode** (toggle *Draw on screen* in Settings). Instead of a single cursor, Clicky marks up your screen the way a tutor would: it circles the thing you asked about, draws an arrow to it, underlines a term, and writes a short label, then clears them once you've read them. Handy when a single dot is not enough, like a worksheet or a dense toolbar.
-
-Everything runs through your own API keys. Nothing routes through a proxy server. See [Privacy](#privacy) for the specifics.
+<p align="center">
+  <img src="assets/screenshots/draw-on-screen.jpg" alt="Clicky circling two swapped signs in a handwritten exergy balance, labelled should be minus and should be plus" width="720" />
+  <br />
+  <em>Asked "What is the mistake in this question?" on a thermodynamics worksheet.</em>
+</p>
 
 ## Quick install
 
-1. Download the latest `Clicky-Windows-Setup.exe` from the [Releases](https://github.com/AbhishekVulla/clicky-windows/releases/latest) page (around 160 MB, it bundles the optional local model runtimes).
-2. Run it. Windows SmartScreen will warn you (the EXE is unsigned for v0; SignPath OSS application is in flight). Click **More info** → **Run anyway**.
-3. Launch Clicky from the Start Menu. A modal asks for your API keys (fewer if you pick local options, none if you go fully local):
-   - [Anthropic](https://console.anthropic.com/settings/keys) for Claude Sonnet 4.6 (vision and reasoning). You can also pick **OpenAI (GPT-5.4)**, **Google Gemini**, or **Ollama (local)** from the dropdown. Each cloud model takes its own key (Anthropic, OpenAI, or Google AI Studio), or one OpenRouter key works for all of them. See the [FAQ](#faq) for the trade-offs.
-   - [AssemblyAI](https://www.assemblyai.com/dashboard/signup) for Universal-3 streaming speech-to-text, or pick **Local (faster-whisper)** for free offline transcription with no key
-   - [Cartesia](https://play.cartesia.ai/sign-in) for Sonic-3 voice output (or pick ElevenLabs, or **Local (Kokoro)** for a free offline voice with no key)
-4. Hit `Ctrl+Alt+Space`, ask something, release.
+**Video walkthrough:** [How to install Clicky Windows](https://youtu.be/a76r7sTNGH0) (90 seconds).
 
-Free-tier signups exist for the cloud providers. A typical 30-second interaction on the default Anthropic + AssemblyAI + Cartesia stack costs around $0.016 as of July 2026. You can also go fully local and offline with no keys at all (Ollama + faster-whisper + Kokoro), it is just slower and heavier on your machine. See the FAQ.
+1. Download `Clicky-Windows-Setup.exe` from [Releases](https://github.com/AbhishekVulla/clicky-windows/releases/latest).
+2. Run it. The installer isn't code-signed yet, so Windows SmartScreen warns you: click **More info**, then **Run anyway**.
+3. Clicky asks for two keys:
+   - **AI model:** an [OpenAI](https://platform.openai.com/api-keys) key. An [Anthropic](https://console.anthropic.com/settings/keys), Google or [OpenRouter](https://openrouter.ai/keys) key works too: paste it and Clicky picks that provider.
+   - **Cartesia:** one [Cartesia](https://play.cartesia.ai/sign-in) key covers both listening and the voice.
+4. Hold `Ctrl+Alt+Space`, ask, let go.
+
+Cartesia has a free tier, and an answer from the AI model costs under a cent. Prefer no keys at all? Every piece has a local option; see the [FAQ](#faq).
 
 <p align="center">
-  <img src="assets/screenshots/settings-dialog.png" alt="First-launch API keys dialog" width="520" />
-  <br />
-  <em>First-launch dialog. Three keys, one provider per category.</em>
+  <img src="assets/screenshots/settings-dialog.png" alt="First-launch settings: one AI key and one Cartesia key" width="520" />
 </p>
 
 ## How it works
 
 ```mermaid
 graph TD
-    USER[User holds Ctrl Alt Space]
+    USER[Hold Ctrl Alt Space]
 
-    subgraph OS_Layer [OS Layer Win32]
-        HOTKEY[pynput observe-only hook<br/>never suppresses keys]
-        DPI[Per-monitor v2 DPI awareness]
-        MUTEX[Single-instance mutex<br/>no multi-PTT chaos]
+    subgraph Press [While the key is held]
+        MIC[Mic streams to Cartesia speech to text]
+        CAP[Screenshot of the screen under the cursor<br/>overlay hidden first]
+        WARM[API connections opened early]
+        MEM[Per-app memory and knowledge base read]
     end
 
-    subgraph Local_Pipeline [Local Pipeline 4 things kick off in parallel]
-        STT[AssemblyAI WebSocket<br/>~466ms finalize via ForceEndpoint]
-        CAP[mss multi-monitor capture<br/>overlay hidden first]
-        MEM[Memory recall<br/>per-app markdown tail]
-        KB[KB lookup<br/>Clicky Wiki folder]
+    subgraph Release [On release]
+        LLM[Vision model of your choice<br/>Claude, GPT, Gemini or Ollama]
+        TTS[Cartesia voice<br/>sentence by sentence]
+        OVERLAY[Click-through cursor overlay<br/>one window per monitor]
+        REC[Memory note appended]
     end
 
-    subgraph Cloud_APIs [Cloud APIs BYOK never proxied]
-        CLAUDE[Claude Sonnet 4.6 streaming<br/>2x cache_control breakpoints]
-        TTS[Cartesia or ElevenLabs<br/>sentence-level prefetch]
-    end
-
-    subgraph Output [Output Qt main thread]
-        OVERLAY[PyQt6 per-monitor overlay<br/>Win32 layered click-through]
-        AUDIO[sounddevice playback]
-        REC[Memory record<br/>markdown append + SQLite WAL]
-    end
-
-    USER --> HOTKEY
-    HOTKEY --> STT
-    HOTKEY --> CAP
-    HOTKEY --> MEM
-    HOTKEY --> KB
-
-    STT --> CLAUDE
-    CAP --> CLAUDE
-    MEM --> CLAUDE
-    KB --> CLAUDE
-
-    CLAUDE -->|streaming text| TTS
-    CLAUDE -->|POINT x y label tag| OVERLAY
-    TTS --> AUDIO
-    CLAUDE --> REC
-
-    classDef os fill:#dcfce7,stroke:#16a34a,color:#14532d
-    classDef local fill:#dbeafe,stroke:#2563eb,color:#0f172a
-    classDef cloud fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
-    classDef output fill:#ede9fe,stroke:#7c3aed,color:#3b0764
-
-    class HOTKEY,DPI,MUTEX os
-    class STT,CAP,MEM,KB local
-    class CLAUDE,TTS cloud
-    class OVERLAY,AUDIO,REC output
+    USER --> MIC
+    USER --> CAP
+    USER --> WARM
+    USER --> MEM
+    MIC --> LLM
+    CAP --> LLM
+    MEM --> LLM
+    LLM -->|streaming text| TTS
+    LLM -->|POINT x y tag| OVERLAY
+    LLM --> REC
 ```
 
-The hotkey listener observes Ctrl+Alt+Space without consuming the keys. On release, four things kick off in parallel: speech-to-text finalizes, the screen gets captured, per-app memory gets recalled, and a knowledge-base file gets looked up if one exists. Claude Sonnet 4.6 receives the screenshot plus the transcript plus the memory plus the KB, and streams a response. Sentences flush to the TTS provider as soon as a `.!?` boundary is hit, so the user starts hearing audio while Claude is still generating. A `[POINT:x,y:label]` tag in the response drives a per-monitor PyQt6 overlay to point at the exact pixel.
+While you talk, the mic streams to speech-to-text, the screen is captured, the per-app memory and knowledge base are read, and the connections to the AI and voice providers open. When you let go, the model gets the screenshot, your words, the memory and the knowledge base, and streams its answer. Each finished sentence goes straight to the voice, so you hear the start of the answer while the rest is still being written. A `[POINT:x,y:label]` tag at the end moves the cursor.
 
-## Engineering decisions worth highlighting
-
-The interesting parts. Each of these is a problem I hit, the gotcha I had to figure out, and the measured win.
+## Engineering
 
 <details>
-<summary><strong>1. Sub-2s first-audible-word despite three sequential APIs.</strong> Parallel kick-off, sentence streaming, and a Cartesia double-buffer. ~3.7s naive down to ~1.7s measured.</summary>
+<summary><strong>Pointing that lands, measured.</strong> Every default was picked on real screenshots, and one model's misses turned out to be a coordinate bug.</summary>
 
-The naive pipeline is hotkey → STT (wait) → screenshot (wait) → Claude vision (wait) → TTS (wait). That is roughly 3.7 seconds of latency for a one-sentence response. Unusable.
+Seven "where is X" questions on real screenshots (Granta EduPack, Fusion 360, GitHub), with Clicky's own prompt, October 2026. A hit means the cursor tip landed inside the target button.
 
-What fixed it:
+| Provider | Old default | Hits | New default | Hits | Cost per question |
+|---|---|---|---|---|---|
+| Anthropic | Claude Sonnet 4.6 | 6/7 | Claude Haiku 5.5 | 7/7 | $0.0004 (was $0.008) |
+| OpenAI | GPT-5.4 | 2/7 | GPT-6.1 Sol | 7/7 | $0.006 |
+| Google | Gemini 3.1 Pro | 0/7 | Gemini 4 Argon | 7/7 | $0.006 |
 
-- **Parallel kick-off.** STT, screen capture, memory recall, and KB lookup all start the moment the user releases the hotkey. They run on separate worker threads and feed Claude as soon as all four finish. Capture is the slowest at ~50ms, so the wall-clock cost is roughly 50ms instead of the sum.
-- **Sentence-level streaming.** The Claude response is consumed token by token. As soon as a `.!?` boundary lands, that sentence gets flushed to the TTS provider. By the time Claude generates sentence three, sentence one is already playing.
-- **Cartesia "Option B" HTTP double-buffer.** Two background threads on the TTS side: one prefetches the next sentence while the other plays the current one. Inter-sentence gaps drop to roughly zero. Implementation is in [`tts.py`](tts.py) (`CartesiaSonicTTS._prefetch_worker` and `_playback_worker`).
+Seven questions is a small sample. The point is the gap, not the decimals.
 
-Measured first-audible-word for a multi-sentence response: about 1.7 seconds. For a single-sentence response it is closer to 4-6 seconds because the first-sentence TTFB dominates and there is nothing to overlap.
-
-```text
-NAIVE SERIAL (~3.7s)                          OPTIMIZED (~1.7s)
-
-t=0     STT finalize       (500ms)            t=0     STT finalize       (466ms)  ─┐
-        │                                             │                            │
-t=500   Screen capture     (50ms)             t=0     Screen capture     (50ms)    │
-        │                                             │                            │ parallel
-t=550   Claude vision FULL (2000ms)           t=0     Memory recall      (10ms)    │ kick-off
-        │                                             │                            │
-t=2550  TTS first sentence (1000ms)           t=0     KB lookup          (10ms)   ─┘
-        │                                             │
-t=3550  🔊  first audible word                t=466   Claude streams s1  (800ms)
-                                                      │
-                                              t=1266  TTS prefetch s1    (200ms)
-                                                      │
-                                              t=1466  🔊  first audible word
-
-
-Three wins stacked:
-  (1) parallel kick-off  → 4 tasks start at t=0, wait for slowest (STT 466ms), not the sum
-  (2) sentence streaming → TTS begins on sentence 1 while Claude generates sentence 2+
-  (3) Option B buffer    → prefetch + playback worker threads, inter-sentence gap ≈ 0
-```
+Gemini missed all seven by about 90 px, always in the same direction. That's not a weak model: Gemini grounds on a 0 to 1000 grid on each axis, even when the prompt says the image is 1280 by 800 pixels. Clicky now converts Gemini's coordinates, and its drawing tags, back to pixels. Same model, 0/7 became 6/7, and Gemini 4 Argon goes 7/7.
 
 </details>
 
 <details>
-<summary><strong>2. Win32 layered click-through overlay, per-monitor DPI-aware.</strong> One QWidget per physical screen sidesteps Qt 6's mixed-DPI gotcha. ctypes flags applied after show().</summary>
+<summary><strong>A faster voice.</strong> It starts 190 ms after each sentence is ready, down from 620 ms.</summary>
 
-The blue cursor that points at things has to do four things at once:
-- always on top
-- click-through (mouse events pass to the app underneath)
-- never steal focus
-- correct pixel position on mixed-DPI multi-monitor setups (a 4K external monitor at 200% scaling next to a 1080p laptop screen at 100%)
+From letting go of the key to the first word takes 2.5 to 3.5 seconds on my laptop, and most of that is the AI model writing its first sentence. The parts Clicky controls, measured from Singapore in October 2026:
 
-Qt 6 has a known gotcha here. If you make one giant overlay that spans the virtual desktop, it renders at the wrong size on at least one of the monitors. The fix is to spawn one `QWidget` per physical screen and route the pointer to the correct one via `QGuiApplication.screens()` metadata. See [`overlay.py`](overlay.py).
+| Stage | Before | Now |
+|---|---|---|
+| Speech to text, release to transcript | ~420 ms (AssemblyAI, US servers) | ~160 ms (Cartesia, nearby servers) |
+| Voice, sentence to first sound | ~620 ms (waited for the whole sentence) | ~190 ms (plays as audio arrives) |
+| Connecting to the AI and voice providers | a fresh handshake every question | opened while you hold the key, 0.2 to 0.35 s saved |
+| Hidden model "thinking" | on | off where the model allows it |
 
-The click-through behavior comes from Win32 layered-window flags applied via `ctypes` (`WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`). They have to be applied AFTER `show()`, OR'd in (never overwritten), and followed by `SetWindowPos(SWP_FRAMECHANGED)`. Get any of those wrong and the overlay either disappears, eats clicks, or starts blocking the taskbar.
-
-</details>
-
-<details>
-<summary><strong>3. A hotkey that does not break your typing.</strong> Observe-only pynput Listener (suppress=False is load-bearing), plus a three-step pivot to find an Excel-safe combo.</summary>
-
-`pynput.Listener(suppress=False)` is observe-only. It sees keypresses, the OS still delivers them to whatever app is focused. This is load-bearing. Setting `suppress=True` installs a `WH_KEYBOARD_LL` hook that globally blocks every keystroke from reaching anything. Your typing breaks system-wide. Do not do this.
-
-The hotkey choice itself was a three-step pivot:
-
-- **Alt+Space.** Conflicts with Windows window menu and Copilot. Killed.
-- **Ctrl+Shift+Space.** Conflicts with Excel's "Select entire worksheet" binding. Because the listener is observe-only, Excel ALSO receives the keypress and wipes your selection every time you invoke Clicky. Killed during the Excel demo.
-- **Ctrl+Alt+Space.** Three fingers, all on the left. Only clash is Claude Desktop, unbind it there. Shipped.
-
-A clean solution for Alt+Space exists: Win32 `RegisterHotKey` claims the combo at the OS level so other apps never see it. That is a Phase 1.5 drop-in replacement.
+- **The voice now streams.** It used to download each sentence's whole audio before playing a sample, over a new connection per sentence. Now one connection and one audio stream stay open, and audio plays as it arrives.
+- **The speech session is managed.** It opens in the background, reconnects after a dropped network, and closes after five quiet minutes.
+- **Sentence streaming.** The answer is read sentence by sentence while the model is still writing the rest.
 
 </details>
 
 <details>
-<summary><strong>4. Multi-provider TTS via progressive-disclosure UX.</strong> A 3-category dropdown (LLM/STT/TTS) instead of 6 password fields. ElevenLabsTTS mirrors Cartesia with 3 deliberate divergences.</summary>
+<summary><strong>One key, any model.</strong> Switching between Claude, GPT and Gemini is a dropdown, with one OpenRouter key or each provider's own.</summary>
 
-The naive way to add a second TTS provider is to add another field to the settings dialog. Three required keys becomes four. Then you add a second STT provider and it becomes five. By the time you have one option per category you are at six required password fields on a first-launch dialog. Nobody fills in six password boxes to try an app for the first time.
+Each provider takes either its own key or an OpenRouter key. The key decides the route: an OpenRouter key goes through OpenRouter with the model's namespaced name (`anthropic/claude-haiku-5-5`), and a direct key goes to the provider with the bare name (`claude-haiku-5-5`). Paste one OpenRouter key once and it's reused for every provider.
 
-What shipped instead: three category rows (LLM / STT / TTS), each with a dropdown for provider plus a single API key field for whichever provider is currently selected. Switch the dropdown, the field rebinds to that provider's keyring slot. One key visible at a time, vendor flexibility preserved.
+Two bugs this used to hide, both fixed: a direct Anthropic key sent the OpenRouter-style model name, which Anthropic's own API doesn't accept, and a key saved in the first-launch window was ignored until a restart.
 
-The `ElevenLabsTTS` class mirrors `CartesiaSonicTTS` Option B prefetch+playback architecture verbatim with three deliberate differences:
-
-- `_generate_response` calls `client.text_to_speech.stream()` which returns an `Iterator[bytes]` directly, instead of Cartesia's `generate(...)` which blocks for the full body and then exposes `.iter_bytes()`.
-- `_play_response` converts each int16 PCM chunk to float32 inline (`np.frombuffer(chunk, np.int16).astype(np.float32) / 32768.0`). Cartesia emits float32 directly so no conversion is needed.
-- `stop()` is 5-pronged instead of 6-pronged. The ElevenLabs SDK does not expose a `response.close()` method, so cancellation is just "set the cancel event, break the for-loop, let Python GC close the underlying httpx connection."
-
-Sample rate is per-provider (Cartesia 44.1kHz, ElevenLabs 22.05kHz) because ElevenLabs free tier only ships 22.05kHz PCM. Each subclass owns its own `sample_rate` attribute and constructs its own `sounddevice.OutputStream`. Switching providers in the dialog requires a Clicky restart but no code change.
+Older versions saved the default model into your settings. Clicky now tells a saved old default apart from a model you actually picked, so upgrading moves you to the new default without overriding a deliberate choice.
 
 </details>
 
 <details>
-<summary><strong>5. Single-instance mutex preventing the multi-PTT chaos.</strong> Observe-only hook means N processes equals N overlapping voices. Canonical Win32 named-mutex (Spotify/Slack/Discord pattern) acquired before QApplication.</summary>
+<summary><strong>A click-through overlay that's right on every monitor.</strong> One window per screen, Win32 flags applied after show().</summary>
 
-A user reported double-clicking the installed Start Menu shortcut and seeing three blue cursor icons stacked in the system tray. Worse, every Ctrl+Alt+Space press triggered three overlapping voice responses to the same question.
+The cursor has to stay on top, let clicks pass through to the app underneath, never steal focus, and land on the right pixel when a 4K monitor at 200% sits next to a 1080p laptop at 100%. One overlay stretched across the whole desktop renders at the wrong scale on at least one screen, because Qt 6 gives each screen its own logical coordinate space. So Clicky opens one window per monitor and routes the cursor to the right one ([`overlay.py`](overlay.py)).
 
-The cause: `pynput.Listener(suppress=False)` is observe-only, which means multiple Clicky processes coexist as independent `WH_KEYBOARD_LL` hooks. Windows broadcasts every keypress to every installed hook. N processes means N parallel STT → Claude → TTS pipelines.
-
-The fix is the canonical Win32 named-mutex pattern that Spotify, Slack, Discord, and Raycast all use: acquire a mutex named `Local\\ClickyWindows-SingleInstance-v1` BEFORE constructing the QApplication. First instance gets the mutex. Second instance sees `ERROR_ALREADY_EXISTS` (183), shows a `MessageBoxW` directing the user to the existing tray icon, and exits with `sys.exit(0)`.
-
-Three ctypes details that all matter:
-
-- `kernel32.CreateMutexW.restype = wintypes.HANDLE` to prevent x64 HANDLE truncation. Without explicit `restype`, ctypes defaults to `c_int` which is 32-bit, which silently corrupts 64-bit handles.
-- `bInitialOwner=False`. We want existence-as-a-flag, not ownership semantics. `True` would make the first instance pointlessly own a mutex it never releases.
-- `Local\\` namespace prefix. Per-logon-session, not per-machine. So two different Windows users on the same RDP host can each run their own Clicky.
-
-Implementation in [`app.py`](app.py).
+The click-through comes from Win32 layered-window flags set through `ctypes` (`WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`). They only stick if they're applied after `show()`, OR'd into the existing style rather than replacing it, and followed by `SetWindowPos(SWP_FRAMECHANGED)`. Miss any of the three and the overlay vanishes or eats your clicks.
 
 </details>
 
 <details>
-<summary><strong>6. Markdown memory and a drop-in knowledge folder.</strong> Two stores, plain-text .md per app, no vector DB. Auto-learned memory tail plus a user-uploadable KB at a second cache_control breakpoint.</summary>
+<summary><strong>A hotkey that doesn't break your typing, and only one Clicky at a time.</strong></summary>
 
-Two stores, both human-readable markdown, no vector DB.
+The hotkey listener is observe-only (`pynput.Listener(suppress=False)`): it sees the keys, and your app still gets them. Setting `suppress=True` would swallow every keystroke system-wide.
 
-**Auto-learned memory.** One `.md` file per app at `~/.clicky-windows/memory/<app>.exe.md`. Every interaction appends a structured block (timestamp, app, window title, transcript, response, pointer target). On the next interaction in the same app, the last 1500 characters get tail-truncated and injected into Claude's user-message text block. Not the system prompt. The transparency contract is "you can `cat EXCEL.EXE.md` and read everything Clicky knows about you."
+`Ctrl+Alt+Space` took three tries. `Alt+Space` clashes with the Windows window menu. `Ctrl+Shift+Space` is Excel's "select the whole sheet", and since Excel still receives the keys, it wiped your selection every time you asked a question. `Ctrl+Alt+Space` only clashes with Claude Desktop, which lets you unbind it.
 
-**User-uploadable KB.** One `.md` file per app at `~/Documents/Clicky Wiki/<app>.exe.md`. Up to 60K characters get injected as a second `cache_control` breakpoint in the system prompt, marked as "authoritative reference for this app." This is how you teach Clicky niche or company-internal software Claude has never seen.
+Observe-only has a catch: two Clicky processes both hear the hotkey and both answer. Clicky takes a Win32 named mutex (`Local\ClickyWindows-SingleInstance-v1`) before anything else starts, so a second copy just points you to the one in the tray and exits. `CreateMutexW` needs `restype = wintypes.HANDLE`, or ctypes truncates the 64-bit handle.
+
+</details>
+
+<details>
+<summary><strong>Memory and a knowledge base, in plain Markdown.</strong> No vector database. You can read and edit everything Clicky knows.</summary>
+
+- **Memory.** Every question appends a short note to `~/.clicky-windows/memory/<app>.exe.md`: what you asked, what Clicky said, where it pointed. The next question in that app gets the last 1,500 characters as context.
+- **Knowledge base.** Anything in `~/Documents/Clicky Wiki/<app>.exe.md`, up to 60,000 characters, is given to the model as the reference for that app. This is how Clicky learns niche or company-internal software.
 
 <p align="center">
   <img src="assets/screenshots/memory-graph.png" alt="Per-app memory files viewed as an Obsidian graph" width="560" />
   <br />
-  <em>The memory folder viewed in Obsidian. One node per app Clicky has been used in, each a plain-text Markdown file you can read or edit.</em>
+  <em>The memory folder in Obsidian: one file per app.</em>
 </p>
-
-The pattern is in the lineage of [Andrej Karpathy's LLM Wiki idea](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f). Deliberately simplified for runtime context injection rather than long-form synthesis.
 
 </details>
 
 ## FAQ
 
 <details>
-<summary><strong>Does Ollama work?</strong> Yes, via a two-stage grid locator. ~30-50px accuracy vs Claude's ~5px.</summary>
+<summary><strong>Can I run it with no keys at all?</strong> Yes. Every piece has a local option.</summary>
 
-Select **Ollama (local)** from the LLM dropdown in Settings. Default Ollama host is `http://localhost:11434`. Default vision model is `llava:7b`, which works on every Ollama version with vision support. Clicky also exposes a model picker in Settings so you can switch to `llama3.2-vision`, `qwen2.5-vl`, `llava-llama3`, or type any custom model you've pulled.
+- **Listening:** pick **Local (faster-whisper)** in Settings. Whisper on your CPU, about 150 MB downloaded once.
+- **Voice:** pick **Local (Kokoro)**. About 330 MB downloaded once, then it speaks offline.
+- **AI model:** pick **Ollama (local)**. Install [Ollama](https://ollama.com/download), then `ollama pull llava:7b`, the default. Any Ollama vision model can be picked in Settings.
 
-`llama3.2-vision` is more accurate than `llava:7b` but uses the `mllama` architecture which needs Ollama ≥0.4.x. If you pick it on an older Ollama, Clicky pops up a warning in the Settings dialog before saving. You can override and save anyway, or pick a compatible model.
-
-Local vision models can't return precise pixel coordinates directly, so Clicky uses a **two-stage grid** when pointing: it draws a numbered 12×8 grid on the screenshot, asks the model "which cell?", then zooms into that area with a 6×6 sub-grid and asks again. Accuracy is roughly ±30-50 px vs Claude's ~5 px. Plenty for buttons, menus, links, icons. Worse for tightly-packed UIs (small text, dense toolbars).
-
-**Prerequisites:**
-
-1. Install Ollama from [ollama.com/download](https://ollama.com/download)
-2. Pull a vision model: `ollama pull llava:7b` (smaller, ~4.5 GB) or `ollama pull llama3.2-vision` (more accurate, ~7.9 GB, needs Ollama ≥0.4.x)
-3. Make sure Ollama is running: `ollama serve` (usually auto-starts on install)
-4. In Clicky: open Settings → LLM dropdown → switch to **Ollama (local)** → optionally pick a different model from the model dropdown → save → restart Clicky
-
-The grid-locator pattern was directly inspired by [Bitshank-2338/clicky-windows](https://github.com/Bitshank-2338/clicky-windows) (MIT-licensed). Original implementation lives in their `ai/universal_locator.py`.
+Local is free and private, and listening and voice run on a normal CPU. The AI model is the hard part: it needs a strong GPU. On a laptop without one, a local vision model took over a minute per answer in my test and missed every target, so treat it as the private option, not the everyday one.
 
 </details>
 
 <details>
-<summary><strong>Can I run it fully offline with no API keys?</strong> Yes, with local STT, TTS, and vision.</summary>
+<summary><strong>Which AI model should I pick?</strong></summary>
 
-Every stage has a local option, so you can run Clicky with zero cloud keys:
-
-- **Speech-to-text:** pick **Local (faster-whisper)** in Settings. Runs Whisper on your CPU (`base.en`). Downloads once (~150 MB), then works offline.
-- **Text-to-speech:** pick **Local (Kokoro)**. Kokoro-82M via ONNX, no torch, no key. Voice files download once (~330 MB), then it speaks offline.
-- **Vision:** pick **Ollama (local)** for the LLM (see above).
-
-Honest trade-off: local is free and private, but slower and heavier than cloud, and the first reply each session pauses a few seconds while the models load into memory. On a weak laptop, cloud stays the better default. The local libraries are lazy-loaded, so staying on cloud costs you nothing.
-
-</details>
-
-<details>
-<summary><strong>Which LLM should I pick: Claude, GPT, Gemini, or Ollama?</strong></summary>
-
-- **Claude Sonnet 4.6 (default).** Pixel-accurate pointing (~5px). The out-of-the-box choice.
-- **OpenAI (GPT-5.4).** Pixel-accurate pointing, as good as Claude.
-- **Google Gemini (3.1 Pro).** Strong grounding, a little less pixel-precise than Claude.
-- **Ollama (local).** Free, runs on your machine, no API key. Slower and less precise, but private. See the question above.
-
-For the three cloud options you can paste either the provider's own key (from Anthropic, OpenAI, or Google AI Studio) or a single OpenRouter (`sk-or-`) key. One OpenRouter key covers all three, so if you have one you can switch between Claude, GPT, and Gemini without entering a new key each time. Switching provider is just a dropdown.
+All three hit every pointing target in the test above, so the difference is speed and reasoning. GPT-6.1 Sol is the default: with an OpenAI key it usually starts answering in about 2 seconds, and it got 5 of 6 reasoning checks right, like spotting the mistake in a worked solution. Claude Haiku 5.5 is the cheapest, about $0.0004 a question, and the fastest through an OpenRouter key, but got 3 of 6. Gemini 4 Argon got all 6 and is the slowest to start. One OpenRouter key works for all three.
 
 </details>
 
 ## Privacy
 
-Nothing leaves your machine, except the things you explicitly send to your own APIs.
-
-- API keys live in Windows Credential Manager via DPAPI per-user encryption. Better than plaintext `.env` but does not protect against malware running as your user account.
-- Screenshots, voice, transcripts, and model responses go directly from your machine to whichever providers you pick, using YOUR keys, with no proxy in between. The LLM provider gets the screenshot and transcript (Anthropic, OpenAI, or Google Gemini), AssemblyAI gets the audio to transcribe, and Cartesia or ElevenLabs speaks the reply. If your key is an OpenRouter key, that LLM call routes through OpenRouter to the model. No logging server, nothing routes through anyone else. Pick the local providers (Ollama, faster-whisper, Kokoro) and that data never leaves your machine at all.
-- Per-app memory and the KB folder live on your local disk in plain markdown. You can read them, edit them, delete them.
-
-This is the BYOK model from day 1, by deliberate contrast with the upstream Clicky which uses a Cloudflare Worker proxy that holds the API keys server-side.
+- Your screen, your voice and Clicky's notes for the current app go straight from your PC to the providers you pick, on your own keys. With an OpenRouter key, the AI call goes through OpenRouter. Pick the local options and none of it leaves your PC.
+- Keys are stored with Windows Credential Manager, encrypted for your Windows account. That protects them at rest, not from malware running as you.
+- Memory and the knowledge base are plain Markdown on your disk. Read them, edit them, delete them.
+- Each question also writes a short text log to `~/.clicky-windows/debug/`: what you asked, what Clicky answered and how long each step took. Screenshots aren't kept there unless you set `DEBUG_SCREENSHOTS=on`.
 
 ## Acknowledgments
 
-Built on top of the original [Clicky by Farza Majeed](https://github.com/farzaa/clicky), which is the macOS version this is a Windows port of. The memory pattern is in the lineage of [Andrej Karpathy's LLM Wiki idea](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f), simplified to per-app files for the runtime context-injection use case rather than long-form synthesis.
+Built on [Clicky by Farza Majeed](https://github.com/farzaa/clicky), the original for macOS.
 
 ## License and support
 
-[MIT](LICENSE). Personal project. PRs welcome but I make no SLA on review timing. If you find a bug, please file an issue and attach the contents of `~/.clicky-windows/debug/` from a recent interaction so I can see what happened.
+[MIT](LICENSE). A personal project, PRs welcome. Found a bug? Open an issue and attach `interaction.log` from the newest folder in `~/.clicky-windows/debug/`. It's a text log of timings, what you asked and what Clicky answered.

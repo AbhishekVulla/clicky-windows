@@ -1,17 +1,14 @@
 ; Inno Setup script for Clicky Windows.
 ;
 ; Wraps the PyInstaller --onedir output (dist/Clicky/) into a single
-; Setup.exe for distribution via GitHub Releases.
-;
-; Pattern cribbed from doug-101/TreeLine v3.2.1 (PyQt6 + Inno Setup
-; reference). Per-user install — no UAC prompt, lower friction for
-; portfolio-tier users on locked-down corporate machines.
+; Setup.exe for GitHub Releases. Installs per user, so there is no admin
+; prompt, which also lets it install on locked-down work machines.
 ;
 ; Build:
 ;     iscc installer\clicky.iss
 ;
-; Output: installer\Output\Clicky-Windows-Setup-v0.4.1.exe (~125-170 MB
-; after Inno's LZMA2 compresses the onedir bundle, now with the full local stack).
+; Output: installer\Output\Clicky-Windows-Setup.exe (about 165 MB after
+; LZMA2 compression, including the optional local speech models' runtime).
 ;
 ; Inno Setup 6+ required: https://jrsoftware.org/isdl.php (free).
 
@@ -29,20 +26,17 @@ AppPublisher={#AppPublisher}
 AppPublisherURL={#AppURL}
 AppSupportURL={#AppURL}
 AppUpdatesURL={#AppURL}/releases
-; Per-user install — no admin/UAC required. {userpf} = %LOCALAPPDATA%\Programs
+; Per-user install, no admin prompt. {userpf} = %LOCALAPPDATA%\Programs
 DefaultDirName={userpf}\{#AppName}
 DefaultGroupName={#AppName}
-; PrivilegesRequired=lowest avoids the elevation prompt; auto means
-; per-user-or-system based on whether the user is admin (we want
-; per-user always for portfolio scope).
+; lowest never asks for elevation; auto would install system-wide for
+; admins, which this app has no need for.
 PrivilegesRequired=lowest
 OutputDir=Output
-; Version-free filename ON PURPOSE (2026-07-21). GitHub serves
-; /releases/latest/download/<asset-name>, so a stable name gives a permanent
-; one-click download link for the README button, the YouTube description, and
-; comment replies. A versioned name breaks that link on every release. The
-; version is still on the release page, in the installer metadata, and in
-; Add/Remove Programs, so nothing is actually lost.
+; No version in the filename: GitHub serves /releases/latest/download/<name>,
+; so a stable name keeps the README's download link working across releases.
+; The version still shows on the release page, in the installer metadata and
+; in Add or Remove Programs.
 OutputBaseFilename=Clicky-Windows-Setup
 Compression=lzma2
 SolidCompression=yes
@@ -77,8 +71,6 @@ Name: "{userdesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: deskto
 Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
-; Don't delete user data on uninstall — preserve memory + KB folders.
-; If a user wants a clean wipe, they delete ~/.clicky-windows/ +
-; ~/Documents/Clicky Wiki/ manually. This matches the "transparency
-; contract" UX: their data is theirs.
+; Uninstall keeps the user's memory and knowledge-base folders. For a clean
+; wipe, delete ~/.clicky-windows/ and ~/Documents/Clicky Wiki/ by hand.
 Type: filesandordirs; Name: "{app}\_internal\__pycache__"

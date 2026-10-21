@@ -1,11 +1,11 @@
-"""GPT-Realtime speech-to-speech session for Clicky (v0.3.0).
+"""GPT-Realtime speech-to-speech session for Clicky.
 
 This is a SEPARATE pipeline from the STT -> AIClient -> TTS chain. GPT-Realtime
 collapses all three into one WebSocket: audio streams in, the model reasons
 (GPT-5-class) on the audio plus a screenshot, and audio streams back, all in
 near-real-time. There is no intermediate text-with-[POINT] tag, so this can't
-be an AIClient subclass — it's its own thing, selected via
-LLM_PROVIDER='openai-realtime'. Every other provider is untouched.
+be an AIClient subclass: it's its own pipeline, selected via
+LLM_PROVIDER='openai-realtime'.
 
 Interaction model (push-to-talk, to avoid barge-in/VAD complexity):
   press  -> start_turn(): open mic, append PCM16 to the input audio buffer
@@ -13,7 +13,7 @@ Interaction model (push-to-talk, to avoid barge-in/VAD complexity):
             screenshot as an image input, request a response. The model
             streams spoken audio back (played live) and emits a point_at
             function call with the target. The rough coordinate is then
-            refined by the grid-locator (same as GPT-4o).
+            refined by the caller.
 
 Audio format: 24 kHz PCM16 mono both directions (Realtime API native).
 Input is appended as base64. Output deltas arrive as base64 PCM16, decoded to
@@ -25,7 +25,7 @@ callbacks. The caller (app.py) marshals to the Qt main thread via pyqtSignal.
 
 Testability: the WebSocket connection, the mic input stream, and the speaker
 output stream are all injectable (factory args), so unit tests run with mocks
-and no real audio device or network — mirrors stt.py's DI pattern.
+and no real audio device or network (mirrors stt.py's DI pattern).
 """
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ REALTIME_CHUNK_FRAMES = 1024
 
 
 # The point_at tool: the model calls this with its best guess of where to point.
-# Rough coords are fine — the grid-locator refines them downstream.
+# Rough coords are fine: the caller refines them downstream.
 _POINT_AT_TOOL = {
     "type": "function",
     "name": "point_at",
@@ -72,7 +72,7 @@ _POINT_AT_TOOL = {
 REALTIME_VOICE = "alloy"
 
 _REALTIME_INSTRUCTIONS = (
-    "You are Clicky, a friendly screen-aware buddy that helps people use "
+    "You are Clicky, a friendly screen-aware companion that helps people use "
     "software by talking to them and pointing at where to click. ALWAYS speak "
     "a short spoken reply out loud, one or two sentences — speak first, every "
     "time. When the user asks where something is or how to do something on "
@@ -120,7 +120,7 @@ class RealtimeSession:
             model: realtime model id (gpt-realtime-2 default).
             on_coordinate: called (x, y, label) when the model emits a point_at
                 function call. Coordinates are in the screenshot's pixel space
-                (rough — caller refines via grid-locator).
+                (rough, the caller refines them).
             on_audio_start: called once when the first audio delta of a response
                 begins playing (for the SPEAKING overlay state).
             on_transcript: called with the model's spoken-text transcript chunks.
@@ -190,10 +190,9 @@ class RealtimeSession:
                 "instructions": _REALTIME_INSTRUCTIONS,
                 "audio": {
                     "input": {"format": {"type": "audio/pcm", "rate": REALTIME_SAMPLE_RATE}},
-                    # voice is REQUIRED to get spoken output — without it the
-                    # model only returns the function call, no audio (verified
-                    # live 2026-06-23). tool_choice=auto lets it speak AND point
-                    # in one turn.
+                    # voice is REQUIRED to get spoken output: without it the
+                    # model only returns the function call, no audio.
+                    # tool_choice=auto lets it speak AND point in one turn.
                     "output": {
                         "format": {"type": "audio/pcm", "rate": REALTIME_SAMPLE_RATE},
                         "voice": REALTIME_VOICE,
@@ -258,7 +257,7 @@ class RealtimeSession:
 
     def stop(self) -> None:
         """Abort the current response's audio playback instantly + reset turn
-        state. Mirrors tts.stop() — used on a second hotkey press / cancel."""
+        state. Mirrors tts.stop(), used on a second hotkey press / cancel."""
         if self._conn is not None:
             try:
                 self._conn.send({"type": "response.cancel"})
@@ -319,7 +318,7 @@ class RealtimeSession:
                     break
                 self._handle_event(event)
         except Exception:
-            # Connection closed / errored — loop ends, app keeps running.
+            # Connection closed / errored: loop ends, app keeps running.
             pass
 
     def _handle_event(self, event) -> None:

@@ -1,6 +1,6 @@
-"""Unit tests for config.resolve_api_key — the env→keyring resolver.
+"""Unit tests for config.resolve_api_key, the env→keyring resolver.
 
-The function is the load-bearing piece of Sprint 3's BYOK migration:
+The function carries the BYOK keyring migration:
 on launch with .env present, keys auto-write to keyring as backup;
 on launch without .env, keys read from keyring transparently.
 
@@ -20,7 +20,7 @@ def fake_keyring(monkeypatch):
     """In-memory dict-backed mock for keyring's two functions.
 
     Yields the dict so tests can pre-populate or assert on what got
-    written. Mock is scoped to this test only — module-level keyring
+    written. Mock is scoped to this test only: module-level keyring
     import in config.py is patched on the keyring module itself.
     """
     store: dict[tuple[str, str], str] = {}
@@ -38,7 +38,7 @@ def fake_keyring(monkeypatch):
 
 
 class TestResolveApiKey:
-    """resolve_api_key returns env first, keyring second, None last —
+    """resolve_api_key returns env first, keyring second, None last,
     and on env-present, ALSO migrates the value into keyring."""
 
     def test_returns_env_value_when_present(self, monkeypatch, fake_keyring):
@@ -81,7 +81,7 @@ class TestResolveApiKey:
         """If keyring backend is unavailable (vault locked, no service
         registered, etc.), set_password raising must NOT prevent the
         env-var path from returning the user's value. The user has a
-        valid .env — credential-store glitches shouldn't fail startup."""
+        valid .env, so credential-store glitches shouldn't fail startup."""
         monkeypatch.setenv(KEY, "sk-env-survives")
 
         def boom(*_args, **_kwargs):
@@ -108,7 +108,7 @@ class TestResolveApiKey:
         assert resolve_api_key(KEY) is None
 
 
-# --- Sprint 4: resolve_setting (env→keyring→default for non-secret config) ---
+# --- resolve_setting (env→keyring→default for non-secret config) ---
 
 
 class TestResolveSetting:
@@ -144,7 +144,7 @@ class TestResolveSetting:
         assert resolve_setting("TTS_PROVIDER", default="cartesia") == "cartesia"
 
     def test_keyring_failures_do_not_block_env_path(self, monkeypatch):
-        """Keyring backend errors swallowed — env value still returned + default
+        """Keyring backend errors swallowed: env value still returned + default
         still works as final fallback."""
         monkeypatch.setenv("TTS_PROVIDER", "elevenlabs")
 

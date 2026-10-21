@@ -1,10 +1,9 @@
 """Two-stage grid-locator for pixel-pointing with weak vision LLMs.
 
-Used by OllamaClient (and any future vision LLM that can't reliably return
-pixel coordinates) to derive a (x, y) pointing target from a screenshot
-plus a natural-language query.
+Used by OllamaClient, whose local models can't return pixel coordinates,
+to derive an (x, y) pointing target from a screenshot plus the question.
 
-Algorithm (per Bitshank-2338/clicky-windows MIT, ai/universal_locator.py):
+Algorithm from Bitshank-2338/clicky-windows (MIT), ai/universal_locator.py:
 
     Stage 1 (coarse, 12x8 = 96 cells):
         - Draw a numbered red grid overlay on the screenshot.
@@ -18,26 +17,19 @@ Algorithm (per Bitshank-2338/clicky-windows MIT, ai/universal_locator.py):
         - LLM picks 1-36 within the crop.
 
     Final: Map the centre of the chosen sub-cell back to original screen
-    pixels, then to logical Qt coordinates.
+    pixels, then divide by dpi_scale.
 
-Accuracy: ~25-50px on a 1080p screen. Adequate for buttons, menu items,
-links, icons. Less precise than Claude's native [POINT:x,y] tag (~5px)
-but works with ANY vision-capable model including local Ollama (llama3.2-
-vision, qwen2.5-vl, llava).
-
-The LLM doesn't need to return pixel coordinates — it just picks a number
-1-96 (then 1-36) from a labeled grid. Even weak models that fail at raw
-pixel-grounding can do this reliably.
+The model never returns pixel coordinates: it picks a number 1-96 (then
+1-36) from a labeled grid, which asks far less of a small vision model.
 
 Public API:
     locate_via_grid(llm_client, screenshot_jpeg_b64, original_size,
                     physical_size, physical_origin, dpi_scale, query)
         -> tuple[int, int] | None
 
-Returns coordinates in LOGICAL screen pixels (same space as QCursor.pos()),
-ready to feed directly into the overlay pointer. Returns None when the
-query is conceptual (no UI element to point at) or the LLM couldn't pick
-a cell.
+Returns physical screen pixels divided by dpi_scale (app.py passes 1.0 and
+gets physical pixels). Returns None when the question is conceptual (no UI
+element to point at) or the model couldn't pick a cell.
 """
 
 from __future__ import annotations
@@ -51,7 +43,7 @@ from typing import Optional
 from PIL import Image, ImageDraw, ImageFont
 
 
-# --- Tunables (locked, mirror Bitshank-2338) ----------------------------------
+# --- Tunables -------------------------------------------------------------------
 
 STAGE1_COLS = 12
 STAGE1_ROWS = 8
@@ -150,7 +142,7 @@ def _parse_cell_number(text: str, max_n: int) -> Optional[int]:
         1. Try parsing first JSON-shaped {"cell": N} object in the text.
         2. Otherwise scan integers in order, return first 0..max_n match.
     """
-    # JSON-shaped answer (preferred — system prompt asks for this).
+    # JSON-shaped answer (preferred: system prompt asks for this).
     json_match = re.search(r"\{[^{}]*\}", text, flags=re.DOTALL)
     if json_match:
         try:
@@ -193,7 +185,7 @@ def _ask_grid_pick(
     which returns a context manager with .text_deltas() generator.
 
     We accumulate the streamed reply and run _parse_cell_number on it. We
-    short-circuit reading the stream once the reply exceeds 400 chars — the
+    short-circuit reading the stream once the reply exceeds 400 chars: the
     expected answer is a tiny JSON object, no need to consume more.
 
     Returns:
@@ -206,9 +198,9 @@ def _ask_grid_pick(
             emits a diagnostic message DISTINGUISHING transport failures
             (network error, image decoding, llm exception) from model
             uncertainty (unparseable reply or out-of-range cell number).
-            Without this, all None returns looked the same to the caller —
-            a real bug (Ollama down) was indistinguishable from "model
-            said cell 0". Caught by codex adversarial review 2026-06-05.
+            Without it, every None return looks the same to the caller, so
+            a real failure (Ollama down) is indistinguishable from "model
+            said cell 0".
     """
     prompt = (
         f"You are looking at a screenshot with a red numbered grid overlay. "
@@ -230,7 +222,7 @@ def _ask_grid_pick(
         if debug_log is not None:
             debug_log(
                 f"GRID-LOCATOR: image-decode failure "
-                f"({type(exc).__name__}: {exc}) — returning None"
+                f"({type(exc).__name__}: {exc}), returning None"
             )
         return None
 
@@ -251,7 +243,7 @@ def _ask_grid_pick(
         if debug_log is not None:
             debug_log(
                 f"GRID-LOCATOR: LLM call failed "
-                f"({type(exc).__name__}: {exc}) — transport or model error, "
+                f"({type(exc).__name__}: {exc}): transport or model error, "
                 f"returning None"
             )
         return None
@@ -263,7 +255,7 @@ def _ask_grid_pick(
         reply_preview = "".join(chunks)[:200]
         debug_log(
             f"GRID-LOCATOR: LLM replied but reply unparseable "
-            f"(no cell number 0-{max_n} found in: {reply_preview!r}) — "
+            f"(no cell number 0-{max_n} found in: {reply_preview!r}): "
             f"returning None"
         )
     return parsed

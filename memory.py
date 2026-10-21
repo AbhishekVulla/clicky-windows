@@ -1,48 +1,26 @@
-"""Clicky Windows persistent memory — Karpathy-style markdown + SQLite index.
+"""Clicky Windows persistent memory: per-app markdown files + SQLite index.
 
-This module is the **Phase 1 differentiator**. Every competitor (Clicky/Clippi/
-tekram/danpeg/GhostDesk) is a stateless Claude wrapper — upstream Issue #30
-on farzaa/clicky says so explicitly: *"stateless Claude wrapper: no memory
-between sessions, no tools, no persistent context."* This module is the whole
-reason Clicky Windows is more than a port — it gives Claude a human-readable
-long-term memory per Windows app.
+Gives Claude a human-readable long-term memory per Windows app.
 
-Design philosophy (Karpathy LLM-KB tweet, cited in DECISIONS.md 2026-04-11
-"Karpathy-style markdown memory + SQLite index hybrid"):
-
-    "I thought I had to reach for fancy RAG, but the LLM has been pretty
-     good about auto-maintaining index files and brief summaries of all the
-     documents and it reads all the important related data fairly easily
-     at this small scale."
-
-So: no vector DB, no embeddings, no RAG. Just plain markdown files
-(`~/.clicky-windows/memory/<app>.md`) that the LLM writes and reads directly,
+No vector DB, no embeddings, no RAG. Just plain markdown files
+(`~/.clicky-windows/memory/<app>.md`) that the LLM reads directly,
 plus a tiny SQLite index (`~/.clicky-windows/index.db`) for fast
 "how many times has this user used this app" lookups without re-reading every
 markdown file. The markdown files are the source of truth; SQLite is a
 denormalized cache. Humans can `cat <app>.md` in a terminal and understand
-exactly what Clicky remembers about them — transparency is the UX contract.
+exactly what Clicky remembers about them: transparency is the UX contract.
 
 Responsibility boundary:
 - THIS MODULE owns the read/write API over the markdown files + SQLite index.
   It does NOT decide when to record, what to inject into Claude's prompt, or
   which app is currently active.
-- app.py (Step 7) calls `recall()` before sending a Claude request, and
+- app.py calls `recall()` before sending a Claude request, and
   `record()` after receiving the response. app.py is also the single-threaded
-  writer (Qt main thread) — memory.py has no Qt deps and no internal locking
+  writer (Qt main thread), and memory.py has no Qt deps and no internal locking
   beyond SQLite's built-in WAL mode.
-- tools/lint_memory.py (Step 7.5) uses `list_known_apps()` to iterate over all
-  known apps for the weekly insights pass.
 
-Top-to-bottom order (so `py -3.13 -m memory` works — `__main__` MUST be LAST
-per feedback_main_block_ordering.md):
-    1. Module docstring
-    2. Imports
-    3. Constants (Windows reserved chars, header template)
-    4. Pure helper functions (_sanitize_app_name, _escape_markdown_fences,
-       _escape_single_line)
-    5. MemoryStore class
-    6. __main__ manual-verification block
+The `__main__` block (manual verification) MUST stay last so
+`py -3.13 -m memory` works.
 """
 from __future__ import annotations
 
@@ -64,8 +42,8 @@ _HEADER_TRANSPARENCY_LINE = (
     "_(This file is human-readable. Delete it to reset memory for this app.\n"
     "  Clicky reads the tail of this file to remember past interactions.)_"
 )
-"""The italic transparency line in every app's memory file header — the
-Karpathy "human-readable, user can delete to reset" promise that makes
+"""The italic transparency line in every app's memory file header: the
+"human-readable, user can delete to reset" promise that makes
 persistent memory feel benign instead of creepy. Stored as a constant so the
 display header can be assembled via f-string (avoids .format() injection
 risk if an app name contains literal ``{`` or ``}`` characters)."""
@@ -112,10 +90,9 @@ def _escape_markdown_fences(text: str) -> str:
     """Replace triple backticks with triple single-quotes.
 
     Claude's responses can contain ```python code fences; writing those
-    verbatim into our markdown blocks would break the block shape when
-    tools/lint_memory.py parses them in Step 7.5. Swap to ``'''`` — plain
-    ASCII, human-readable, impossible to confuse with a real fence.
-    Zero-width-space insertion was rejected as too clever.
+    verbatim into our markdown blocks would break the block shape. Swap to
+    ``'''``: plain ASCII, human-readable, impossible to confuse with a real
+    fence.
     """
     return text.replace("```", "'''")
 
@@ -125,10 +102,10 @@ def _escape_single_line(text: str) -> str:
 
     User questions, window titles, and the display name in the header are
     all rendered on one line each. Embedded newlines would break the
-    "## heading\\nfield\\nfield\\nfield" block shape that lint_memory.py
-    expects. Replace ``\\n`` with the visible unicode ``↵`` marker (so the
-    user can still see the original newline boundary when they cat the
-    file) and strip ``\\r`` entirely. Also applies fence escaping.
+    "## heading\\nfield\\nfield\\nfield" block shape. Replace ``\\n`` with
+    the visible unicode ``↵`` marker (so the user can still see the original
+    newline boundary when they cat the file) and strip ``\\r`` entirely.
+    Also applies fence escaping.
     """
     return _escape_markdown_fences(text).replace("\n", " ↵ ").replace("\r", "")
 
@@ -139,21 +116,19 @@ class MemoryStore:
     """Per-app persistent memory: one markdown file per Windows executable
     plus a SQLite index for fast counters.
 
-    Construct once at app startup (via ``app.py`` Step 7). The constructor
+    Construct once at app startup (via ``app.py``). The constructor
     ensures the SQLite schema exists via ``CREATE TABLE IF NOT EXISTS`` +
     ``CREATE INDEX IF NOT EXISTS`` so subsequent constructions are
     idempotent. The memory directory itself is created lazily on the first
-    ``record()`` call — if the user never triggers an interaction, we
+    ``record()`` call: if the user never triggers an interaction, we
     don't pollute their home directory with empty folders.
 
     **Thread safety:** each method opens its own short-lived SQLite
     connection and closes it before returning. SQLite's WAL journal mode
-    handles concurrent reads cleanly; Phase 1 has ONE writer (the Qt main
+    handles concurrent reads cleanly; there is ONE writer (the Qt main
     thread via app.py) so we don't need explicit in-process locking.
-    Phase 2 proactive mode may add a background writer; that ceremony
-    belongs in the Step 7 app.py plan, not here.
 
-    **Error handling:** this module trusts its inputs — callers pass
+    **Error handling:** this module trusts its inputs: callers pass
     validated app names and non-null strings. The only ``ValueError`` we
     raise is from ``_sanitize_app_name`` on an empty/whitespace-only name,
     which indicates a real bug in the caller (app.py) and should surface
@@ -167,10 +142,10 @@ class MemoryStore:
     ) -> None:
         """Ensure the SQLite parent directory exists and the schema is live.
 
-        Does NOT create ``memory_dir`` — that's lazy, on first ``record()``.
-        Does NOT open a persistent SQLite connection — each method opens
-        its own so Phase 2 proactive mode (multi-thread reads) doesn't
-        need lock coordination with the Qt main thread.
+        Does NOT create ``memory_dir``: that's lazy, on first ``record()``.
+        Does NOT open a persistent SQLite connection: each method opens
+        its own, so reads from other threads don't need lock coordination
+        with the Qt main thread.
 
         Args:
             memory_dir: directory where per-app markdown files live.
@@ -200,9 +175,7 @@ class MemoryStore:
         """Create the ``apps`` table + index + enable WAL mode. Idempotent.
 
         ``CREATE TABLE IF NOT EXISTS`` means this is safe to call every
-        session; no migration logic needed for Phase 1. Phase 2 schema
-        changes will use ``ALTER TABLE ... ADD COLUMN`` which is also
-        idempotent against modern SQLite.
+        session; no migration logic needed.
         """
         conn = self._connect()
         try:
@@ -242,19 +215,16 @@ class MemoryStore:
         (or the whole file if smaller). Returns ``''`` if the file does not
         exist. Python's ``str`` slicing is codepoint-indexed (not byte-
         indexed), so ``text[-max_chars:]`` can never split a UTF-8
-        character mid-sequence — no manual safety needed.
+        character mid-sequence. No manual safety needed.
 
-        This is Option 1 of the recall-shape tradeoff: a dumb tail read,
-        no filtering, no relevance scoring. The LLM sees raw history and
-        decides what matters. Phase 2 may add a smarter recall if 5+ real
-        sessions reveal that raw-tail is insufficient; that's a Karpathy
-        "wait for the data" decision.
+        A deliberately dumb tail read: no filtering, no relevance scoring.
+        The LLM sees raw history and decides what matters.
 
         Args:
             app_name: display form, will be sanitized internally. Safe to
                 pass the exact string from ``GetForegroundWindow()``.
             max_chars: hard cap on returned string length. Defaults to
-                ``config.MEMORY_RECALL_MAX_CHARS`` (3000, ~750 tokens).
+                ``config.MEMORY_RECALL_MAX_CHARS``.
 
         Returns:
             The markdown content (up to ``max_chars`` characters, from the
@@ -284,14 +254,14 @@ class MemoryStore:
     ) -> None:
         """Append an interaction to the app's markdown and update SQLite.
 
-        Called by ``app.py`` Step 7 immediately after a Claude response
+        Called by ``app.py`` immediately after a Claude response
         lands + the overlay animation completes. Creates the markdown file
         + memory directory lazily on the first call for each app. The
         markdown header is rewritten on every call so ``Interactions:`` is
         always current.
 
         All timestamps within a single ``record()`` call share the same
-        ``datetime.now()`` value — this prevents a micro-skew between the
+        ``datetime.now()`` value. This prevents a micro-skew between the
         markdown header and the SQLite ``last_seen`` column that would
         otherwise make sort-by-last_seen non-deterministic in rapid-fire
         test scenarios.
@@ -308,8 +278,9 @@ class MemoryStore:
                 Rendered in the ``Response:`` paragraph.
             pointer_targets: list of (x, y) tuples in physical pixels for
                 the overlay pointer animation. Empty list means Claude
-                returned text-only (``"no specific element"``) — rendered
-                as ``(none — text-only response)`` for block-shape stability.
+                returned text-only (``"no specific element"``), rendered
+                as a "none, text-only response" placeholder for block-shape
+                stability.
         """
         sanitized = _sanitize_app_name(app_name)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -400,10 +371,9 @@ class MemoryStore:
     def list_known_apps(self) -> list[dict]:
         """Return every app with a SQLite row, sorted most-recent-first.
 
-        Used by tools/lint_memory.py (Step 7.5) and future Phase 2
-        proactive mode. Each dict has keys ``{app_name, first_seen,
-        last_seen, interaction_count, md_path}``. Returns ``[]`` if no
-        apps have been recorded yet.
+        Each dict has keys ``{app_name, first_seen, last_seen,
+        interaction_count, md_path}``. Returns ``[]`` if no apps have been
+        recorded yet.
         """
         conn = self._connect()
         try:
@@ -430,14 +400,14 @@ if __name__ == "__main__":
     import sys as _sys
 
     # Windows consoles default to cp1252 which cannot encode common Unicode
-    # characters that land in Claude responses (→, —, em-quotes, etc.).
+    # characters that land in Claude responses (arrows, em dashes, curly
+    # quotes, etc.).
     # Reconfigure stdout to UTF-8 with replacement fallback so the manual
     # gate prints cleanly even when the .md content contains arrows.
-    # app.py (Step 7) will need the same reconfigure at its own entry point.
     try:
         _sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except (AttributeError, OSError):
-        pass  # older Python or unusual stdout — best-effort
+        pass  # older Python or unusual stdout, best-effort
 
     _TEST_APP = "CLICKY_GATE_TEST.EXE"
 

@@ -1,7 +1,8 @@
 """Per-interaction debug logging for Clicky Windows.
 
 Each PTT interaction gets its own folder under ~/.clicky-windows/debug/
-containing a timestamped log file + the screenshot Claude saw.
+containing a timestamped log file, plus the screenshot the model saw when
+DEBUG_SCREENSHOTS is on.
 
 Usage:
     session = DebugSession.start("EXCEL.EXE", "Book1 - Excel")
@@ -16,10 +17,11 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from config import MEMORY_DIR
+from config import DEBUG_SCREENSHOTS, MEMORY_DIR
 
 
 _DEBUG_DIR = Path(MEMORY_DIR).parent / "debug"
+_SAVE_SCREENSHOTS = DEBUG_SCREENSHOTS
 
 
 class DebugSession:
@@ -58,7 +60,10 @@ class DebugSession:
         filename: str = "screenshot.jpg",
         coordinate: tuple[int, int] | None = None,
     ) -> None:
-        """Save screenshot, optionally drawing a red marker at Claude's coordinate."""
+        """Save screenshot, optionally drawing a red marker at the model's
+        coordinate. Does nothing unless DEBUG_SCREENSHOTS is on."""
+        if not _SAVE_SCREENSHOTS:
+            return
         try:
             img = pil_image.copy()
             if coordinate:

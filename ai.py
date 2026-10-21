@@ -1,27 +1,18 @@
 """Clicky Windows vision+LLM layer.
 
-AIClient abstract base + AnthropicClient concrete implementation using
-plain vision streaming with a [POINT:x,y:label] coordinate tag regex parser.
-Matches Clicky's actual shipping path: ClaudeAPI.analyzeImageStreaming +
-CompanionManager.parsePointingCoordinates (verified line-by-line via gh api
-on 2026-04-12). See DECISIONS.md 2026-04-12 (evening 3) for the research pass.
+Every provider streams a spoken answer about the screenshots and ends it with
+a [POINT:x,y:label] tag, parsed here. This follows Clicky's shipping path:
+ClaudeAPI.analyzeImageStreaming + CompanionManager.parsePointingCoordinates.
+
+Clients: AnthropicClient (Claude), GeminiClient (the OpenAI-compatible base,
+used for Gemini and OpenRouter), OpenAIVisionClient (OpenAI) and OllamaClient
+(local). create_ai_client picks one from the model ID and the key's prefix.
 
 Responsibility boundary:
-- THIS MODULE lives in Space C (Claude's declared resolution). It returns
-  coordinates unclamped in that space.
+- THIS MODULE lives in Space C (the screenshot's declared resolution). It
+  returns coordinates unclamped in that space.
 - capture.unscale_claude_coords() maps Space C -> Space A (physical pixels).
 - app.py owns threading and calls this module from worker threads.
-
-Top-to-bottom order (so `python -m ai` works):
-    1. Module docstring
-    2. Imports
-    3. Constants (_CLICKY_SYSTEM_PROMPT, _POINT_TAG_RE, _CLICKY_MAX_TOKENS)
-    4. PointParseResult dataclass
-    5. Pure functions (parse_point_tag, image_to_base64_jpeg, _get,
-       parse_response_text)
-    6. AIClient abstract base class
-    7. AnthropicClient concrete class
-    8. __main__ block for manual live-API verification
 """
 from __future__ import annotations
 
@@ -34,6 +25,8 @@ from typing import Iterator
 
 import httpx
 from anthropic import Anthropic
+from anthropic import DefaultHttpxClient as AnthropicHttpxClient
+from openai import DefaultHttpxClient as OpenAIHttpxClient
 from openai import OpenAI
 from PIL import Image
 
@@ -41,7 +34,7 @@ from PIL import Image
 # --- Constants ----------------------------------------------------------------
 
 _CLICKY_SYSTEM_PROMPT = """\
-you're clicky, a friendly always-on companion that lives in the user's menu bar. the user just spoke to you via push-to-talk and you can see their screen(s). your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
+you're clicky, a friendly always-on companion that lives in the user's system tray on windows. the user just spoke to you via push-to-talk and you can see their screen(s). your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
 
 rules:
 - default to one or two sentences. be direct and dense. BUT if the user asks you to explain more, go deeper, or elaborate, then go all out — give a thorough, detailed explanation with no length limit.
@@ -55,6 +48,7 @@ rules:
 - don't read out code verbatim. describe what the code does or what needs to change conversationally.
 - focus on giving a thorough, useful explanation. don't end with simple yes/no questions like "want me to explain more?" or "should i show you?" — those are dead ends that force the user to just say yes.
 - instead, when it fits naturally, end by planting a seed — mention something bigger or more ambitious they could try, a related concept that goes deeper, or a next-level technique that builds on what you just explained. make it something worth coming back for, not a question they'd just nod to. it's okay to not end with anything extra if the answer is complete on its own.
+- the user is on windows. name keyboard shortcuts with windows keys (control, alt, shift, the windows key), never command or option.
 - if you receive multiple screen images, the one labeled "primary focus" is where the cursor is — prioritize that one but reference others if relevant.
 
 element pointing:
@@ -69,14 +63,14 @@ format: [POINT:x,y:label] where x,y are integer pixel coordinates in the screens
 if pointing wouldn't help, append [POINT:none].
 
 examples:
-- user asks how to color grade in final cut: "you'll want to open the color inspector — it's right up in the top right area of the toolbar. click that and you'll get all the color wheels and curves. [POINT:1100,42:color inspector]"
+- user asks how to keep the header row visible in excel: "open the view tab up top, then hit freeze panes and pick freeze top row. [POINT:310,62:view tab]"
 - user asks what html is: "html stands for hypertext markup language, it's basically the skeleton of every web page. curious how it connects to the css you're looking at? [POINT:none]"
-- user asks how to commit in xcode: "see that source control menu up top? click that and hit commit, or you can use command option c as a shortcut. [POINT:285,11:source control]"
+- user asks how to commit in vs code: "see the source control icon in the left sidebar? click it, type a message, and press control enter to commit. [POINT:24,148:source control]"
 - element is on screen 2 (not where cursor is): "that's over on your other monitor — see the terminal window? [POINT:400,300:terminal:screen2]"\
 """
 
 _CLICKY_ANNOTATION_SYSTEM_PROMPT = """\
-you're clicky, a patient tutor that teaches by drawing on the user's screen. the user just spoke to you via push-to-talk and you can see their screen(s). your reply is spoken aloud via text-to-speech, so write the way you'd actually talk — all lowercase, casual, warm, one or two short sentences (longer only if they ask you to go deeper). write for the ear: no lists, no markdown, no symbols that sound weird read aloud.
+you're clicky, a patient tutor that teaches by drawing on the user's screen on windows. the user just spoke to you via push-to-talk and you can see their screen(s). your reply is spoken aloud via text-to-speech, so write the way you'd actually talk — all lowercase, casual, warm, one or two short sentences (longer only if they ask you to go deeper). write for the ear: no lists, no markdown, no symbols that sound weird read aloud.
 
 instead of only pointing with the cursor, you can DRAW on the screen to teach — circle the exact thing you mean, draw an arrow from a mistake to where it should go, underline a term, or write a short correction. use drawing whenever it makes your help more concrete: finding a button, explaining a step, showing a mistake on the user's work.
 
@@ -95,7 +89,7 @@ examples:
 - user asks where to save: "hit the save button up in the top left of the toolbar. [CIRCLE:48,30,18:save]"
 - user asks what a binary tree is (nothing on screen): "it's a structure where each node has at most two children, a left and a right. great for fast lookups."\
 """
-"""Annotation-mode system prompt (hackathon draw-on-screen). Same
+"""Annotation-mode system prompt (draw-on-screen). Same
 dimension-labeled coordinate-space contract as the cursor [POINT] prompt
 (Farza CompanionManager.swift:566), extended from a single point to four
 shape tags parsed by annotations.parse_annotations. Used when
@@ -107,17 +101,11 @@ _POINT_TAG_RE = re.compile(
 """Regex for Clicky's [POINT:x,y:label(:screenN)?] coordinate tag.
 
 Python port of CompanionManager.parsePointingCoordinates
-(leanring-buddy/CompanionManager.swift:784-828).
+(CompanionManager.swift:784-828).
 """
 
 _CLICKY_MAX_TOKENS = 1024
 """Token budget matching Clicky's analyzeImageStreaming call."""
-
-_MEMORY_PREFIX_MARKER = "[context from past sessions"
-"""Sentinel that app.py prepends to the user transcript when memory is
-injected. Used by AnthropicClient.ask_stream to split the transcript into a
-cached memory-prefix block + an uncached current-turn block. Must match
-app.py ClickyApp._pipeline_worker's f-string exactly."""
 
 _KB_SYSTEM_PREFIX_TEMPLATE = (
     "app knowledge base:\n"
@@ -131,7 +119,7 @@ markdown body; ask_stream formats this prefix in front and adds the
 ephemeral cache breakpoint. Per-app cache hit on subsequent turns within
 the same app session; cache miss on app switch (acceptable since each
 KB read is the dominant cost anyway). Empty kb_content means no second
-block — Claude proceeds with vision + memory only (the 'Claude already
+block: Claude proceeds with vision + memory only (the 'Claude already
 knows that software' path)."""
 
 
@@ -185,6 +173,80 @@ def parse_point_tag(text: str) -> PointParseResult:
     )
 
 
+# Hidden thinking delays the first spoken word. Where a model lets it be turned
+# off or down, Clicky does: same hits on the pointing set, earlier first token.
+_ANTHROPIC_THINKING = {
+    "claude-haiku-5-5": {"type": "disabled"},
+    "claude-sonnet-5-5": {"type": "between_tools"},  # "disabled" is a 400 on Sonnet 5.5
+}
+_OPENAI_REASONING_EFFORT = {
+    "gpt-6-luna": "none",
+    "gpt-6.1-sol": "low",  # Sol has no "none"
+}
+
+
+def _bare_model(model_id: str) -> str:
+    return model_id.split("/", 1)[-1]
+
+
+def _warm(http, url) -> None:
+    """Open a pooled connection to ``url``'s origin so the next request skips
+    the TCP and TLS handshake. Any HTTP status will do; failures are ignored."""
+    try:
+        http.head(str(url), timeout=5)
+    except Exception:
+        pass
+
+
+_COORD_TAG_RE = re.compile(r"\[\s*(POINT|ARROW|CIRCLE|UNDERLINE|LABEL)\s*:([^\]]*)\]", re.IGNORECASE)
+_NUM_PREFIX_RE = re.compile(r"\s*\d+(?:\s*(?:,|->)\s*\d+)*")
+_NUM_RE = re.compile(r"\d+")
+_SCREEN_LABEL_RE = re.compile(r"\s*screen\s+(\d+)", re.IGNORECASE)
+# Leading numeric fields of each tag: x/y are positions, l is a length (scales with width).
+_COORD_FIELDS = {
+    "POINT": "xy", "ARROW": "xyxy", "CIRCLE": "xyl", "UNDERLINE": "xyl", "LABEL": "xy",
+}
+
+
+def per_mille_to_pixels(
+    text: str,
+    sizes: list[tuple[int, int]],
+    screens: dict[int, tuple[int, int]] | None = None,
+) -> str:
+    """Rewrite tag coordinates from a 0-1000 grid to screenshot pixels.
+
+    Drawing tags are always on the cursor screen (sizes[0]). A POINT's
+    :screenN uses ``screens[N]``, keyed by the number in each capture's label
+    because that is how the pointer is routed; the cursor screen is sent
+    first, so list position is not the screen number. Label text is never
+    touched.
+    """
+    if not sizes:
+        return text
+
+    def rewrite(m: re.Match) -> str:
+        tag, body = m.group(1).upper(), m.group(2)
+        w, h = sizes[0]
+        screen = re.search(r":\s*screen(\d+)\s*$", body)
+        if tag == "POINT" and screen and screens and int(screen.group(1)) in screens:
+            w, h = screens[int(screen.group(1))]
+        prefix = _NUM_PREFIX_RE.match(body)
+        if not prefix:
+            return m.group(0)
+        kinds = iter(_COORD_FIELDS[tag])
+
+        def scale(n: re.Match) -> str:
+            kind = next(kinds, None)
+            if kind is None:
+                return n.group(0)
+            return str(round(int(n.group(0)) * (h if kind == "y" else w) / 1000))
+
+        head = m.group(0)[: m.start(2) - m.start(0)]
+        return head + _NUM_RE.sub(scale, prefix.group(0)) + body[prefix.end():] + "]"
+
+    return _COORD_TAG_RE.sub(rewrite, text)
+
+
 def image_to_base64_jpeg(img: Image.Image, quality: int = 85) -> str:
     """Encode a PIL image to a base64-ASCII JPEG string for the Claude API."""
     buf = BytesIO()
@@ -192,39 +254,17 @@ def image_to_base64_jpeg(img: Image.Image, quality: int = 85) -> str:
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def _get(obj, key, default=None):
-    """Dual-access helper: works on both dict-shaped test mocks and
-    anthropic SDK objects (via attribute access)."""
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
-
-
-def parse_response_text(response) -> str:
-    """Concatenate all text-type content blocks into a single string.
-
-    Dual-access compatible (dict mocks or SDK objects). Used by the batch
-    ask() wrapper to extract the full text from a non-streaming response.
-    """
-    content = _get(response, "content", []) or []
-    texts: list[str] = []
-    for block in content:
-        if _get(block, "type") != "text":
-            continue
-        text = _get(block, "text", "") or ""
-        if text:
-            texts.append(text)
-    return " ".join(texts).strip()
-
-
 # --- AIClient abstract base ---------------------------------------------------
 
 class AIClient(ABC):
     """Abstract base for vision+LLM providers.
 
-    Phase 1: AnthropicClient (vision-tag streaming).
-    Phase 2: OpenRouterClient, GeminiClient, etc. as subclass drops.
+    Each provider is a subclass: AnthropicClient, GeminiClient,
+    OpenAIVisionClient, OllamaClient.
     """
+
+    def warm(self) -> None:
+        """Open the provider connection ahead of a request. Never raises."""
 
     @abstractmethod
     def ask(
@@ -247,12 +287,12 @@ class AIClient(ABC):
 # --- Concrete Anthropic implementation ----------------------------------------
 
 class AnthropicClient(AIClient):
-    """Phase 1 implementation using plain vision streaming + [POINT:x,y:label].
+    """Claude via plain vision streaming + [POINT:x,y:label].
 
-    Matches Clicky's actual shipping path: ClaudeAPI.analyzeImageStreaming +
-    CompanionManager.parsePointingCoordinates. NOT Computer Use API beta
-    (that was dead code in Clicky — ElementLocationDetector.swift, 0 refs).
-    See DECISIONS.md 2026-04-12 (evening 3).
+    Matches Clicky's shipping path: ClaudeAPI.analyzeImageStreaming +
+    CompanionManager.parsePointingCoordinates. NOT the Computer Use API beta:
+    in Clicky that lives in ElementLocationDetector.swift, which is dead code
+    (0 refs).
     """
 
     def __init__(
@@ -261,11 +301,19 @@ class AnthropicClient(AIClient):
         model_id: str,
         base_url: str | None = None,
     ) -> None:
-        kwargs: dict = {"api_key": api_key, "timeout": 60.0}
+        self._http = AnthropicHttpxClient()
+        kwargs: dict = {"api_key": api_key, "timeout": 60.0, "http_client": self._http}
         if base_url is not None:
             kwargs["base_url"] = base_url
         self.client = Anthropic(**kwargs)
-        self.model_id = model_id
+        # api.anthropic.com takes bare IDs (claude-haiku-5-5); OpenRouter takes
+        # the anthropic/ slug. Keep the slug only when routing through OpenRouter.
+        via_openrouter = bool(base_url) and "openrouter.ai" in base_url
+        self.model_id = model_id if via_openrouter else model_id.removeprefix("anthropic/")
+        self._thinking = _ANTHROPIC_THINKING.get(_bare_model(model_id).replace(".", "-"))
+
+    def warm(self) -> None:
+        _warm(self._http, self.client.base_url)
 
     def ask_stream(
         self,
@@ -280,7 +328,7 @@ class AnthropicClient(AIClient):
         """Open a streaming Claude call, return a context manager.
 
         Args:
-            images: list of (PIL Image, label string) tuples — one per screen.
+            images: list of (PIL Image, label string) tuples, one per screen.
                 Sorted cursor-screen-first by capture_all_screens(). Each
                 becomes an image content block + a text label block in the
                 user message. Matches Clicky's analyzeImageStreaming(images:
@@ -318,28 +366,9 @@ class AnthropicClient(AIClient):
             })
             content_blocks.append({"type": "text", "text": label})
 
-        # Split the user transcript into a cached memory-prefix block + an
-        # uncached current-transcript block when the memory marker is present.
-        # app.py (Step 7 pipeline worker) prepends memory context as:
-        #     "[context from past sessions ...]\n<memory>\n\n<actual transcript>"
-        # Caching the prefix saves ~50-100ms TTFT after the first hit (5-min
-        # TTL). NEVER cache the current transcript — per-turn content is what
-        # makes the full-context-caching latency paradox bite (arxiv 2601.06007
-        # "Don't Break the Cache" — only stable prefixes help).
-        if _MEMORY_PREFIX_MARKER in transcript:
-            parts = transcript.split("\n\n", 1)
-            if len(parts) == 2:
-                memory_text, actual_transcript = parts
-                content_blocks.append({
-                    "type": "text",
-                    "text": memory_text + "\n\n",
-                    "cache_control": {"type": "ephemeral"},
-                })
-                content_blocks.append({"type": "text", "text": actual_transcript})
-            else:
-                content_blocks.append({"type": "text", "text": transcript})
-        else:
-            content_blocks.append({"type": "text", "text": transcript})
+        # No breakpoint in this turn: the screenshot above changes every time,
+        # so caching anything at or after it would be a write that never hits.
+        content_blocks.append({"type": "text", "text": transcript})
 
         new_user_turn = {"role": "user", "content": content_blocks}
 
@@ -369,11 +398,13 @@ class AnthropicClient(AIClient):
                 "cache_control": {"type": "ephemeral"},
             })
 
+        extra = {"thinking": self._thinking} if self._thinking else {}
         sdk_stream_mgr = self.client.messages.stream(
             model=self.model_id,
             max_tokens=max_tokens,
             system=system_blocks,
             messages=[*history, new_user_turn],
+            **extra,
         )
 
         return _StreamingResponse(sdk_stream_mgr)
@@ -441,14 +472,28 @@ class _StreamingResponse:
             self._accumulated = self._sdk_stream.get_final_text()
         return parse_point_tag(self._accumulated)
 
+    def usage(self) -> dict:
+        """Token counts the provider reported for this turn ({} if unavailable)."""
+        try:
+            u = self._sdk_stream.get_final_message().usage
+        except Exception:
+            return {}
+        return {
+            "input": u.input_tokens,
+            "output": u.output_tokens,
+            "cache_read": getattr(u, "cache_read_input_tokens", 0) or 0,
+            "cache_write": getattr(u, "cache_creation_input_tokens", 0) or 0,
+        }
 
-# --- Gemini (via OpenRouter OpenAI-compat endpoint) --------------------------
+
+# --- Gemini (OpenAI-compatible endpoint) -------------------------------------
 
 class GeminiClient(AIClient):
-    """Gemini 3 Flash Preview (or any OpenRouter google/* model) via the
-    OpenAI Python SDK pointed at OpenRouter's OpenAI-compat endpoint.
+    """Gemini via the OpenAI Python SDK: OpenRouter's endpoint for an sk-or-
+    key, Google's native OpenAI-compatible endpoint otherwise.
+    OpenAIVisionClient reuses it with OpenAI's endpoint.
 
-    Response parsing (parse_point_tag) is identical — both Claude and Gemini
+    Response parsing (parse_point_tag) is identical: both Claude and Gemini
     emit [POINT:x,y:label] per the verbatim Clicky system prompt. The only
     differences vs AnthropicClient are request shape (OpenAI chat.completions
     format instead of Anthropic messages format) and image block format
@@ -456,11 +501,8 @@ class GeminiClient(AIClient):
 
     History assumption: we convert Anthropic content-block format to plain
     strings by concatenating text blocks. Non-text blocks in history are
-    dropped. Phase 1 history only contains text blocks so this is safe; if
-    Phase 2 adds image-bearing history, revisit this.
-
-    See DECISIONS.md 2026-04-19 'Gemini 3 Flash via OpenRouter' for the
-    dual-SDK routing rationale.
+    dropped. History only contains text blocks, so this is safe; revisit it
+    if history ever carries images.
     """
 
     # OpenRouter accepts the classic `max_tokens` for every model + normalizes
@@ -483,10 +525,18 @@ class GeminiClient(AIClient):
             self.model_id = model_id
         else:
             self.model_id = model_id.split("/", 1)[1] if "/" in model_id else model_id
-        self.client = OpenAI(api_key=api_key, base_url=base_url, timeout=60.0)
+        self._http = OpenAIHttpxClient()
+        self.client = OpenAI(api_key=api_key, base_url=base_url, timeout=60.0, http_client=self._http)
         self._max_tokens_param = (
             "max_tokens" if via_openrouter else self._native_token_param
         )
+        # Gemini grounds on a 0-1000 grid per axis (its trained format), even
+        # when the label gives the image size in pixels.
+        self._per_mille = "gemini" in model_id.lower()
+        self._reasoning_effort = _OPENAI_REASONING_EFFORT.get(_bare_model(model_id))
+
+    def warm(self) -> None:
+        _warm(self._http, self.client.base_url)
 
     def ask_stream(
         self,
@@ -550,8 +600,8 @@ class GeminiClient(AIClient):
             for block in turn.get("content", []):
                 if isinstance(block, dict) and block.get("type") == "text":
                     text_parts.append(block.get("text", ""))
-            # Skip turns with no text content (e.g., image-only turns from
-            # Phase 2, or malformed turns) — OpenRouter rejects empty content.
+            # Skip turns with no text content (image-only or malformed
+            # turns): OpenRouter rejects empty content.
             if not any(p.strip() for p in text_parts):
                 continue
             openai_messages.append({
@@ -560,26 +610,34 @@ class GeminiClient(AIClient):
             })
         openai_messages.append({"role": "user", "content": user_content})
 
+        extra = {"reasoning_effort": self._reasoning_effort} if self._reasoning_effort else {}
         try:
             sdk_iterator = self.client.chat.completions.create(
                 model=self.model_id,
                 messages=openai_messages,
                 stream=True,
+                stream_options={"include_usage": True},
                 **{self._max_tokens_param: max_tokens},
+                **extra,
             )
         except Exception as exc:
             raise RuntimeError(
-                f"Gemini request failed (model={self.model_id!r}). "
+                f"AI request failed (model={self.model_id!r}). "
                 "Diagnostic checklist:\n"
-                "  1. Is the OpenRouter key (ANTHROPIC_API_KEY in .env) valid + funded?\n"
-                "  2. Is the model available on your account? Preview models like "
-                "'google/gemini-3-flash-preview' require opt-in at "
-                "https://openrouter.ai/settings/privacy. Fallback: set "
-                "MODEL_ID=google/gemini-2.5-flash in .env.\n"
+                "  1. Is the key in Settings valid and funded?\n"
+                "  2. Is this model available on your account?\n"
                 "  3. Is your internet connection up?\n"
                 f"Underlying error: {type(exc).__name__}: {exc}"
             ) from exc
-        return _GeminiStreamingResponse(sdk_iterator)
+        sizes = screens = None
+        if self._per_mille:
+            sizes = [img.size for img, _ in images]
+            screens = {
+                int(m.group(1)): img.size
+                for img, label in images
+                if (m := _SCREEN_LABEL_RE.match(label))
+            }
+        return _GeminiStreamingResponse(sdk_iterator, per_mille_sizes=sizes, per_mille_screens=screens)
 
     def ask(
         self,
@@ -609,10 +667,13 @@ class _GeminiStreamingResponse:
     client is behind it.
     """
 
-    def __init__(self, sdk_iterator):
+    def __init__(self, sdk_iterator, per_mille_sizes=None, per_mille_screens=None):
         self._sdk_iterator = sdk_iterator
         self._accumulated = ""
         self._deltas_exhausted = False
+        self._per_mille_sizes = per_mille_sizes
+        self._per_mille_screens = per_mille_screens
+        self._usage = None
 
     def __enter__(self):
         return self
@@ -626,6 +687,8 @@ class _GeminiStreamingResponse:
 
     def text_deltas(self) -> Iterator[str]:
         for chunk in self._sdk_iterator:
+            if getattr(chunk, "usage", None):
+                self._usage = chunk.usage  # the final chunk carries the counts
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta.content
@@ -638,36 +701,50 @@ class _GeminiStreamingResponse:
         if not self._deltas_exhausted:
             for _ in self.text_deltas():
                 pass
-        return parse_point_tag(self._accumulated)
+        text = self._accumulated
+        if self._per_mille_sizes:
+            text = per_mille_to_pixels(text, self._per_mille_sizes, self._per_mille_screens)
+        return parse_point_tag(text)
+
+    def usage(self) -> dict:
+        """Token counts the provider reported for this turn ({} if unavailable)."""
+        u = self._usage
+        if u is None:
+            return {}
+        details = getattr(u, "prompt_tokens_details", None)
+        return {
+            "input": u.prompt_tokens,
+            "output": u.completion_tokens,
+            "cache_read": (getattr(details, "cached_tokens", 0) or 0) if details else 0,
+            "cache_write": 0,
+        }
 
 
-# --- OpenAIVisionClient (v0.3.0 — GPT-4o via OpenAI native API) --------------
+# --- OpenAIVisionClient (OpenAI native API) ----------------------------------
 
 class OpenAIVisionClient(GeminiClient):
-    """OpenAI vision model (default gpt-5.4) via the OpenAI Python SDK pointed
-    at OpenAI's native endpoint (api.openai.com).
+    """OpenAI vision model via the OpenAI Python SDK pointed at OpenAI's
+    native endpoint (api.openai.com).
 
     Reuses GeminiClient's ``ask_stream`` / ``ask`` / ``_GeminiStreamingResponse``
-    verbatim — both are OpenAI-chat-completions-shaped, the only difference is
-    the endpoint + key. Emits ``[POINT:x,y:label]`` per the same Clicky system
+    verbatim: both are OpenAI-chat-completions-shaped, and only the endpoint
+    and key differ. Emits ``[POINT:x,y:label]`` per the same Clicky system
     prompt.
 
-    Accuracy note (2026-06-25): the default model is now **gpt-5.4**, which is
-    pixel-accurate at grounding (live-verified 5px off Claude on the EduPack
+    gpt-5.4 is pixel-accurate at grounding (5px off Claude on the EduPack
     target; 85.4% ScreenSpot-Pro). It returns a precise ``[POINT]`` tag directly,
     so app.py's grid-locator auto-skips (it only fires when no tag is present).
-    The grid-locator crutch was for the OLD gpt-4o default (74px off) and for
-    Ollama's weak local vision models — both still supported via env override.
+    The grid-locator is for weaker models such as gpt-4o (74px off) and
+    Ollama's local vision models, both still selectable via env override.
 
     Routed via the ``openai/`` MODEL_ID prefix in create_ai_client(). The
-    GPT-Realtime speech-to-speech path is separate (realtime.py); its accurate
-    pixel pass also goes through this client (gpt-5.4) — see app.py.
+    GPT-Realtime speech-to-speech path is separate (realtime.py); its pixel
+    pass also goes through this client (see app.py).
     """
 
-    # gpt-5-series rejects `max_tokens` on OpenAI's NATIVE endpoint and requires
-    # `max_completion_tokens` (400 otherwise; v0.4.1 fix — gpt-5.4 was 400ing
-    # every call → no audio). Via OpenRouter, max_tokens works (the base class
-    # handles that). Used only on the native path.
+    # gpt-5-series rejects `max_tokens` on OpenAI's NATIVE endpoint with a 400
+    # and requires `max_completion_tokens`. Via OpenRouter, max_tokens works (the
+    # base class handles that). Used only on the native path.
     _native_token_param: str = "max_completion_tokens"
 
     def __init__(
@@ -683,7 +760,7 @@ class OpenAIVisionClient(GeminiClient):
         super().__init__(api_key=api_key, model_id=model_id, base_url=base_url)
 
 
-# --- OllamaClient (v0.2.0 local LLM support) ---------------------------------
+# --- OllamaClient (local LLM support) ----------------------------------------
 
 class OllamaClient(AIClient):
     """Local LLM via Ollama server (https://ollama.com).
@@ -698,8 +775,7 @@ class OllamaClient(AIClient):
     [POINT:x,y:label] tags. app.py wires a grid-locator fallback (locator.py)
     that runs AFTER the streamed response completes: if no [POINT:x,y] tag was
     emitted AND the query was directional, the locator pass derives coordinates
-    via two-stage grid annotation. See DECISIONS.md 2026-06-05 (Sprint v0.2.0)
-    for the rationale + Bitshank-2338/clicky-windows reference implementation.
+    via two-stage grid annotation (locator.py).
 
     Public interface matches AnthropicClient + GeminiClient: ``ask_stream(...)``
     returns a context manager with .text_deltas() generator + .final_result()
@@ -708,7 +784,7 @@ class OllamaClient(AIClient):
     """
 
     def __init__(self, host: str, model_id: str) -> None:
-        # Strip optional 'ollama/' prefix — Ollama API wants the bare model name.
+        # Strip optional 'ollama/' prefix: the Ollama API wants the bare model name.
         if model_id.lower().startswith("ollama/"):
             self.model_id = model_id[len("ollama/"):]
         else:
@@ -769,7 +845,7 @@ class OllamaClient(AIClient):
                         text_parts.append(block.get("text", ""))
             elif isinstance(content, str):
                 text_parts.append(content)
-            # Skip empty turns (image-only or malformed) — Ollama rejects empty content.
+            # Skip empty turns (image-only or malformed): Ollama rejects empty content.
             if not any(p.strip() for p in text_parts):
                 continue
             ollama_messages.append({
@@ -777,7 +853,7 @@ class OllamaClient(AIClient):
                 "content": " ".join(text_parts),
             })
 
-        # Current user turn — transcript as content, screenshots as images list
+        # Current user turn: transcript as content, screenshots as images list
         user_turn: dict = {"role": "user", "content": transcript}
         if images:
             user_turn["images"] = [
@@ -845,11 +921,10 @@ class _OllamaStreamingResponse:
 
     def __enter__(self):
         # Open the httpx client first. If any subsequent open-step raises,
-        # we MUST close this client — the caller's `with` block never gets
+        # we MUST close this client: the caller's `with` block never gets
         # entered, so __exit__ won't fire. Without the try/except below the
         # client would leak its connection pool every time Ollama is
         # unreachable (DNS failure, ECONNREFUSED, server crash, etc).
-        # Caught by superpowers:code-reviewer 2026-06-05.
         self._httpx_client = httpx.Client(timeout=120.0)
         self._httpx_client.__enter__()
         try:
@@ -912,9 +987,9 @@ class _OllamaStreamingResponse:
         ReadError / RemoteProtocolError. We MUST mark deltas_exhausted=True in
         a finally block so that a subsequent final_result() call doesn't re-
         enter this iterator and re-raise the same exception, instead returning
-        whatever was accumulated before the failure (graceful degradation —
+        whatever was accumulated before the failure (graceful degradation:
         the user gets a partial response with parse_point_tag falling back to
-        no coordinate). Caught by superpowers:code-reviewer 2026-06-05.
+        no coordinate).
         """
         import json as _json
         try:
@@ -936,7 +1011,7 @@ class _OllamaStreamingResponse:
                 if data.get("done"):
                     break
         finally:
-            # ALWAYS set this — even on exception. Prevents final_result()
+            # ALWAYS set this, even on exception. Prevents final_result()
             # from re-entering this generator and re-raising the same error.
             self._deltas_exhausted = True
 
@@ -952,7 +1027,7 @@ class _OllamaStreamingResponse:
         if not self._deltas_exhausted:
             # text_deltas() guarantees _deltas_exhausted=True even on failure,
             # so this re-entry can only happen if the caller never consumed
-            # any deltas. Consume them now (best-effort — if iter_lines
+            # any deltas. Consume them now (best-effort: if iter_lines
             # raises, our own try/finally above flips the flag so we don't
             # loop forever).
             try:
@@ -963,6 +1038,10 @@ class _OllamaStreamingResponse:
                 # below will return a PointParseResult with no coordinate.
                 pass
         return parse_point_tag(self._accumulated)
+
+    def usage(self) -> dict:
+        """Local models have no billed tokens."""
+        return {}
 
 
 # --- Factory: route model_id prefix to right AIClient subclass ---------------
@@ -982,9 +1061,9 @@ def _provider_base_url(
     wins; else an OpenRouter (sk-or-) key routes to openrouter_url; else the
     provider's native endpoint (native_url, or None = the SDK's own default).
 
-    Centralizing this is the point: no provider can 'forget' OpenRouter routing.
-    OpenAI did, pre-v0.4.x — an sk-or- key was silently sent to api.openai.com
-    and 401'd. Every branch in create_ai_client now calls this.
+    Every branch in create_ai_client calls this, so no provider can 'forget'
+    OpenRouter routing and send an sk-or- key to its native endpoint, which
+    answers 401.
     """
     if base_url is not None:
         return base_url
@@ -1014,9 +1093,8 @@ def create_ai_client(
                 'phi*' / 'gemma*'
             Other prefixes raise ValueError with an actionable message.
         api_key: API key. Ignored for Ollama (local server, unauthenticated).
-            For Anthropic/Gemini: same value for both — OpenRouter key when
-            OpenRouter is configured via ANTHROPIC_BASE_URL, or the direct
-            provider key otherwise.
+            For Anthropic, OpenAI and Gemini: the provider's own key, or one
+            OpenRouter (sk-or-) key, which routes the call through OpenRouter.
         base_url: Optional override for cloud providers' API endpoints. Testing
             hook; production leaves it None so each client uses its SDK's
             default. Ignored by OllamaClient (use ``ollama_host`` instead).
@@ -1033,7 +1111,7 @@ def create_ai_client(
     """
     mid = model_id.lower()
 
-    # Ollama dispatch FIRST — `llama*` and `qwen*` prefixes are unambiguous local
+    # Ollama dispatch FIRST: `llama*` and `qwen*` prefixes are unambiguous local
     # (no cloud provider ships them under those bare names).
     if mid.startswith("ollama/") or any(
         mid.startswith(p) for p in _OLLAMA_BARE_PREFIXES
@@ -1047,7 +1125,7 @@ def create_ai_client(
         # Auto-route OpenRouter keys (sk-or-v1-*) to OpenRouter's
         # Anthropic-compat endpoint when no explicit base_url given.
         # Bundled Clicky.exe has cwd outside the repo, so .env doesn't
-        # load and ANTHROPIC_BASE_URL env var is unset — without this
+        # load and ANTHROPIC_BASE_URL env var is unset. Without this
         # fallback the SDK defaults to api.anthropic.com and Anthropic
         # rejects the OpenRouter-namespaced key with 401 invalid x-api-key.
         # Direct Anthropic keys (sk-ant-*) leave base_url=None so the
@@ -1068,10 +1146,10 @@ def create_ai_client(
             native_url="https://generativelanguage.googleapis.com/v1beta/openai/",
         )
         return GeminiClient(api_key=api_key, model_id=model_id, base_url=base_url)
-    # OpenAI native (v0.3.0): 'openai/gpt-4o' etc. The GPT-Realtime
-    # speech-to-speech path uses LLM_PROVIDER='openai-realtime' and is
-    # handled separately in app.py (realtime.py), NOT through this factory —
-    # so 'gpt-realtime*' should never reach here as a vision MODEL_ID.
+    # OpenAI: 'openai/gpt-4o' etc. The GPT-Realtime speech-to-speech path
+    # uses LLM_PROVIDER='openai-realtime' and is handled separately in app.py
+    # (realtime.py), NOT through this factory, so 'gpt-realtime*' should
+    # never reach here as a vision MODEL_ID.
     if mid.startswith("openai/"):
         from config import OPENROUTER_BASE_URL
         # sk-or- key → OpenRouter (OpenAIVisionClient keeps the openai/ slug); a
@@ -1136,7 +1214,7 @@ if __name__ == "__main__":
             print(delta, end="", flush=True)
         result = stream.final_result()
 
-    print(f"\n\nSpoken text (tag stripped):")
+    print("\n\nSpoken text (tag stripped):")
     print(f"  {result.spoken_text!r}")
     print(f"\nCoordinate: {result.coordinate}")
     print(f"Label:      {result.element_label}")

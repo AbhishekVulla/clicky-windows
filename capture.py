@@ -1,8 +1,7 @@
 """Screen capture + cursor + DPI + resolution picking for Clicky Windows.
 
 Produces Claude-ready images (exact target dimensions) with metadata
-for coordinate unscaling. See docs/superpowers/plans/2026-04-11-capture.md
-for the architecture overview and three coordinate spaces diagram.
+for coordinate unscaling.
 
 Responsibility boundary:
 - THIS MODULE lives in Space A (physical pixels) and Space C (Claude's
@@ -15,16 +14,8 @@ Nothing in this module is hardcoded to a specific monitor; everything is
 detected at runtime via mss, ctypes, and the three candidate resolutions
 in config.py.
 
-Top-to-bottom order (so `python -m capture` works):
-    1. Imports
-    2. Win32 constants + _POINT struct
-    3. CaptureResult dataclass
-    4. Pure functions (pick_resolution, resize_for_claude, unscale_claude_coords)
-    5. OS-wrapper functions (set_dpi_awareness, get_cursor_position,
-       list_monitors, monitor_containing)
-    6. Private capture helper (_capture_monitor)
-    7. Composite: capture_active_screen()
-    8. __main__ block for manual verification
+The `__main__` block (manual verification) stays last so
+`python -m capture` works.
 """
 from __future__ import annotations
 
@@ -39,8 +30,8 @@ from config import CANDIDATE_RESOLUTIONS
 
 # --- Win32 constants ---------------------------------------------------------
 
-_PROCESS_PER_MONITOR_DPI_AWARE_V2 = 2
-"""SetProcessDpiAwareness value for per-monitor v2 (Win10 1703+)."""
+_PROCESS_PER_MONITOR_DPI_AWARE = 2
+"""SetProcessDpiAwareness value PROCESS_PER_MONITOR_DPI_AWARE (Windows 8.1+)."""
 
 
 class _POINT(ctypes.Structure):
@@ -79,8 +70,8 @@ class LabeledCapture:
     """Extended capture result with a label string for Claude's multi-screen context.
 
     Mirrors Clicky's CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
-    output shape: each captured screen gets a label like
-    "screen 1 of 2 — cursor is on this screen (primary focus) (image dimensions: 1280x800 pixels)".
+    output shape: each captured screen gets a label with its screen number,
+    a "primary focus" marker if the cursor is on it, and its pixel dimensions.
 
     Attributes:
         image: PIL Image, already resized to exact (target_width, target_height).
@@ -213,19 +204,20 @@ def unscale_claude_coords(
 # --- OS wrappers -------------------------------------------------------------
 
 def set_dpi_awareness() -> bool:
-    """Set per-monitor v2 DPI awareness for this process.
+    """Make this process per-monitor DPI aware, so every coordinate it reads
+    is in physical pixels.
 
     Windows only allows DPI awareness to be set once per process. If another
     library (PyQt6, tkinter, a previous call from us) already set it, the
     call returns E_ACCESSDENIED (-2147024891) and this function returns
-    False without raising. Either way, per-monitor v2 is active.
+    False without raising. Either way, the process is per-monitor aware.
 
     Returns:
         True if we set it successfully just now, False if it was already set.
     """
     try:
         hresult = ctypes.windll.shcore.SetProcessDpiAwareness(
-            _PROCESS_PER_MONITOR_DPI_AWARE_V2
+            _PROCESS_PER_MONITOR_DPI_AWARE
         )
         return hresult == 0
     except OSError:

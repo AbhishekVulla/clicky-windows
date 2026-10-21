@@ -1,4 +1,4 @@
-"""Unit tests for settings_dialog — required_keys_present probe + mask
+"""Unit tests for settings_dialog: required_keys_present probe + mask
 helper. The full dialog rendering is verified manually (PyQt6 modal
 exec needs a real Qt event loop)."""
 from __future__ import annotations
@@ -98,7 +98,7 @@ class TestRequiredKeysPresent:
         assert required_keys_present() is False
 
 
-# --- Sprint 4: provider category data model ---------------------------------
+# --- Provider category data model -------------------------------------------
 
 
 class TestProviderCategoriesData:
@@ -114,17 +114,17 @@ class TestProviderCategoriesData:
     def test_llm_category_has_expected_providers(self):
         """The LLM category includes anthropic, openai, ollama, gemini (Realtime
         removed). Order-independent membership so adding/reordering a provider
-        doesn't break this; the load-bearing fact is that Anthropic is default."""
+        doesn't break this; what matters is that OpenAI is the default."""
         from settings_dialog import _PROVIDER_CATEGORIES
         llm = next(c for c in _PROVIDER_CATEGORIES if c.category_key == "LLM")
         ids = {p.provider_id for p in llm.providers}
         assert {"anthropic", "openai", "ollama", "gemini"} <= ids
         assert "openai-realtime" not in ids  # hidden from the dropdown
-        assert llm.providers[llm.default_index].provider_id == "anthropic"
+        assert llm.providers[llm.default_index].provider_id == "openai"
 
     def test_openai_llm_provider_uses_openai_api_key_slot(self):
-        """v0.3.0: OpenAI provider stores a direct OPENAI_API_KEY (NOT the
-        OpenRouter sk-or- key in ANTHROPIC_API_KEY)."""
+        """OpenAI provider stores its key in its own OPENAI_API_KEY slot
+        (NOT in ANTHROPIC_API_KEY)."""
         from settings_dialog import _PROVIDER_CATEGORIES
         llm = next(c for c in _PROVIDER_CATEGORIES if c.category_key == "LLM")
         openai = next(p for p in llm.providers if p.provider_id == "openai")
@@ -133,7 +133,7 @@ class TestProviderCategoriesData:
         assert "platform.openai.com" in openai.signup_url
 
     def test_realtime_not_in_dropdown(self):
-        """v0.4.1: GPT-Realtime removed from the Settings dropdown (experimental,
+        """GPT-Realtime is not in the Settings dropdown (experimental,
         audio issues on some setups). Still reachable via the env var
         LLM_PROVIDER=openai-realtime, just not surfaced as a working option."""
         from settings_dialog import _PROVIDER_CATEGORIES
@@ -141,7 +141,7 @@ class TestProviderCategoriesData:
         assert "openai-realtime" not in [p.provider_id for p in llm.providers]
 
     def test_anthropic_provider_has_no_model_picker(self):
-        """v0.4.1 minimal UX: Anthropic has no model sub-picker — it defaults to
+        """Minimal UX: Anthropic has no model sub-picker; it defaults to
         Claude Sonnet 4.6 (pixel-tight). Opus 4.8 reachable via ANTHROPIC_MODEL
         env for the rare power user, but not a visible, overwhelming choice."""
         from settings_dialog import _PROVIDER_CATEGORIES
@@ -161,14 +161,14 @@ class TestProviderCategoriesData:
         assert ollama.display_name == "Ollama (local)"
         assert "ollama.com" in ollama.signup_url
 
-    def test_stt_category_has_assemblyai_and_faster_whisper(self):
+    def test_stt_category_lists_cartesia_first(self):
         """Default AssemblyAI (cloud, index 0) + opt-in local faster-whisper."""
         from settings_dialog import _PROVIDER_CATEGORIES
         stt = next(c for c in _PROVIDER_CATEGORIES if c.category_key == "STT")
         assert [p.provider_id for p in stt.providers] == [
-            "assemblyai", "faster-whisper",
+            "cartesia", "assemblyai", "faster-whisper",
         ]
-        assert stt.default_index == 0  # AssemblyAI (cloud) stays default
+        assert stt.default_index == 0  # Cartesia, the same key as the voice
 
     def test_tts_category_has_cartesia_and_elevenlabs(self):
         from settings_dialog import _PROVIDER_CATEGORIES
@@ -181,7 +181,7 @@ class TestProviderCategoriesData:
     def test_each_provider_has_env_var_and_signup_url(self):
         """Every provider has a non-empty display name + keyring slot + signup
         URL. The slot is _API_KEY suffix for cloud providers, OLLAMA_HOST for
-        Ollama (no API key — local server, slot stores the host URL)."""
+        Ollama (no API key: local server, slot stores the host URL)."""
         from settings_dialog import _PROVIDER_CATEGORIES
         for category in _PROVIDER_CATEGORIES:
             for provider in category.providers:
@@ -197,16 +197,14 @@ class TestProviderCategoriesData:
                 assert provider.display_name  # non-empty
 
     def test_gemini_provider_data(self):
-        """v0.4.1: Gemini is ONE keyless option (no model sub-picker — minimal
-        UX). It reuses the user's OpenRouter (sk-or-) key at runtime, so
-        requires_key=False and no separate key field renders. The default model
-        (3.1 Pro, most accurate) lives in config.GEMINI_MODEL_VISION."""
+        """Gemini needs a key like every cloud brain; a saved OpenRouter key
+        from another slot fills it in (see TestSetupChecks)."""
         from settings_dialog import _PROVIDER_CATEGORIES
         llm = next(c for c in _PROVIDER_CATEGORIES if c.category_key == "LLM")
         gem = next(p for p in llm.providers if p.provider_id == "gemini")
         assert gem.api_key_env_var == "GEMINI_API_KEY"
         assert gem.models == ()
-        assert gem.requires_key is False
+        assert gem.requires_key is True
 
     def test_local_providers_require_no_key(self):
         """faster-whisper + kokoro are local (no API key): requires_key=False so
@@ -221,7 +219,7 @@ class TestProviderCategoriesData:
         assert found == {"faster-whisper": False, "kokoro": False}
 
 
-# --- Sprint 4: dialog render tests (qapp fixture) ---------------------------
+# --- Dialog render tests (qapp fixture) -------------------------------------
 
 
 @pytest.fixture(scope="session")
@@ -235,7 +233,7 @@ def qapp():
 class TestSettingsDialogRender:
     """Verify the dialog renders the expected widgets in the expected
     structure. Inspects internal state (self._dropdowns, self._key_inputs,
-    self._signup_buttons) rather than simulating user clicks — the
+    self._signup_buttons) rather than simulating user clicks; the
     `qapp` fixture provides a QApplication but no event loop runs."""
 
     def test_dialog_has_privacy_line(self, qapp, mocker):
@@ -255,8 +253,8 @@ class TestSettingsDialogRender:
         assert "credential manager" in privacy, (
             f"privacy line does not say where keys are stored; got: {privacy!r}"
         )
-        # And it must NOT claim nothing leaves the machine. It used to, and it
-        # was false on the cloud defaults: screenshots go to the LLM provider
+        # And it must NOT claim nothing leaves the machine. That claim is
+        # false on the cloud defaults: screenshots go to the LLM provider
         # and audio goes to the STT provider. This guard exists so that claim
         # cannot quietly come back in a future copy tweak.
         assert "nothing leaves your machine" not in privacy, (
@@ -292,7 +290,7 @@ class TestSettingsDialogRender:
 
     def test_llm_dropdown_has_expected_providers(self, qapp, mocker):
         """LLM dropdown includes Anthropic, OpenAI, Ollama, Gemini (Realtime
-        removed) and defaults to Anthropic. Order-independent so adding a
+        removed) and defaults to OpenAI. Order-independent so adding a
         provider doesn't break it."""
         mocker.patch("settings_dialog.keyring.get_password", return_value=None)
         from settings_dialog import SettingsDialog
@@ -301,16 +299,16 @@ class TestSettingsDialogRender:
         ids = {llm_dropdown.itemData(i) for i in range(llm_dropdown.count())}
         assert {"anthropic", "openai", "ollama", "gemini"} <= ids
         assert "openai-realtime" not in ids
-        assert llm_dropdown.itemData(llm_dropdown.currentIndex()) == "anthropic"
+        assert llm_dropdown.itemData(llm_dropdown.currentIndex()) == "openai"
 
-    def test_stt_dropdown_has_two_options(self, qapp, mocker):
-        """v0.3.x: STT dropdown has AssemblyAI (default) + Local (faster-whisper)."""
+    def test_stt_dropdown_lists_cartesia_first(self, qapp, mocker):
+        """STT dropdown has Cartesia (default), AssemblyAI and Local (faster-whisper)."""
         mocker.patch("settings_dialog.keyring.get_password", return_value=None)
         from settings_dialog import SettingsDialog
         dlg = SettingsDialog()
         stt_dropdown = dlg._dropdowns["STT"]
         ids = [stt_dropdown.itemData(i) for i in range(stt_dropdown.count())]
-        assert ids == ["assemblyai", "faster-whisper"]
+        assert ids == ["cartesia", "assemblyai", "faster-whisper"]
         assert stt_dropdown.currentIndex() == 0
 
 class TestSettingsDialogDropdownSwap:
@@ -365,10 +363,10 @@ class TestSettingsDialogDropdownSwap:
 
         dlg._dropdowns["TTS"].setCurrentIndex(1)
 
-        # No previous ElevenLabs key — field cleared.
+        # No previous ElevenLabs key: field cleared.
         assert tts_input.text() == ""
         # Placeholder mentions the new env-var name.
-        assert "ELEVENLABS_API_KEY" in tts_input.placeholderText()
+        assert "ElevenLabs" in tts_input.placeholderText()
 
 
 class TestSettingsDialogSave:
@@ -391,7 +389,8 @@ class TestSettingsDialogSave:
 
         from settings_dialog import SettingsDialog
         dlg = SettingsDialog()
-        # Switch TTS to ElevenLabs and enter a key.
+        # Pick AssemblyAI for listening and ElevenLabs for the voice, enter keys.
+        dlg._dropdowns["STT"].setCurrentIndex(_dropdown_index(dlg._dropdowns["STT"], "assemblyai"))
         dlg._dropdowns["TTS"].setCurrentIndex(1)
         dlg._key_inputs["LLM"].setText("sk-llm-key")
         dlg._key_inputs["STT"].setText("stt-key")
@@ -399,10 +398,10 @@ class TestSettingsDialogSave:
 
         dlg._on_save()
 
-        assert saved[("clicky-windows", "LLM_PROVIDER")] == "anthropic"
+        assert saved[("clicky-windows", "LLM_PROVIDER")] == "openai"
         assert saved[("clicky-windows", "STT_PROVIDER")] == "assemblyai"
         assert saved[("clicky-windows", "TTS_PROVIDER")] == "elevenlabs"
-        assert saved[("clicky-windows", "ANTHROPIC_API_KEY")] == "sk-llm-key"
+        assert saved[("clicky-windows", "OPENAI_API_KEY")] == "sk-llm-key"
         assert saved[("clicky-windows", "ASSEMBLYAI_API_KEY")] == "stt-key"
         assert saved[("clicky-windows", "ELEVENLABS_API_KEY")] == "eleven-key"
 
@@ -433,17 +432,17 @@ class TestSettingsDialogSave:
         assert ("clicky-windows", "ELEVENLABS_API_KEY") not in saved
 
 
-# --- v0.2.1 (Issue #1 fix B + D): Ollama model dropdown + compat warn -------
+# --- Ollama model dropdown + compat warn (Issue #1) -------------------------
 
 
 class TestOllamaModelDropdown:
-    """v0.2.1: when LLM provider is Ollama, an editable QComboBox appears
+    """When LLM provider is Ollama, an editable QComboBox appears
     for OLLAMA_MODEL_VISION. Hidden when provider is Anthropic. Save
-    persists to keyring + runs Fix D compatibility check (which can
+    persists to keyring + runs the Ollama compatibility check (which can
     block save via QMessageBox)."""
 
     def test_model_suggestions_includes_llava_as_first(self):
-        """llava:7b must be index 0 — it's the new default in v0.2.1.
+        """llava:7b must be index 0: it's the default.
         llama3.2-vision comes after (more accurate but needs Ollama
         >=0.4.x; users can pick it manually)."""
         from settings_dialog import _OLLAMA_MODEL_SUGGESTIONS
@@ -451,9 +450,9 @@ class TestOllamaModelDropdown:
         assert "llama3.2-vision" in _OLLAMA_MODEL_SUGGESTIONS
 
     def test_model_row_hidden_for_anthropic_default(self, qapp, mocker):
-        """v0.4.1: Anthropic has no model sub-picker (minimal UX), so the model
+        """Anthropic has no model sub-picker (minimal UX), so the model
         row is HIDDEN when Anthropic (the default) is selected.
-        (isHidden() not isVisible() — the dialog is never .show()-n in tests.)"""
+        (isHidden() not isVisible(): the dialog is never .show()-n in tests.)"""
         mocker.patch("settings_dialog.keyring.get_password", return_value=None)
         from settings_dialog import SettingsDialog
         dlg = SettingsDialog()
@@ -516,7 +515,7 @@ class TestOllamaModelDropdown:
     def test_save_aborts_when_user_cancels_compat_warning(
         self, qapp, mocker, monkeypatch
     ):
-        """Fix D: Ollama provider + incompatible model + user clicks Cancel →
+        """Ollama provider + incompatible model + user clicks Cancel →
         save MUST NOT persist anything (don't half-save)."""
         from PyQt6.QtWidgets import QMessageBox
 
@@ -541,3 +540,212 @@ class TestOllamaModelDropdown:
         dlg._model_combos["LLM"].setCurrentText("llama3.2-vision")
         dlg._on_save()
         assert saved == {}
+
+
+class TestSetupChecks:
+    """Settings only lets you save a setup that can actually answer."""
+
+    @pytest.fixture
+    def stored(self, monkeypatch):
+        values: dict[str, str] = {}
+        for name in ("LLM_PROVIDER", "STT_PROVIDER", "TTS_PROVIDER", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+                     "GEMINI_API_KEY", "ASSEMBLYAI_API_KEY", "CARTESIA_API_KEY"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setattr("keyring.get_password", lambda s, n: values.get(n))
+        monkeypatch.setattr("keyring.set_password", lambda s, n, v: values.update({n: v}))
+        return values
+
+    def _dialog_with(self, provider_id):
+        from settings_dialog import SettingsDialog
+        dlg = SettingsDialog()
+        dlg._dropdowns["LLM"].setCurrentIndex(_dropdown_index(dlg._dropdowns["LLM"], provider_id))
+        return dlg
+
+    def _save_enabled(self, dlg):
+        from PyQt6.QtWidgets import QDialogButtonBox
+        return dlg._buttons.button(QDialogButtonBox.StandardButton.Save).isEnabled()
+
+    def test_gemini_needs_a_key_when_there_is_no_openrouter_key(self, qapp, stored):
+        dlg = self._dialog_with("gemini")
+        dlg._key_inputs["STT"].setText("b")
+        dlg._key_inputs["TTS"].setText("c")
+        assert dlg._key_inputs["LLM"].text() == ""
+        assert not self._save_enabled(dlg)
+
+    def test_gemini_reuses_a_saved_openrouter_key(self, qapp, stored):
+        stored["ANTHROPIC_API_KEY"] = "sk-or-v1-abc"
+        dlg = self._dialog_with("gemini")
+        dlg._key_inputs["STT"].setText("b")
+        dlg._key_inputs["TTS"].setText("c")
+        assert dlg._key_inputs["LLM"].text() == "sk-or-v1-abc"
+        assert self._save_enabled(dlg)
+
+    def test_startup_asks_again_when_gemini_has_no_usable_key(self, stored):
+        from settings_dialog import required_keys_present
+        stored.update(LLM_PROVIDER="gemini", ASSEMBLYAI_API_KEY="b", CARTESIA_API_KEY="c")
+        assert required_keys_present() is False
+
+    def test_startup_accepts_an_openrouter_key_from_another_slot(self, stored):
+        from settings_dialog import required_keys_present
+        stored.update(LLM_PROVIDER="gemini", ANTHROPIC_API_KEY="sk-or-v1-abc",
+                      ASSEMBLYAI_API_KEY="b", CARTESIA_API_KEY="c")
+        assert required_keys_present() is True
+
+    def test_ollama_address_is_readable_and_not_called_a_key(self, qapp, stored):
+        from PyQt6.QtWidgets import QLineEdit
+        dlg = self._dialog_with("ollama")
+        assert dlg._key_inputs["LLM"].echoMode() == QLineEdit.EchoMode.Normal
+        assert "key" not in dlg._signup_buttons["LLM"].text().lower()
+
+    def test_compat_check_uses_the_address_typed_in_the_dialog(self, qapp, stored, mocker):
+        detect = mocker.patch("ollama_health.detect_ollama_version", return_value=None)
+        mocker.patch("ollama_health.check_model_compatibility", return_value=None)
+        dlg = self._dialog_with("ollama")
+        dlg._key_inputs["LLM"].setText("http://192.168.1.50:11434")
+        dlg._confirm_ollama_compat("llava:7b")
+        detect.assert_called_once_with("http://192.168.1.50:11434")
+
+
+class TestTwoKeySetup:
+    """New installs need two keys: one for the AI model, one Cartesia key that
+    covers both listening and the voice."""
+
+    @pytest.fixture
+    def stored(self, monkeypatch):
+        values: dict[str, str] = {}
+        for name in ("LLM_PROVIDER", "STT_PROVIDER", "TTS_PROVIDER", "ANTHROPIC_API_KEY",
+                     "ASSEMBLYAI_API_KEY", "CARTESIA_API_KEY", "ELEVENLABS_API_KEY"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setattr("keyring.get_password", lambda s, n: values.get(n))
+        monkeypatch.setattr("keyring.set_password", lambda s, n, v: values.update({n: v}))
+        return values
+
+    def test_listening_defaults_to_cartesia(self, qapp, stored):
+        from settings_dialog import SettingsDialog
+        dlg = SettingsDialog()
+        assert dlg._dropdowns["STT"].currentData() == "cartesia"
+
+    def test_one_cartesia_key_covers_listening_and_voice(self, qapp, stored):
+        from PyQt6.QtWidgets import QDialogButtonBox
+        from settings_dialog import SettingsDialog
+        dlg = SettingsDialog()
+        dlg.show()
+        assert not dlg._key_inputs["STT"].isVisible()
+        assert dlg._share_notes["STT"].isVisible()
+        dlg._key_inputs["LLM"].setText("sk-ant-x")
+        dlg._key_inputs["TTS"].setText("cartesia-key")
+        assert dlg._buttons.button(QDialogButtonBox.StandardButton.Save).isEnabled()
+
+    def test_listening_asks_for_its_key_when_the_voice_is_not_cartesia(self, qapp, stored):
+        from settings_dialog import SettingsDialog
+        dlg = SettingsDialog()
+        dlg.show()
+        dlg._dropdowns["TTS"].setCurrentIndex(_dropdown_index(dlg._dropdowns["TTS"], "elevenlabs"))
+        assert dlg._key_inputs["STT"].isVisible()
+        assert not dlg._share_notes["STT"].isVisible()
+
+    def test_a_key_typed_before_the_rows_start_sharing_is_the_one_saved(self, qapp, stored):
+        from settings_dialog import SettingsDialog
+        stored.update(TTS_PROVIDER="elevenlabs", ELEVENLABS_API_KEY="el-key",
+                      ANTHROPIC_API_KEY="sk-ant-x", CARTESIA_API_KEY="old-cartesia")
+        dlg = SettingsDialog()
+        dlg.show()
+        dlg._key_inputs["STT"].setText("new-cartesia")  # typed under Listening
+        dlg._dropdowns["TTS"].setCurrentIndex(_dropdown_index(dlg._dropdowns["TTS"], "cartesia"))
+        assert dlg._key_inputs["TTS"].text() == "new-cartesia"
+        dlg._on_save()
+        assert stored["CARTESIA_API_KEY"] == "new-cartesia"
+
+    def test_startup_is_ready_with_two_keys(self, stored):
+        from settings_dialog import required_keys_present
+        stored.update(ANTHROPIC_API_KEY="sk-ant-x", CARTESIA_API_KEY="cartesia-key")
+        assert required_keys_present() is True
+
+
+
+class TestOpenAIFirst:
+    """GPT-6.1 Sol is the default AI model, and a pasted key picks its own provider."""
+
+    @pytest.fixture
+    def stored(self, monkeypatch):
+        values: dict[str, str] = {}
+        for name in ("LLM_PROVIDER", "STT_PROVIDER", "TTS_PROVIDER", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+                     "GEMINI_API_KEY", "ASSEMBLYAI_API_KEY", "CARTESIA_API_KEY", "ELEVENLABS_API_KEY", "MODEL_ID"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setattr("keyring.get_password", lambda s, n: values.get(n))
+        monkeypatch.setattr("keyring.set_password", lambda s, n, v: values.update({n: v}))
+        return values
+
+    def test_a_new_install_starts_on_openai(self, qapp, stored):
+        from settings_dialog import SettingsDialog
+        assert SettingsDialog()._dropdowns["LLM"].currentData() == "openai"
+
+    def test_an_existing_anthropic_key_keeps_anthropic_selected(self, qapp, stored):
+        from settings_dialog import SettingsDialog
+        stored.update(ANTHROPIC_API_KEY="sk-ant-api03-" + "x" * 40)
+        assert SettingsDialog()._dropdowns["LLM"].currentData() == "anthropic"
+
+    def test_a_pasted_anthropic_key_switches_to_anthropic(self, qapp, stored):
+        from settings_dialog import SettingsDialog
+        key = "sk-ant-api03-" + "x" * 40
+        dlg = SettingsDialog()
+        dlg.show()
+        dlg._key_inputs["LLM"].setText(key)
+        assert dlg._dropdowns["LLM"].currentData() == "anthropic"
+        assert dlg._key_inputs["LLM"].text() == key
+        dlg._key_inputs["TTS"].setText("cartesia-key")
+        dlg._on_save()
+        assert stored["LLM_PROVIDER"] == "anthropic"
+        assert stored["ANTHROPIC_API_KEY"] == key
+        assert "OPENAI_API_KEY" not in stored
+
+    def test_a_pasted_google_key_switches_to_gemini(self, qapp, stored):
+        from settings_dialog import SettingsDialog
+        dlg = SettingsDialog()
+        dlg.show()
+        dlg._key_inputs["LLM"].setText("AIza" + "y" * 35)
+        assert dlg._dropdowns["LLM"].currentData() == "gemini"
+
+    def test_an_openrouter_key_with_no_choice_made_goes_to_haiku(self, qapp, stored):
+        # Through OpenRouter, Haiku answers first in about 2.8 s; Sol takes 4.6-6.6 s.
+        from settings_dialog import SettingsDialog
+        dlg = SettingsDialog()
+        dlg.show()
+        dlg._key_inputs["LLM"].setText("sk-or-v1-" + "z" * 40)
+        assert dlg._dropdowns["LLM"].currentData() == "anthropic"
+
+    def test_an_openrouter_key_respects_a_provider_picked_in_the_dropdown(self, qapp, stored):
+        from settings_dialog import SettingsDialog
+        dlg = SettingsDialog()
+        dlg.show()
+        dropdown = dlg._dropdowns["LLM"]
+        dropdown.setCurrentIndex(_dropdown_index(dropdown, "gemini"))
+        dropdown.activated.emit(dropdown.currentIndex())  # what a user's click sends
+        dlg._key_inputs["LLM"].setText("sk-or-v1-" + "z" * 40)
+        assert dropdown.currentData() == "gemini"
+
+    def test_an_openrouter_key_respects_a_saved_choice(self, qapp, stored):
+        from settings_dialog import SettingsDialog
+        stored.update(LLM_PROVIDER="openai")
+        dlg = SettingsDialog()
+        dlg.show()
+        dlg._key_inputs["LLM"].setText("sk-or-v1-" + "z" * 40)
+        assert dlg._dropdowns["LLM"].currentData() == "openai"
+
+
+class TestSharedKeyEdits:
+    def test_an_edited_shared_key_survives_the_rows_splitting(self, qapp, monkeypatch):
+        values = {"CARTESIA_API_KEY": "old-cartesia", "OPENAI_API_KEY": "sk-proj-x"}
+        for name in ("LLM_PROVIDER", "STT_PROVIDER", "TTS_PROVIDER"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setattr("keyring.get_password", lambda s, n: values.get(n))
+        monkeypatch.setattr("keyring.set_password", lambda s, n, v: values.update({n: v}))
+        from settings_dialog import SettingsDialog
+        dlg = SettingsDialog()
+        dlg.show()
+        dlg._key_inputs["TTS"].setText("new-cartesia")          # edited in the Voice row
+        dlg._dropdowns["TTS"].setCurrentIndex(_dropdown_index(dlg._dropdowns["TTS"], "elevenlabs"))
+        assert dlg._key_inputs["STT"].text() == "new-cartesia"   # Listening now shows its own field
+        dlg._key_inputs["TTS"].setText("eleven-key")
+        dlg._on_save()
+        assert values["CARTESIA_API_KEY"] == "new-cartesia"

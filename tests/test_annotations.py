@@ -1,4 +1,4 @@
-"""Unit tests for annotations.py — teaching-annotation tag grammar (hackathon).
+"""Unit tests for annotations.py, the teaching-annotation tag grammar.
 
 The vision model appends [ARROW]/[CIRCLE]/[UNDERLINE]/[LABEL] tags to its
 spoken answer; the parser strips them (so TTS never reads coordinates) and
