@@ -1,11 +1,8 @@
 """Unit tests for memory.py.
 
 Uses pytest's ``tmp_path`` fixture for real filesystem + real SQLite in an
-isolated temp directory per test. No mocks — the whole value is the
+isolated temp directory per test. No mocks: the whole value is the
 round-trip behavior of writes + reads. Full suite completes in <1s.
-
-See docs/superpowers/plans/2026-04-12-memory.md for the design spec and
-test-list rationale.
 """
 from __future__ import annotations
 
@@ -40,7 +37,7 @@ class TestMemoryStoreConstruction:
     """The constructor must be idempotent + lazy on the memory dir."""
 
     def test_init_creates_memory_dir_lazily_on_first_record(self, tmp_path):
-        """Constructor does NOT create the memory directory — record() does.
+        """Constructor does NOT create the memory directory (record() does).
 
         The SQLite parent dir IS created (needed for the first connect)
         but the markdown-file subdirectory is lazy. This avoids polluting
@@ -198,7 +195,7 @@ class TestRecord:
         """Triple-backticks in user content -> swapped to triple single-quotes.
 
         Prevents Claude's ```python code fences from corrupting the markdown
-        block shape that tools/lint_memory.py (Step 7.5) will parse.
+        block shape.
         """
         store = _make_store(tmp_path)
         store.record(
@@ -213,7 +210,7 @@ class TestRecord:
         assert "'''" in md
 
     def test_record_handles_empty_pointer_targets_as_text_only_marker(self, tmp_path):
-        """Empty pointer list -> '(none — text-only response)' line.
+        """Empty pointer list -> the 'Pointed at: (none ...)' text-only line.
 
         Keeps the block shape consistent: every interaction always has a
         'Pointed at:' line, even when Claude returned text-only.
@@ -254,7 +251,7 @@ class TestRecord:
 # --- TestListKnownApps -------------------------------------------------------
 
 class TestListKnownApps:
-    """list_known_apps() returns a sorted list of dicts for lint_memory.py."""
+    """list_known_apps() returns a sorted list of dicts."""
 
     def test_list_known_apps_empty_store_returns_empty_list(self, tmp_path):
         """Fresh store -> []."""
@@ -293,7 +290,7 @@ class TestListKnownApps:
         assert apps[1]["app_name"] == "b.exe"
         assert apps[2]["app_name"] == "a.exe"
 
-        # Dict shape is stable — lint_memory.py (Step 7.5) will rely on these keys.
+        # Dict shape is a stable contract.
         for app in apps:
             assert set(app.keys()) == {
                 "app_name",
@@ -307,7 +304,7 @@ class TestListKnownApps:
 # --- TestSanitizeAppName -----------------------------------------------------
 
 class TestSanitizeAppName:
-    """Pure function tests — no fixture, no filesystem."""
+    """Pure function tests: no fixture, no filesystem."""
 
     def test_sanitize_lowercases_and_replaces_reserved_chars(self):
         from memory import _sanitize_app_name

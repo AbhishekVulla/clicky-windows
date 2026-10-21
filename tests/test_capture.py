@@ -2,8 +2,7 @@
 
 All tests are mock-based. Zero real-hardware dependency. Green in <2s.
 Covers: pick_resolution, resize_for_claude, unscale_claude_coords,
-monitor_containing, set_dpi_awareness. See
-docs/superpowers/plans/2026-04-11-capture.md for the full test plan.
+monitor_containing, set_dpi_awareness.
 """
 
 import pytest
@@ -325,7 +324,7 @@ class TestCaptureAllScreens:
 
 
 class TestGetCursorPosition:
-    """Tests for capture.get_cursor_position. Smoke tests only — real value
+    """Tests for capture.get_cursor_position. Smoke tests only: real value
     depends on where the mouse is at test time, so we only check shape."""
 
     def test_returns_tuple_of_two_ints(self):

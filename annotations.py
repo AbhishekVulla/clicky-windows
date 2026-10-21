@@ -1,6 +1,6 @@
-"""Teaching-annotation tag grammar (hackathon: draw-on-screen).
+"""Teaching-annotation tag grammar for draw-on-screen mode.
 
-The vision model appends shape tags to its spoken answer — Farza's exact
+The vision model appends shape tags to its spoken answer: Farza's exact
 native pattern (dimension-labeled screenshot + [SHAPE:coords] tags, NO
 grid-locator). This module strips the tags (so TTS never reads coordinates
 aloud) and returns shape objects in screenshot-pixel space. Model-agnostic:
@@ -14,8 +14,8 @@ Grammar (coords are integer screenshot pixels, origin top-left):
     [LABEL:x,y:text]        floating text at (x,y)
 
 The same `[SHAPE:coords]` text-tag + regex pattern the `[POINT:x,y]` cursor
-already uses (ai.parse_point_tag) — extending the cursor to shapes is just
-more tag types, exactly as the Bitshank-2338 fork did.
+already uses (ai.parse_point_tag): extending the cursor to shapes is just
+more tag types.
 """
 from __future__ import annotations
 
@@ -55,9 +55,9 @@ class Label:
 
 # All shape regexes are case-INSENSITIVE + tolerate whitespace after '['.
 # The annotation prompt asks for all-lowercase prose, so the model may well
-# emit `[circle:...]` instead of `[CIRCLE:...]` — both must parse AND strip,
+# emit `[circle:...]` instead of `[CIRCLE:...]`: both must parse AND strip,
 # or lowercase coordinates would leak to TTS (the never-speak-coords invariant).
-# Note the `\s*` BEFORE each colon too — a model could emit `[circle : ...]`
+# The `\s*` BEFORE each colon matters too: a model could emit `[circle : ...]`
 # with a space before the colon; that variant must also parse AND strip so
 # coordinates never reach TTS (the never-speak-coords invariant).
 _ARROW_RE = re.compile(r"\[\s*ARROW\s*:\s*(\d+)\s*,\s*(\d+)\s*->\s*(\d+)\s*,\s*(\d+)\s*\]", re.IGNORECASE)
@@ -70,7 +70,7 @@ _LABEL_RE = re.compile(r"\[\s*LABEL\s*:\s*(\d+)\s*,\s*(\d+)\s*:([^\]]*)\]", re.I
 _ANY_TAG_RE = re.compile(r"\[\s*(?:ARROW|CIRCLE|UNDERLINE|LABEL)\s*:[^\]]*\]", re.IGNORECASE)
 
 # Fail-closed strip: removes an UNTERMINATED shape tag (and everything after
-# it) — e.g. a truncated `look here [CIRCLE:120,40,15` with no closing `]`.
+# it), e.g. a truncated `look here [CIRCLE:120,40,15` with no closing `]`.
 # Without this, a malformed/truncated tag would survive into the spoken text
 # and TTS would read the coordinates aloud, violating the hard invariant that
 # coordinates are never spoken. Matches the pipeline's "stop at the first '['"
@@ -84,7 +84,7 @@ def parse_annotations(text: str) -> tuple[str, list]:
     """Return ``(spoken_text_with_tags_stripped, [Annotation, ...])``.
 
     Annotations are returned in their order of appearance so the overlay can
-    render them in a sensible sequence. Malformed tags are dropped silently —
+    render them in a sensible sequence. Malformed tags are dropped silently:
     a half-formed tag must never crash the pipeline mid-response.
     """
     found: list[tuple[int, object]] = []

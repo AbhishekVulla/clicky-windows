@@ -17,7 +17,7 @@ def test_kb_module_importable():
 # --- TestSanitizeAppName -----------------------------------------------------
 
 class TestSanitizeAppName:
-    """Pure function tests — no fixture, no filesystem."""
+    """Pure function tests: no fixture, no filesystem."""
 
     def test_sanitize_lowercases_keeping_dot_exe(self):
         from kb import _sanitize_app_name
@@ -37,7 +37,7 @@ class TestRecall:
     (content, sanitized_name) or ('', '') for the empty paths."""
 
     def test_recall_returns_empty_for_missing_file(self, tmp_path: Path):
-        """No .md file for this app → ('', '') — Claude already knows."""
+        """No .md file for this app → ('', ''): Claude already knows."""
         from kb import recall
         content, name = recall("edupack.exe", kb_dir=tmp_path)
         assert content == ""
@@ -46,7 +46,7 @@ class TestRecall:
     def test_recall_returns_empty_when_kb_dir_does_not_exist(
         self, tmp_path: Path
     ):
-        """Override pointing at a missing dir → ('', '') — no exception."""
+        """Override pointing at a missing dir → ('', ''), no exception."""
         from kb import recall
         missing = tmp_path / "does_not_exist"
         content, name = recall("edupack.exe", kb_dir=missing)
@@ -76,7 +76,7 @@ class TestRecall:
     def test_recall_returns_empty_for_non_positive_max_chars(
         self, tmp_path: Path
     ):
-        """max_chars <= 0 → ('', '') (defensive — Python's text[-0:]
+        """max_chars <= 0 → ('', '') (defensive: Python's text[-0:]
         returns FULL string, so a misconfigured caller would get
         the whole file. Fail closed.)."""
         from kb import recall
@@ -87,7 +87,7 @@ class TestRecall:
         assert recall("edupack.exe", kb_dir=tmp_path)[0] != ""
 
     def test_recall_returns_empty_for_blank_app_name(self, tmp_path: Path):
-        """Empty/whitespace app_name → ('', '') — no exception."""
+        """Empty/whitespace app_name → ('', ''), no exception."""
         from kb import recall
         assert recall("", kb_dir=tmp_path) == ("", "")
         assert recall("   ", kb_dir=tmp_path) == ("", "")
@@ -98,7 +98,7 @@ class TestRecall:
         """Without explicit kb_dir param, falls back to config.KB_DIR.
 
         Patches kb.KB_DIR module-level binding (the value imported at
-        module load time) — this is how tests verify the env-override
+        module load time). This is how tests verify the env-override
         path without touching the real ~/Documents/Clicky Wiki/.
         """
         from kb import recall

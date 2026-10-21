@@ -8,69 +8,46 @@ Why Ctrl+Alt+Space and not Alt+Space, Ctrl+Shift+Space, or Fn+Space:
 
 - **Alt+Space alone** is reserved by Windows for the window menu (Move / Size /
   Minimize / Maximize / Close). Microsoft also reassigned it to Copilot in
-  Windows 11 (late 2024). Every launcher that ships with Alt+Space (Raycast,
-  Flow Launcher, PowerToys Run, Launchy) requires users to manually disable
-  these via `Settings > Hotkeys`. Making it work cleanly requires Win32
-  `RegisterHotKey` + `GetAsyncKeyState` polling for release detection (8-12h
-  of fragile ctypes code). That upgrade is deferred to Phase 1.5 as a drop-in
-  subclass of `PushToTalkHotkey`.
-- **Ctrl+Shift+Space** was our earlier pivot target (morning of 2026-04-12),
-  but empirical testing revealed it conflicts with Microsoft Excel + Google
-  Sheets "Select entire worksheet" binding. Because this listener uses
+  Windows 11 (late 2024). Supporting it cleanly would need Win32
+  `RegisterHotKey` + `GetAsyncKeyState` polling for release detection, as a
+  drop-in subclass of `PushToTalkHotkey`.
+- **Ctrl+Shift+Space** conflicts with the Microsoft Excel + Google Sheets
+  "Select entire worksheet" binding. Because this listener uses
   `suppress=False` (observe-only), the spreadsheet underneath receives the
-  keypress AND wipes the user's selection every time they invoke Clicky. That
-  breaks the Excel-learning demo narrative entirely. See DECISIONS.md
-  2026-04-12 (evening) "Ctrl+Alt+Space replaces Ctrl+Shift+Space" for the
-  full rationale.
-- **Fn+Space** was researched and rejected: the Fn key is handled by the
-  laptop's Embedded Controller BELOW the OS layer. Windows never receives an
-  Fn keypress event. pynput's `WH_KEYBOARD_LL` hook does not see it. On many
-  laptops, Fn+Space produces a hardware action (brightness / backlight /
-  airplane mode) instead of a Space event. AutoHotkey community confirms:
-  *"the Fn key does not (as a general rule) generate any scan code that can
-  be used by AHK, as the key is intercepted and interpreted directly by the
-  PC's BIOS."* Non-portable even where it happens to work.
-- **Ctrl+Alt+Space** (chosen): 10-minute pivot from Ctrl+Shift+Space, zero
-  known code-level conflicts (Excel, Sheets, Windows window menu, Copilot,
-  VS Code all clear), reuses the existing pynput suppress=False model.
-  Three-finger combo but all on the left side of the keyboard for one-handed
-  ergonomics. VS Code binds Ctrl+Shift+Space to "Trigger Parameter Hints" —
-  that was a minor conflict with the previous pivot but is NOT a conflict
-  with Ctrl+Alt+Space.
+  keypress AND wipes the user's selection every time they invoke Clicky.
+  VS Code also binds it to "Trigger Parameter Hints".
+- **Fn+Space** is unreliable: the Fn key is handled by the laptop's Embedded
+  Controller BELOW the OS layer. Windows never receives an Fn keypress event.
+  pynput's `WH_KEYBOARD_LL` hook does not see it. On many laptops, Fn+Space
+  produces a hardware action (brightness / backlight / airplane mode) instead
+  of a Space event. Non-portable even where it happens to work.
+- **Ctrl+Alt+Space** (chosen): no conflicts with Excel, Sheets, the Windows
+  window menu, Copilot or VS Code, and it works with the pynput
+  suppress=False model. Three-finger combo but all on the left side of the
+  keyboard for one-handed ergonomics.
 
-  **Known setup requirement (surfaced 2026-04-12 evening manual gate):**
-  Claude Desktop for Windows binds Ctrl+Alt+Space to its "What can I help
-  you with today?" quick-access prompt. Because our listener is observe-
-  only, both apps receive the keypress. Phase 1 users with Claude Desktop
-  installed must disable the Claude Desktop binding in its Settings
-  (Keyboard Shortcuts > Ctrl+Alt+Space > None / reassign) — same pattern
-  Raycast / Flow Launcher / PowerToys Run users follow for the Alt+Space /
-  Windows menu / Copilot conflicts. Phase 2's configurable-hotkey UI
-  eliminates this by letting users pick any combo. Phase 1.5's Win32
-  RegisterHotKey subclass (deferred) suppresses the combo at the OS level,
-  eliminating the conflict entirely.
+  **Known setup requirement:** Claude Desktop for Windows binds
+  Ctrl+Alt+Space to its "What can I help you with today?" quick-access
+  prompt. Because our listener is observe-only, both apps receive the
+  keypress. Users with Claude Desktop installed must disable the Claude
+  Desktop binding in its Settings (Keyboard Shortcuts > Ctrl+Alt+Space >
+  None / reassign). A Win32 RegisterHotKey subclass would suppress the combo
+  at the OS level and remove the conflict.
 
-`suppress=False` is DELIBERATE and load-bearing: pynput's suppress flag is
-global all-or-nothing. Setting it to True would install a `WH_KEYBOARD_LL`
-hook that blocks EVERY key event system-wide, not just our combo. That's the
-exact bug that caused the earlier Alt+Space pivot away from suppress=True.
+`suppress=False` matters: pynput's suppress flag is global, all or nothing. Setting it to True would install a `WH_KEYBOARD_LL`
+hook that blocks EVERY key event system-wide, not just our combo.
 Ctrl+Alt+Space has no default Windows OS behavior that needs suppressing, so
 observe-only works cleanly.
 
 Clicky (macOS) uses ctrl+option modifier-only via a CGEvent LISTEN-ONLY tap
 (observes but does NOT consume keys). Our suppress=False approach is the
-Windows equivalent — same "observe but don't consume" philosophy.
+Windows equivalent: same "observe but don't consume" philosophy.
 
-Callbacks run on the pynput listener thread, NOT the Qt main thread. Phase 1
-caller (this module's __main__) just prints. Step 7 app.py will wire them to
-pyqtSignal.emit which is thread-safe by design — Qt marshals across threads.
+Callbacks run on the pynput listener thread, NOT the Qt main thread. app.py
+wires them to pyqtSignal.emit, which is thread-safe by design (Qt marshals
+across threads).
 
-File order (so `py -3.13 -m hotkey` works):
-    1. Module docstring
-    2. Imports
-    3. HotkeyState enum
-    4. PushToTalkHotkey class
-    5. __main__ block LAST
+The `__main__` block stays last so `py -3.13 -m hotkey` works.
 """
 from __future__ import annotations
 
@@ -110,16 +87,15 @@ class PushToTalkHotkey:
 
     Thread model: pynput installs a low-level Windows keyboard hook on its
     own thread and invokes our handlers from that thread. Callers' on_press /
-    on_release run on the pynput listener thread. Phase 1 (__main__) just
-    prints, which is thread-safe. Step 7 app.py wires to pyqtSignal.emit
-    which marshals across threads for free.
+    on_release run on the pynput listener thread. app.py wires them to
+    pyqtSignal.emit, which marshals across threads for free.
 
     A small threading.Lock guards the state flags because the listener thread
     fires handlers serially BUT start()/stop() can be called from the main
     thread concurrently with handler execution.
 
-    suppress=False is DELIBERATE and load-bearing: pynput's suppress flag is
-    global (all-or-nothing), and we only want to observe Ctrl+Alt+Space, not
+    suppress stays False because pynput's suppress flag is global (all or
+    nothing), and we only want to observe Ctrl+Alt+Space, not
     block every other key on the system. Ctrl+Alt+Space has no default
     Windows behavior, so observe-only works.
     """
@@ -168,13 +144,12 @@ class PushToTalkHotkey:
         Idempotent: calling start() twice is a no-op after the first.
         The listener runs on its own thread; this returns immediately.
 
-        suppress=False is DELIBERATE -- we observe key events but do NOT
+        suppress=False: we observe key events but do NOT
         consume them. Ctrl+Alt+Space has no default Windows OS behavior
         (unlike Alt+Space which opens the title-bar menu / Copilot), so we
         don't need to block it. This preserves global typing. Changing to
         suppress=True would block ALL keys globally due to pynput's
-        all-or-nothing suppress semantics -- the exact bug that forced the
-        earlier Alt+Space pivot.
+        all-or-nothing suppress semantics.
         """
         with self._lock:
             if self._listener is not None:
@@ -222,7 +197,7 @@ class PushToTalkHotkey:
         pynput fires Key.alt_l on left-Alt press. Right-Alt on international
         keyboards is often Alt_Gr (AltGr) which is a separate pynput key
         from Alt_R. We lump all four together so the combo works
-        regardless of which Alt is pressed. Note: if the user is on an
+        regardless of which Alt is pressed. If the user is on an
         international keyboard layout that uses AltGr for composing
         characters, holding Ctrl+AltGr+Space will still trigger Clicky,
         which is acceptable -- AltGr without a composing key is typically
@@ -309,9 +284,9 @@ class PushToTalkHotkey:
 if __name__ == "__main__":
     # Run: py -3.13 -m hotkey
     # Hold Ctrl+Alt+Space to trigger PRESSED, release any of the 3 for RELEASED.
-    # CRITICAL: verify typing in other apps still works (suppress=False).
-    # CRITICAL: verify Excel does NOT "Select entire worksheet" on the combo
-    # (that was the Ctrl+Shift+Space conflict this pivot fixes).
+    # Check that typing in other apps still works (suppress=False), and that
+    # Excel does NOT "Select entire worksheet" on the combo
+    # (the Ctrl+Shift+Space conflict this combo avoids).
     import time
 
     print("=" * 70)

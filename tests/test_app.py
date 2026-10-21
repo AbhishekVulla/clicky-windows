@@ -14,7 +14,7 @@ def test_app_module_importable():
 # --- flush_sentences ----------------------------------------------------------
 
 class TestFlushSentences:
-    """Tests for app.flush_sentences — regex sentence splitter."""
+    """Tests for app.flush_sentences, the regex sentence splitter."""
 
     def test_single_sentence_with_trailing_text(self):
         from app import flush_sentences
@@ -61,7 +61,7 @@ class TestFlushSentences:
 # --- get_foreground_app -------------------------------------------------------
 
 class TestGetForegroundApp:
-    """Tests for app.get_foreground_app — ctypes Win32 wrapper."""
+    """Tests for app.get_foreground_app, the ctypes Win32 wrapper."""
 
     def test_returns_tuple_of_two_strings(self):
         from app import get_foreground_app
@@ -79,7 +79,7 @@ class TestGetForegroundApp:
         # Real desktop apps come back as basenames like "excel.exe" or
         # "chrome.exe". On headless CI runners (no GUI foreground), the
         # name might be something like "hosted-compute-agent" with no
-        # extension. Both are valid — what we actually care about is that
+        # extension. Both are valid. What we actually care about is that
         # we got a clean basename without path separators.
         assert app_name
         assert "/" not in app_name
@@ -149,7 +149,6 @@ class TestClickyApp:
         """On a re-press mid-response, _handle_release kills in-flight TTS + sets
         grace so the new PTT doesn't pick up the aborted TTS's decay.
         """
-        import threading
         import time as _t
         app = self._make_app(mocker)
         app._stt.stop_recording.return_value = ""
@@ -183,7 +182,7 @@ class TestClickyApp:
         app._tts.stop.assert_called_once()
 
     def test_press_handler_shows_waveform_at_cursor(self, mocker):
-        """Path A Task 10: _handle_press emits sig_show_waveform with the cursor
+        """_handle_press emits sig_show_waveform with the cursor
         position + the containing monitor → OverlayController routes to the
         right screen + hides cursor polygon + shows the 5-bar waveform."""
         app = self._make_app(mocker)
@@ -257,7 +256,7 @@ class TestClickyApp:
         app._overlay.hide_spinner.assert_called_once()
 
     def test_press_clears_stale_annotations(self, mocker):
-        """v0.3.0: PRESS must clear any stale teaching annotations from a prior
+        """PRESS must clear any stale teaching annotations from a prior
         turn so old shapes never survive a no-speech/cancelled/errored turn."""
         app = self._make_app(mocker)
         mocker.patch("app.get_foreground_app", return_value=("EXCEL.EXE", "Sheet1"))
@@ -277,7 +276,7 @@ class TestClickyApp:
         app._overlay.clear_all_annotations.assert_called_once()
 
     def test_press_handler_plays_listening_chime(self, mocker):
-        """Path A Task 11: _handle_press plays a short chime the moment the
+        """_handle_press plays a short chime the moment the
         hotkey goes down so the user has immediate feedback 'mic is hot, keep
         talking'. Must be non-blocking (0ms pipeline latency)."""
         import app as app_module
@@ -297,7 +296,7 @@ class TestClickyApp:
         """_handle_press starts capture_all_screens + memory.recall on a
         background thread so the work overlaps with the user speaking.
 
-        Saves ~250ms post-release wall-clock (the full capture stage — hide
+        Saves ~250ms post-release wall-clock (the full capture stage: hide
         overlay + 50ms wait + mss.grab + PIL resize + show overlay).
         """
         app = self._make_app(mocker)
@@ -326,8 +325,8 @@ class TestClickyApp:
         reuse the press-time captures without calling capture_all_screens
         (no flicker, no wasted work on cursor-still sessions).
 
-        Post-Commit-2: decision logic moved from _pipeline_worker to
-        _release_capture_worker. This test targets the worker directly."""
+        The decision logic lives in _release_capture_worker. This test
+        targets the worker directly."""
         import queue as _queue
         app = self._make_app(mocker)
 
@@ -348,7 +347,7 @@ class TestClickyApp:
         capture_fn = mocker.patch("app.capture_all_screens")
 
         result_queue: _queue.Queue = _queue.Queue(maxsize=1)
-        # Cursor moved only 18px (sqrt(15²+10²)) — well within 150px threshold
+        # Cursor moved only 18px (sqrt(15²+10²)), well within 150px threshold
         app._release_capture_worker(
             release_cursor=(115, 110),
             app_name="EXCEL.EXE",
@@ -368,11 +367,11 @@ class TestClickyApp:
         Claude stream (not batch tts.speak() at the end). The tag-start character
         '[' must freeze flushing so the POINT tag is never spoken aloud.
 
-        Biggest latency win in Path A: first audible word happens when sentence-1
+        Biggest latency win in the pipeline: first audible word happens when sentence-1
         is ready (~1200ms after Claude TTFT) instead of when sentence-N is done
         (~3700ms).
 
-        Post-Commit-2: `_pipeline_worker` takes a pre-populated capture queue
+        `_pipeline_worker` takes a pre-populated capture queue
         (normally filled in parallel by `_release_capture_worker`). Tests pass
         a manually-populated queue."""
         import queue as _queue
@@ -446,11 +445,9 @@ class TestClickyApp:
         )
 
     def test_release_capture_worker_reuses_on_medium_cursor_move(self, mocker):
-        """Commit 1 threshold (50 → 150px) verified at the worker level.
-        Cursor moves 106px — within 'target hover' intent, not 'user
-        repositioned' — so worker reuses press-time captures. Pre-Commit-1
-        this would have re-captured (106 > 50); post-Commit-1 it reuses
-        (106 <= 150)."""
+        """150px reuse threshold verified at the worker level.
+        Cursor moves 106px, within 'target hover' intent rather than 'user
+        repositioned', so worker reuses press-time captures (106 <= 150)."""
         import queue as _queue
         app = self._make_app(mocker)
 
@@ -471,8 +468,8 @@ class TestClickyApp:
         capture_fn = mocker.patch("app.capture_all_screens")
 
         result_queue: _queue.Queue = _queue.Queue(maxsize=1)
-        # Cursor moved 106px (sqrt(80² + 70²)) — above old 50px threshold,
-        # below new 150px threshold. Should reuse.
+        # Cursor moved 106px (sqrt(80² + 70²)), below the 150px threshold.
+        # Should reuse.
         app._release_capture_worker(
             release_cursor=(180, 170),
             app_name="EXCEL.EXE",
@@ -492,7 +489,7 @@ class TestClickyApp:
         release (safeguard against stale screenshots when user actively
         repositioned mid-utterance).
 
-        Post-Commit-2: decision logic lives in _release_capture_worker."""
+        Decision logic lives in _release_capture_worker."""
         import queue as _queue
         from PIL import Image
         app = self._make_app(mocker)
@@ -521,7 +518,7 @@ class TestClickyApp:
         capture_fn = mocker.patch("app.capture_all_screens", return_value=[fresh_capture])
 
         result_queue: _queue.Queue = _queue.Queue(maxsize=1)
-        # Cursor moved 283px (sqrt(200²+200²)) — well past 150px threshold
+        # Cursor moved 283px (sqrt(200²+200²)), well past 150px threshold
         app._release_capture_worker(
             release_cursor=(300, 300),
             app_name="EXCEL.EXE",
@@ -554,16 +551,16 @@ class TestClickyApp:
         assert "api_key" in kwargs
         assert clicky._ai is mock_factory.return_value
 
-    # --- Commit 2: parallel release capture (2026-04-21) -----------------
+    # --- Parallel release capture ----------------------------------------
 
     def test_release_capture_runs_in_parallel_with_stt(self, mocker):
-        """Commit 2: release-time capture worker must start BEFORE
+        """Release-time capture worker must start BEFORE
         stt.stop_recording returns. Event handshake proves parallelism:
         STT blocks in stop_recording until the test releases it; capture
         is instrumented to signal when it's called. If capture_started
         fires WHILE stt_release is still unset, parallelism is proven.
-        If the refactor regressed to serial, capture_started never fires
-        until after stt_release — test times out.
+        If capture runs serially, capture_started never fires until
+        after stt_release and the test times out.
 
         Pattern mirrors test_tts.py::test_prefetch_fires_before_previous_playback_completes.
         """
@@ -618,7 +615,7 @@ class TestClickyApp:
             "Either the worker wasn't launched, or it's waiting on STT (regressed to serial)."
         )
         assert not stt_release.is_set(), (
-            "capture_started fired AFTER stt_release — shouldn't happen but indicates test bug."
+            "capture_started fired AFTER stt_release, which indicates a test bug."
         )
 
         # Now release STT and let the pipeline finish cleanly.
@@ -627,7 +624,7 @@ class TestClickyApp:
             app._worker_thread.join(timeout=3.0)
 
     def test_release_no_speech_bails_without_hanging(self, mocker):
-        """Commit 2: if stt.stop_recording returns empty, pipeline_worker
+        """If stt.stop_recording returns empty, pipeline_worker
         must bail out without hanging on capture_queue.get(). The worker
         thread finishes in the background as a daemon thread."""
         app = self._make_app(mocker)
@@ -645,7 +642,7 @@ class TestClickyApp:
         if app._worker_thread is not None:
             app._worker_thread.join(timeout=3.0)
             assert not app._worker_thread.is_alive(), (
-                "pipeline_worker hung after no-speech bail — likely blocked on "
+                "pipeline_worker hung after no-speech bail, likely blocked on "
                 "capture_queue.get() without a timeout or fallback"
             )
         # Claude must not have been called (no speech → no request).
@@ -692,7 +689,7 @@ class TestClickyApp:
 
         mocker.patch("app.capture_all_screens", side_effect=record_capture)
 
-        # Call worker directly on this thread — slot dispatch is synchronous.
+        # Call worker directly on this thread; slot dispatch is synchronous.
         result_queue: _queue.Queue = _queue.Queue(maxsize=1)
         app._release_capture_worker(
             release_cursor=(500, 500),
@@ -710,17 +707,17 @@ class TestClickyApp:
         assert not result_queue.empty(), "worker did not push result to queue"
 
 
-# --- Sprint 3.8: single-instance mutex ---------------------------------------
+# --- Single-instance mutex ---------------------------------------------------
 
 class TestSingleInstanceMutex:
     """Tests for app._acquire_single_instance_mutex.
 
-    Bug fixed: clicking the installed Clicky shortcut multiple times spawned
-    multiple Clicky processes. Each had its own pynput Listener, so one
-    Ctrl+Alt+Space press fired N independent STT->Claude->TTS pipelines and
-    the user heard N overlapping voice responses.
+    Without it, clicking the installed Clicky shortcut multiple times spawns
+    multiple Clicky processes. Each has its own pynput Listener, so one
+    Ctrl+Alt+Space press fires N independent STT->Claude->TTS pipelines and
+    the user hears N overlapping voice responses.
 
-    Fix: Win32 named mutex acquired before QApplication construction. First
+    A Win32 named mutex is acquired before QApplication construction. First
     process gets the mutex; second sees ERROR_ALREADY_EXISTS=183 and exits
     with a MessageBox telling the user to look in the system tray.
     """
@@ -735,7 +732,7 @@ class TestSingleInstanceMutex:
         from app import _acquire_single_instance_mutex
         result = _acquire_single_instance_mutex(kernel32=mock_kernel32)
         assert result == 12345
-        # CloseHandle MUST NOT be called — we keep the mutex alive.
+        # CloseHandle MUST NOT be called; we keep the mutex alive.
         mock_kernel32.CloseHandle.assert_not_called()
 
     def test_second_instance_returns_none_and_closes_handle(self, mocker):
@@ -752,7 +749,7 @@ class TestSingleInstanceMutex:
         mock_kernel32.CloseHandle.assert_called_once_with(67890)
 
     def test_create_mutex_failure_returns_fail_open_for_none(self, mocker):
-        """If CreateMutexW genuinely fails it returns NULL — and ctypes maps
+        """If CreateMutexW genuinely fails it returns NULL, and ctypes maps
         c_void_p NULL to Python None (NOT integer 0) when restype is HANDLE.
         Fail open: don't block startup, accept the small risk of duplicates
         over leaving the user with a broken installer."""
@@ -761,7 +758,7 @@ class TestSingleInstanceMutex:
         from app import _acquire_single_instance_mutex
         result = _acquire_single_instance_mutex(kernel32=mock_kernel32)
         assert result == "fail-open"
-        # GetLastError must NOT be checked when CreateMutexW failed —
+        # GetLastError must NOT be checked when CreateMutexW failed:
         # the handle is invalid, no point asking why.
         mock_kernel32.GetLastError.assert_not_called()
 
@@ -778,7 +775,7 @@ class TestSingleInstanceMutex:
         mock_kernel32.GetLastError.assert_not_called()
 
 
-# --- Sprint 4: TTS factory dispatch -----------------------------------------
+# --- TTS factory dispatch ---------------------------------------------------
 
 
 class TestTTSProviderDispatch:
@@ -791,7 +788,7 @@ class TestTTSProviderDispatch:
     main-block flow."""
 
     def test_resolve_tts_credentials_for_cartesia(self, mocker):
-        """Helper returns (provider, api_key) tuple — Cartesia path."""
+        """Helper returns (provider, api_key) tuple: Cartesia path."""
         mocker.patch("app.resolve_setting", return_value="cartesia")
         mocker.patch("app.resolve_api_key", side_effect=lambda name: {
             "CARTESIA_API_KEY": "sk_car_test",
@@ -803,7 +800,7 @@ class TestTTSProviderDispatch:
         assert api_key == "sk_car_test"
 
     def test_resolve_tts_credentials_for_elevenlabs(self, mocker):
-        """Helper returns (provider, api_key) tuple — ElevenLabs path."""
+        """Helper returns (provider, api_key) tuple: ElevenLabs path."""
         mocker.patch("app.resolve_setting", return_value="elevenlabs")
         mocker.patch("app.resolve_api_key", side_effect=lambda name: {
             "CARTESIA_API_KEY": None,
@@ -815,10 +812,10 @@ class TestTTSProviderDispatch:
         assert api_key == "eleven_test"
 
 
-# --- Grid-locator fallback (v0.2.0 Ollama pixel-pointing) --------------------
+# --- Grid-locator fallback (Ollama pixel-pointing) ---------------------------
 
 class TestLooksDirectional:
-    """Tests for app._looks_directional — cheap pre-filter before firing grid-locator."""
+    """Tests for app._looks_directional, the cheap pre-filter before firing grid-locator."""
 
     def test_returns_true_for_where_question(self):
         from app import _looks_directional
@@ -853,7 +850,7 @@ class TestLooksDirectional:
 
 
 class TestMaybeLocateViaGrid:
-    """Tests for app._maybe_locate_via_grid — only fires for Ollama + directional + no coord."""
+    """Tests for app._maybe_locate_via_grid: only fires for Ollama + directional + no coord."""
 
     def _mock_capture(self, mocker):
         """Build a fake capture.LabeledCapture with a 200x100 white screenshot."""
@@ -878,7 +875,7 @@ class TestMaybeLocateViaGrid:
         )
 
     def test_skipped_when_ai_client_is_not_ollama(self, mocker):
-        """Anthropic / Gemini paths should never trigger grid-locator — they have
+        """Anthropic / Gemini paths should never trigger grid-locator; they have
         their own native [POINT:x,y] tag emission."""
         from app import _maybe_locate_via_grid
         from ai import AnthropicClient
@@ -897,27 +894,24 @@ class TestMaybeLocateViaGrid:
         assert out is None
         mock_locator.assert_not_called()
 
-    def test_fires_for_openai_vision_client(self, mocker):
-        """v0.3.0: GPT-4o is weak at raw pixel coords (like Ollama), so the
-        grid-locator must fire for OpenAIVisionClient too — directional query,
-        no coordinate in the result."""
+    @pytest.mark.parametrize("model_id", ["openai/gpt-6.1-sol", "google/gemini-4-argon"])
+    def test_skipped_for_cloud_models_that_point_on_their_own(self, mocker, model_id):
+        """An accurate cloud model that answers without a point (usually because
+        the thing isn't on screen) must not pay for extra locator calls."""
         from app import _maybe_locate_via_grid
-        from ai import OpenAIVisionClient
+        from ai import create_ai_client
         mocker.patch("ai.OpenAI")  # don't build a real OpenAI client
         mock_locator = mocker.patch("app.locate_via_grid", return_value=(123, 45))
 
-        openai_client = OpenAIVisionClient(api_key="sk-proj-test", model_id="openai/gpt-4o")
-        capture = self._mock_capture(mocker)
-        result = self._mock_result(coordinate=None)
-
+        client = create_ai_client(model_id=model_id, api_key="sk-or-v1-test")
         out = _maybe_locate_via_grid(
-            ai_client=openai_client,
-            result=result,
-            cursor_capture=capture,
+            ai_client=client,
+            result=self._mock_result(coordinate=None),
+            cursor_capture=self._mock_capture(mocker),
             query="where is the save button",
         )
-        assert out == (123, 45)
-        mock_locator.assert_called_once()
+        assert out is None
+        mock_locator.assert_not_called()
 
     def test_skipped_when_result_already_has_coordinate(self, mocker):
         """If Claude returned a [POINT:x,y] tag, the locator is unnecessary."""
@@ -939,8 +933,8 @@ class TestMaybeLocateViaGrid:
         mock_locator.assert_not_called()
 
     def test_skipped_when_query_not_directional(self, mocker):
-        """Conceptual questions ('what is HTML') should skip grid-locator —
-        no UI element to point at, would waste 2 LLM calls."""
+        """Conceptual questions ('what is HTML') should skip grid-locator:
+        no UI element to point at, and it would waste 2 LLM calls."""
         from app import _maybe_locate_via_grid
         from ai import OllamaClient
         mock_locator = mocker.patch("app.locate_via_grid")
@@ -1047,7 +1041,7 @@ class TestMaybeLocateViaGrid:
         assert any("GRID-LOCATOR" in m and "hit" in m and "450" in m for m in log_messages)
 
     def test_passes_debug_log_to_locator_for_structured_logging(self, mocker):
-        """Codex MED fix: _maybe_locate_via_grid must thread dbg.log into
+        """_maybe_locate_via_grid must thread dbg.log into
         locate_via_grid so transport failures are distinguishable from
         model uncertainty in the debug log."""
         from app import _maybe_locate_via_grid
@@ -1071,18 +1065,20 @@ class TestMaybeLocateViaGrid:
         assert kwargs.get("debug_log") is mock_dbg.log
 
 
-# --- Codex HIGH 1 regression: LLM_PROVIDER routing -------------------------
+# --- LLM_PROVIDER routing --------------------------------------------------
 
 class TestResolveLLMCredentials:
-    """Regression tests for the Codex HIGH 1 finding: Settings dropdown
-    persisted LLM_PROVIDER=ollama but startup ignored it and constructed
-    AnthropicClient anyway. The Settings dropdown was cosmetic."""
+    """Startup must build the client for the LLM_PROVIDER the Settings
+    dropdown saved, not construct AnthropicClient regardless. Otherwise
+    the Settings dropdown is cosmetic."""
+
+    @staticmethod
+    def _saved_keys(mocker, **slots):
+        """resolve_api_key returns these slots; every other slot is empty."""
+        mocker.patch("app.resolve_api_key", side_effect=lambda name: slots.get(name))
 
     def test_defaults_to_anthropic_path(self, mocker):
-        """No LLM_PROVIDER + no MODEL_ID override → defaults to
-        anthropic/claude-sonnet-4-6. resolve_setting is keyed (LLM_PROVIDER vs
-        ANTHROPIC_MODEL), and MODEL_ID env is forced empty so the test exercises
-        the default model-resolution path regardless of the local .env."""
+        """No LLM_PROVIDER and no MODEL_ID override: the Anthropic default model."""
         from app import _resolve_llm_credentials
 
         mocker.patch(
@@ -1090,16 +1086,17 @@ class TestResolveLLMCredentials:
             side_effect=lambda name, default=None: {"LLM_PROVIDER": "anthropic"}.get(name, default),
         )
         mocker.patch("app.os.getenv", return_value=None)  # no MODEL_ID env override
-        mocker.patch("app.ANTHROPIC_API_KEY", "sk-ant-test")
+        mocker.patch("app.resolve_model", side_effect=lambda name, default: default)
+        self._saved_keys(mocker, ANTHROPIC_API_KEY="sk-ant-test")
 
         model_id, api_key = _resolve_llm_credentials()
-        assert model_id == "anthropic/claude-sonnet-4-6"
+        assert model_id == "anthropic/claude-haiku-5-5"
         assert api_key == "sk-ant-test"
 
     def test_routes_to_ollama_when_provider_is_ollama(self, mocker):
         """LLM_PROVIDER=ollama → returns ('ollama/<vision-model>', '').
-        Without the v0.2.0 fix, this returned MODEL_ID / ANTHROPIC_API_KEY
-        and the Settings dropdown was silently ignored."""
+        Returning MODEL_ID / ANTHROPIC_API_KEY here would silently ignore
+        the Settings dropdown."""
         from app import _resolve_llm_credentials
 
         mocker.patch("app.resolve_setting", return_value="ollama")
@@ -1110,14 +1107,14 @@ class TestResolveLLMCredentials:
         assert api_key == "", "Ollama path must return empty key (unauthenticated local)"
 
     def test_routes_to_openai_when_provider_is_openai(self, mocker):
-        """v0.3.0: LLM_PROVIDER=openai → returns ('openai/<vision-model>',
+        """LLM_PROVIDER=openai → returns ('openai/<vision-model>',
         OPENAI_API_KEY). create_ai_client routes the openai/ prefix to
         OpenAIVisionClient."""
         from app import _resolve_llm_credentials
 
         mocker.patch("app.resolve_setting", return_value="openai")
         mocker.patch("app.OPENAI_MODEL_VISION", "gpt-4o")
-        mocker.patch("app.OPENAI_API_KEY", "sk-proj-test")
+        self._saved_keys(mocker, OPENAI_API_KEY="sk-proj-test")
 
         model_id, api_key = _resolve_llm_credentials()
         assert model_id == "openai/gpt-4o"
@@ -1130,23 +1127,19 @@ class TestResolveLLMCredentials:
 
         mocker.patch("app.resolve_setting", return_value="openai")
         mocker.patch("app.OPENAI_MODEL_VISION", "gpt-4o")
-        mocker.patch("app.OPENAI_API_KEY", None)
-        mocker.patch("app.ANTHROPIC_API_KEY", None)
-        mocker.patch("app.GEMINI_API_KEY", None)
+        self._saved_keys(mocker)
 
         model_id, api_key = _resolve_llm_credentials()
         assert api_key == ""
 
     def test_openai_reuses_cached_openrouter_key(self, mocker):
-        """v0.4.x: OpenAI slot empty but an sk-or- key cached (here in the
+        """OpenAI slot empty but an sk-or- key cached (here in the
         Anthropic slot) → OpenAI reuses it. One OpenRouter key serves all."""
         from app import _resolve_llm_credentials
 
         mocker.patch("app.resolve_setting", return_value="openai")
         mocker.patch("app.OPENAI_MODEL_VISION", "gpt-5.4")
-        mocker.patch("app.OPENAI_API_KEY", None)
-        mocker.patch("app.ANTHROPIC_API_KEY", "sk-or-v1-test")
-        mocker.patch("app.GEMINI_API_KEY", None)
+        self._saved_keys(mocker, ANTHROPIC_API_KEY="sk-or-v1-test")
 
         model_id, api_key = _resolve_llm_credentials()
         assert model_id == "openai/gpt-5.4"
@@ -1158,15 +1151,13 @@ class TestResolveLLMCredentials:
 
         mocker.patch("app.resolve_setting", return_value="openai")
         mocker.patch("app.OPENAI_MODEL_VISION", "gpt-5.4")
-        mocker.patch("app.OPENAI_API_KEY", "sk-proj-direct")
-        mocker.patch("app.ANTHROPIC_API_KEY", "sk-or-v1-test")
-        mocker.patch("app.GEMINI_API_KEY", None)
+        self._saved_keys(mocker, OPENAI_API_KEY="sk-proj-direct", ANTHROPIC_API_KEY="sk-or-v1-test")
 
         _, api_key = _resolve_llm_credentials()
         assert api_key == "sk-proj-direct"
 
     def test_openai_realtime_resolves_to_gpt4o_vision_client(self, mocker):
-        """v0.3.0: LLM_PROVIDER=openai-realtime still builds a valid GPT-4o
+        """LLM_PROVIDER=openai-realtime still builds a valid GPT-4o
         vision client as the main ai_client (used by the realtime path's
         grid-locator refinement). The realtime speech-to-speech session runs
         as a parallel pipeline (_setup_realtime), not via this resolver."""
@@ -1174,7 +1165,7 @@ class TestResolveLLMCredentials:
 
         mocker.patch("app.resolve_setting", return_value="openai-realtime")
         mocker.patch("app.OPENAI_MODEL_VISION", "gpt-4o")
-        mocker.patch("app.OPENAI_API_KEY", "sk-proj-test")
+        self._saved_keys(mocker, OPENAI_API_KEY="sk-proj-test")
 
         model_id, api_key = _resolve_llm_credentials()
         assert model_id == "openai/gpt-4o"
@@ -1182,14 +1173,12 @@ class TestResolveLLMCredentials:
 
     def test_anthropic_path_handles_none_api_key(self, mocker):
         """If ANTHROPIC_API_KEY is None (resolve_api_key returned nothing),
-        we must return empty string (not None) — create_ai_client expects str."""
+        we must return empty string (not None): create_ai_client expects str."""
         from app import _resolve_llm_credentials
 
         mocker.patch("app.resolve_setting", return_value="anthropic")
         mocker.patch("app.MODEL_ID", "anthropic/claude-sonnet-4-6")
-        mocker.patch("app.ANTHROPIC_API_KEY", None)
-        mocker.patch("app.OPENAI_API_KEY", None)
-        mocker.patch("app.GEMINI_API_KEY", None)
+        self._saved_keys(mocker)
 
         model_id, api_key = _resolve_llm_credentials()
         assert api_key == ""
@@ -1205,18 +1194,19 @@ class TestResolveLLMCredentials:
             side_effect=lambda name, default=None: {"LLM_PROVIDER": "bogus-provider"}.get(name, default),
         )
         mocker.patch("app.os.getenv", return_value=None)  # no MODEL_ID env override
-        mocker.patch("app.ANTHROPIC_API_KEY", "sk-ant-test")
+        mocker.patch("app.resolve_model", side_effect=lambda name, default: default)
+        self._saved_keys(mocker, ANTHROPIC_API_KEY="sk-ant-test")
 
         model_id, api_key = _resolve_llm_credentials()
-        # Falls back to anthropic with the default model — doesn't raise.
-        assert model_id == "anthropic/claude-sonnet-4-6"
+        # Falls back to anthropic with the default model; doesn't raise.
+        assert model_id == "anthropic/claude-haiku-5-5"
         assert api_key == "sk-ant-test"
 
 
 class TestAnnotationsToPhysical:
-    """v0.3.0 hackathon: map screenshot-space annotation coords to physical
-    virtual-desktop coords via the SAME unscale_claude_coords transform the
-    [POINT] cursor uses (proven correct by the v0.1.0 253,52->569,117 marker)."""
+    """Map screenshot-space annotation coords to physical virtual-desktop
+    coords via the SAME unscale_claude_coords transform the [POINT] cursor
+    uses (proven correct by the 253,52->569,117 marker)."""
 
     def _cap(self, mocker, scale=2.25):
         cap = mocker.MagicMock()
@@ -1231,7 +1221,7 @@ class TestAnnotationsToPhysical:
         from app import _annotations_to_physical
         from annotations import Circle
         out = _annotations_to_physical([Circle(253, 52, 10, "save")], self._cap(mocker))
-        # 253*2.25=569, 52*2.25=117, r 10*2.25=22 — the exact proven numbers
+        # 253*2.25=569, 52*2.25=117, r 10*2.25=22: the exact proven numbers
         assert out == [Circle(569, 117, 22, "save")]
 
     def test_arrow_both_endpoints(self, mocker):
@@ -1284,7 +1274,7 @@ class TestShouldConnectStt:
 
 
 class TestRealtimeDrawShapes:
-    """Phase 2B: realtime mode does an ACCURATE vision pass (gpt-5.4) — draws
+    """Realtime mode does an ACCURATE vision pass (gpt-5.4): draws
     shapes when draw mode is on, else points the cursor. No grid-locator."""
 
     def _app(self, mocker):
@@ -1328,7 +1318,7 @@ class TestRealtimeDrawShapes:
         vision = mocker.MagicMock()
         vision.ask_stream.return_value = _FakeStream()
         shapes = app._realtime_render_annotations("save", cap, vision)
-        # 253*2.25=569, 52*2.25=117, r 30*2.25=67 — the proven ×scale transform
+        # 253*2.25=569, 52*2.25=117, r 30*2.25=67: the proven ×scale transform
         assert shapes == [Circle(569, 117, 67, "save")]
         # annotation prompt was used (system_prompt kwarg)
         _, kwargs = vision.ask_stream.call_args
@@ -1385,7 +1375,454 @@ class TestResolveLLMGemini:
         from app import _resolve_llm_credentials
         mocker.patch("app.resolve_setting", return_value="gemini")
         mocker.patch("app.GEMINI_MODEL_VISION", "google/gemini-3.5-flash")
-        mocker.patch("app.GEMINI_API_KEY", "sk-or-test")
+        mocker.patch("app.resolve_api_key", side_effect=lambda name: {"GEMINI_API_KEY": "sk-or-test"}.get(name))
         model_id, api_key = _resolve_llm_credentials()
         assert model_id == "google/gemini-3.5-flash"
         assert api_key == "sk-or-test"
+
+
+class TestKeysSavedAtFirstLaunch:
+    """A key saved in the first-launch dialog is used in that same session."""
+
+    def _resolve(self, mocker, monkeypatch, provider, fresh):
+        import app
+        monkeypatch.delenv("MODEL_ID", raising=False)
+        # First launch: nothing was saved yet when app.py was imported.
+        for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"):
+            mocker.patch.object(app, name, None, create=True)
+        mocker.patch(
+            "app.resolve_setting",
+            side_effect=lambda name, default=None: provider if name == "LLM_PROVIDER" else default,
+        )
+        mocker.patch("app.resolve_api_key", side_effect=lambda name: fresh.get(name))
+        return app._resolve_llm_credentials()
+
+    def test_anthropic_key(self, mocker, monkeypatch):
+        _, key = self._resolve(mocker, monkeypatch, "anthropic", {"ANTHROPIC_API_KEY": "sk-ant-fresh"})
+        assert key == "sk-ant-fresh"
+
+    def test_openai_key(self, mocker, monkeypatch):
+        _, key = self._resolve(mocker, monkeypatch, "openai", {"OPENAI_API_KEY": "sk-proj-fresh"})
+        assert key == "sk-proj-fresh"
+
+    def test_openrouter_key_reused_for_gemini(self, mocker, monkeypatch):
+        _, key = self._resolve(mocker, monkeypatch, "gemini", {"ANTHROPIC_API_KEY": "sk-or-v1-fresh"})
+        assert key == "sk-or-v1-fresh"
+
+
+class TestWarmOnPress:
+    def test_warm_connections_warms_llm_and_tts(self, mocker):
+        from app import ClickyApp
+        fake = mocker.MagicMock()
+        ClickyApp._warm_connections(fake)
+        fake._ai.warm.assert_called_once()
+        fake._tts.warm.assert_called_once()
+
+
+def _status_error(code):
+    class ProviderError(Exception):
+        status_code = code
+    return ProviderError(f"HTTP {code}")
+
+
+class TestPlainLanguageFailures:
+    """A failure shows one plain sentence in the tray instead of a silent stop."""
+
+    def _make_app(self, mocker):
+        from app import ClickyApp
+        return ClickyApp(
+            ai_client=mocker.MagicMock(), stt_client=mocker.MagicMock(),
+            tts_client=mocker.MagicMock(), memory_store=mocker.MagicMock(),
+            overlay_controller=mocker.MagicMock(), hotkey_instance=mocker.MagicMock(),
+        )
+
+    def test_rejected_key(self):
+        from app import _friendly_error
+        assert "AI key was rejected" in _friendly_error("AI", _status_error(401))
+
+    def test_rejected_key_wrapped_by_a_client(self):
+        from app import _friendly_error
+        try:
+            try:
+                raise _status_error(401)
+            except Exception as inner:
+                raise RuntimeError("Gemini request failed") from inner
+        except RuntimeError as outer:
+            assert "AI key was rejected" in _friendly_error("AI", outer)
+
+    def test_out_of_credit(self):
+        from app import _friendly_error
+        assert "out of credit" in _friendly_error("voice", _status_error(402))
+
+    def test_offline(self):
+        import httpx
+        from app import _friendly_error
+        assert "internet" in _friendly_error("AI", httpx.ConnectError("no route to host"))
+
+    def test_a_slow_local_model_is_not_blamed_on_the_internet(self):
+        import httpx
+        from app import _friendly_error
+        req = httpx.Request("POST", "http://localhost:11434/api/chat")
+        msg = _friendly_error("AI", httpx.ReadTimeout("timed out", request=req))
+        assert "internet" not in msg and "local" in msg
+
+    def test_anything_else_points_at_the_log(self):
+        from app import _friendly_error
+        assert "debug log" in _friendly_error("AI", ValueError("odd"))
+
+    def test_ai_failure_reaches_the_tray(self, mocker):
+        import queue as _queue
+        import threading
+        from PIL import Image
+        app = self._make_app(mocker)
+        got = []
+        app.sig_notify.connect(got.append)
+        cap = mocker.MagicMock()
+        cap.image = Image.new("RGB", (1280, 800))
+        cap.label = "screen 1 of 1"
+        cap.scale_x = cap.scale_y = 1.0
+        cap.monitor = {"left": 0, "top": 0, "width": 1280, "height": 800}
+        cap.target_width, cap.target_height = 1280, 800
+        cap.is_cursor_screen = True
+        app._press_captures = [cap]
+        app._press_cursor_pos = (10, 10)
+        app._stt.stop_recording.return_value = "where is save"
+        app._ai.ask_stream.side_effect = _status_error(401)
+        q: _queue.Queue = _queue.Queue(maxsize=1)
+        q.put(([cap], "", "test"))
+        app._pipeline_worker("TEST.EXE", "Win", threading.Event(), q)
+        assert len(got) == 1 and "AI key was rejected" in got[0]
+
+    def test_voice_failure_reaches_the_tray(self, mocker):
+        app = self._make_app(mocker)
+        got = []
+        app.sig_notify.connect(got.append)
+        report = app._tts.on_error.call_args.args[0]
+        report(_status_error(401))
+        assert len(got) == 1 and "voice key was rejected" in got[0]
+
+    def test_the_same_message_is_not_repeated(self, mocker):
+        app = self._make_app(mocker)
+        got = []
+        app.sig_notify.connect(got.append)
+        app._notify("voice", _status_error(401))
+        app._notify("voice", _status_error(401))
+        assert len(got) == 1
+
+    def test_a_repeat_is_held_back_even_after_a_different_message(self, mocker):
+        app = self._make_app(mocker)
+        got = []
+        app.sig_notify.connect(got.append)
+        app._notify("voice", _status_error(401))
+        app._notify("AI", _status_error(401))
+        app._notify("voice", _status_error(401))
+        assert len(got) == 2
+
+    def test_a_per_minute_quota_is_a_rate_limit_not_an_empty_account(self):
+        from app import _friendly_error
+        err = _status_error(429)
+        err.args = ("HTTP 429: per-minute request quota exceeded",)
+        assert "rate-limiting" in _friendly_error("AI", err)
+
+    def test_an_empty_billing_balance_reported_as_429_is_out_of_credit(self):
+        from app import _friendly_error
+        err = _status_error(429)
+        err.args = ("You exceeded your current quota, please check your plan and billing details.",)
+        assert "out of credit" in _friendly_error("AI", err)
+
+
+class TestListeningProvider:
+    def test_new_installs_listen_with_cartesia(self, mocker):
+        from app import _resolve_stt_credentials
+        mocker.patch("app.resolve_setting", side_effect=lambda name, default=None: default)
+        mocker.patch("app.resolve_api_key", side_effect=lambda name: {"CARTESIA_API_KEY": "cart"}.get(name))
+        assert _resolve_stt_credentials() == ("cartesia", "cart")
+
+    def test_a_saved_assemblyai_choice_is_kept(self, mocker):
+        from app import _resolve_stt_credentials
+        mocker.patch("app.resolve_setting", return_value="assemblyai")
+        mocker.patch("app.resolve_api_key", side_effect=lambda name: {"ASSEMBLYAI_API_KEY": "aai"}.get(name))
+        assert _resolve_stt_credentials() == ("assemblyai", "aai")
+
+
+class TestHandshakeRejections:
+    def test_a_websocket_401_reads_as_a_rejected_key(self):
+        from types import SimpleNamespace
+        from app import _friendly_error
+
+        class InvalidStatus(Exception):
+            def __init__(self):
+                super().__init__("server rejected WebSocket connection: HTTP 401")
+                self.response = SimpleNamespace(status_code=401)
+
+        try:
+            try:
+                raise InvalidStatus()
+            except InvalidStatus as inner:
+                raise RuntimeError("Cartesia speech-to-text connection failed") from inner
+        except RuntimeError as outer:
+            assert "speech-to-text key was rejected" in _friendly_error("speech-to-text", outer)
+
+
+
+class TestDefaultProvider:
+    @pytest.fixture
+    def keys(self, monkeypatch):
+        values: dict[str, str] = {}
+        for name in ("LLM_PROVIDER", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "MODEL_ID"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setattr("keyring.get_password", lambda s, n: values.get(n))
+        monkeypatch.setattr("keyring.set_password", lambda s, n, v: values.update({n: v}))
+        return values
+
+    def test_with_no_choice_saved_the_default_is_gpt(self, keys):
+        from app import _resolve_llm_credentials
+        keys.update(OPENAI_API_KEY="sk-proj-x")
+        assert _resolve_llm_credentials()[0].startswith("openai/")
+
+    def test_with_no_choice_saved_an_anthropic_only_setup_keeps_working(self, keys):
+        from app import _resolve_llm_credentials
+        keys.update(ANTHROPIC_API_KEY="sk-ant-x")
+        model, key = _resolve_llm_credentials()
+        assert "claude" in model and key == "sk-ant-x"
+
+
+class TestModelIdOverride:
+    def test_a_model_id_override_wins_when_no_provider_was_chosen(self, monkeypatch):
+        values = {"OPENAI_API_KEY": "sk-proj-x", "ANTHROPIC_API_KEY": "sk-or-v1-x"}
+        for name in ("LLM_PROVIDER", "GEMINI_API_KEY", "ANTHROPIC_BASE_URL"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("MODEL_ID", "google/custom-model")
+        monkeypatch.setattr("app.MODEL_ID", "google/custom-model")
+        monkeypatch.setattr("keyring.get_password", lambda s, n: values.get(n))
+        monkeypatch.setattr("keyring.set_password", lambda s, n, v: None)
+        for n in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+            monkeypatch.delenv(n, raising=False)
+        from app import _resolve_llm_credentials
+        assert _resolve_llm_credentials()[0] == "google/custom-model"
+
+
+
+class TestDrawingAnchor:
+    """In draw mode the cursor flies to the first drawing, without covering it."""
+
+    def test_a_circle_is_pointed_at_from_its_edge(self):
+        from annotations import Circle
+        from app import _drawing_anchor
+        x, y = _drawing_anchor([Circle(x=797, y=64, r=12, label="three dots")])
+        assert (x - 797) ** 2 + (y - 64) ** 2 >= 12 ** 2 - 1  # on or outside the ring
+        assert x > 797 and y > 64                              # lower right, off the target
+
+    def test_an_arrow_is_pointed_at_its_tip(self):
+        from annotations import Arrow
+        from app import _drawing_anchor
+        assert _drawing_anchor([Arrow(x1=100, y1=100, x2=300, y2=200)]) == (300, 200)
+
+    def test_an_underline_is_pointed_at_from_below_its_middle(self):
+        from annotations import Underline
+        from app import _drawing_anchor
+        assert _drawing_anchor([Underline(x=100, y=400, w=200)]) == (200, 400)
+
+    def test_a_text_label_alone_is_not_pointed_at(self):
+        from annotations import Label
+        from app import _drawing_anchor
+        assert _drawing_anchor([Label(x=10, y=10, text="note")]) is None
+
+    def test_the_first_shape_wins_over_a_leading_label(self):
+        from annotations import Arrow, Label
+        from app import _drawing_anchor
+        assert _drawing_anchor([Label(x=10, y=10, text="note"), Arrow(x1=0, y1=0, x2=50, y2=60)]) == (50, 60)
+
+
+
+class TestChimeNeverBlocksThePress:
+    """Opening the audio device takes 300-700 ms on Windows; the press must not wait for it."""
+
+    def test_the_chime_returns_at_once_even_when_the_device_is_slow(self, monkeypatch):
+        import time
+        import sounddevice
+        import app
+        opened = []
+
+        class SlowStream:
+            def __init__(self, *a, **k):
+                time.sleep(0.5)  # a cold audio device
+                opened.append(self)
+            def start(self):
+                pass
+            def write(self, data):
+                pass
+
+        monkeypatch.setattr(sounddevice, "OutputStream", SlowStream)
+        monkeypatch.setattr(sounddevice, "play", lambda *a, **k: time.sleep(0.5))
+        monkeypatch.setattr(app, "_CHIME_STREAM", None, raising=False)
+        t0 = time.perf_counter()
+        thread = app._play_chime_async()
+        assert time.perf_counter() - t0 < 0.05
+        thread.join(2)  # the slow open finishes inside this test, not the next one
+
+    def test_one_stream_serves_every_chime(self, monkeypatch):
+        import time
+        import sounddevice
+        import app
+        opened, written = [], []
+
+        class Stream:
+            def __init__(self, *a, **k):
+                opened.append(self)
+            def start(self):
+                pass
+            def write(self, data):
+                written.append(len(data))
+
+        monkeypatch.setattr(sounddevice, "OutputStream", Stream)
+        monkeypatch.setattr(app, "_CHIME_STREAM", None, raising=False)
+        for _ in range(3):
+            app._play_chime_async()
+            deadline = time.time() + 1
+            while len(written) < _ + 1 and time.time() < deadline:
+                time.sleep(0.01)
+        assert len(opened) == 1 and len(written) == 3
+
+    @staticmethod
+    def _wait(cond, timeout=2.0):
+        import time
+        deadline = time.time() + timeout
+        while not cond() and time.time() < deadline:
+            time.sleep(0.01)
+        return cond()
+
+    def test_startup_warm_up_and_a_quick_press_open_one_stream(self, monkeypatch):
+        import time
+        import sounddevice
+        import app
+        opened, written = [], []
+
+        class SlowStream:
+            def __init__(self, *a, **k):
+                time.sleep(0.2)  # both threads arrive while the device is still opening
+                opened.append(self)
+            def start(self):
+                pass
+            def write(self, data):
+                written.append(len(data))
+            def close(self):
+                pass
+
+        monkeypatch.setattr(sounddevice, "OutputStream", SlowStream)
+        monkeypatch.setattr(app, "_CHIME_STREAM", None, raising=False)
+        warm = app._warm_chime()
+        chime = app._play_chime_async()
+        warm.join(2)
+        chime.join(2)
+        assert len(opened) == 1 and len(written) == 1
+
+    def test_rapid_presses_never_write_to_the_device_at_once(self, monkeypatch):
+        import threading
+        import time
+        import sounddevice
+        import app
+        state = {"active": 0, "peak": 0, "done": 0}
+        lock = threading.Lock()
+
+        class Stream:
+            def __init__(self, *a, **k):
+                pass
+            def start(self):
+                pass
+            def write(self, data):
+                with lock:
+                    state["active"] += 1
+                    state["peak"] = max(state["peak"], state["active"])
+                time.sleep(0.1)  # a blocking write while the buffer drains
+                with lock:
+                    state["active"] -= 1
+                    state["done"] += 1
+            def close(self):
+                pass
+
+        monkeypatch.setattr(sounddevice, "OutputStream", Stream)
+        monkeypatch.setattr(app, "_CHIME_STREAM", None, raising=False)
+        for _ in range(3):
+            app._play_chime_async()
+        assert self._wait(lambda: state["done"] == 3)
+        assert state["peak"] == 1
+
+    def test_the_chime_reopens_the_device_after_a_failed_write(self, monkeypatch):
+        import sounddevice
+        import app
+        opened, written, closed = [], [], []
+
+        class Stream:
+            def __init__(self, *a, **k):
+                self.broken = not opened  # the first device goes away (headphones unplugged)
+                opened.append(self)
+            def start(self):
+                pass
+            def write(self, data):
+                if self.broken:
+                    raise sounddevice.PortAudioError("Unanticipated host error")
+                written.append(len(data))
+            def close(self):
+                closed.append(self)
+
+        monkeypatch.setattr(sounddevice, "OutputStream", Stream)
+        monkeypatch.setattr(app, "_CHIME_STREAM", None, raising=False)
+        app._play_chime_async()
+        assert self._wait(lambda: bool(opened) and closed == [opened[0]])
+        app._play_chime_async()
+        assert self._wait(lambda: len(written) == 1)
+        assert len(opened) == 2
+
+    def test_a_device_that_fails_to_start_is_closed_and_retried(self, monkeypatch):
+        import sounddevice
+        import app
+        opened, written, closed = [], [], []
+
+        class Stream:
+            def __init__(self, *a, **k):
+                self.fails = not opened  # the first device opens but will not start
+                opened.append(self)
+            def start(self):
+                if self.fails:
+                    raise sounddevice.PortAudioError("Device unavailable")
+            def write(self, data):
+                written.append(len(data))
+            def close(self):
+                closed.append(self)
+
+        monkeypatch.setattr(sounddevice, "OutputStream", Stream)
+        monkeypatch.setattr(app, "_CHIME_STREAM", None, raising=False)
+        app._play_chime_async()
+        assert self._wait(lambda: bool(opened) and closed == [opened[0]])
+        app._play_chime_async()
+        assert self._wait(lambda: len(written) == 1)
+        assert len(opened) == 2
+
+    def test_a_hung_device_never_piles_up_chime_threads(self, monkeypatch):
+        import threading
+        import time
+        import sounddevice
+        import app
+        release = threading.Event()
+
+        class HungStream:
+            def __init__(self, *a, **k):
+                pass
+            def start(self):
+                pass
+            def write(self, data):
+                release.wait(5)  # the device stops draining and never raises
+            def close(self):
+                pass
+
+        monkeypatch.setattr(sounddevice, "OutputStream", HungStream)
+        monkeypatch.setattr(app, "_CHIME_STREAM", None, raising=False)
+        threads = [app._play_chime_async() for _ in range(20)]
+        time.sleep(app._CHIME_WAIT_S + 0.5)
+        try:
+            assert sum(t.is_alive() for t in threads) == 1  # only the one stuck writing
+        finally:
+            release.set()
+            for t in threads:
+                t.join(2)

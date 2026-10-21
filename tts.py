@@ -1,24 +1,22 @@
 """Clicky Windows text-to-speech layer.
 
 TTS abstract base + CartesiaSonicTTS concrete implementation using Cartesia's
-`sonic-3` model for ~150-250ms TTFB streaming with an expressive "buddy" voice.
+`sonic-3` model for ~150-250ms TTFB streaming with an expressive conversational
+voice.
 
 This module is the voice output half of the push-to-talk loop. Latency is the
-#1 UX priority (see DECISIONS.md "Priority inversion: latency > local-first"
-for why Cartesia Sonic-3 was picked over ElevenLabs / Deepgram / pyttsx3).
+#1 UX priority, which is why Cartesia Sonic-3 is the default over ElevenLabs /
+Deepgram / pyttsx3.
 
 Responsibility boundary:
 - THIS MODULE owns streaming TTS I/O and background playback threads only.
-- app.py (Step 7) owns sentence-boundary chunking and will call speak_sentence()
-  on each completed sentence while Claude is still generating subsequent tokens.
-- No cross-sentence queueing in Phase 1 -- each call is independent.
+- app.py owns sentence-boundary chunking and calls speak_sentence() on each
+  completed sentence while Claude is still generating subsequent tokens.
 
 Threading model:
-- speak() / speak_sentence() are non-blocking: they spawn a daemon thread
-  that opens the Cartesia stream, iterates chunks as they arrive, and plays
-  them via sounddevice. Return within ~10ms.
+- speak() / speak_sentence() are non-blocking and return within ~10ms. Audio
+  streams from the provider and plays via sounddevice on background threads.
 - stop() sets a flag that in-progress threads check on each chunk.
-- Full cancellation (WebSocket close) is Phase 2; Phase 1 is flag-based only.
 
 Top-to-bottom order (so `py -3.13 -m tts` works):
     1. Module docstring
@@ -58,9 +56,8 @@ _SHUTDOWN_SENTINEL = object()
 class TTS(ABC):
     """Abstract base for text-to-speech providers.
 
-    Phase 1: CartesiaSonicTTS (cloud streaming, ~150-250ms TTFB, expressive
-    buddy voice). Phase 2 candidates: Pyttsx3TTS (local offline fallback),
-    EdgeTTS (free Microsoft Neural), ElevenLabsFlashTTS, DeepgramAura2TTS.
+    CartesiaSonicTTS is the default (cloud streaming, ~150-250ms TTFB,
+    expressive conversational voice).
     """
 
     @abstractmethod
@@ -80,9 +77,7 @@ class TTS(ABC):
 
         As Claude generates response tokens, app.py buffers until a sentence
         boundary (./!/?), then calls speak_sentence() on that chunk while
-        Claude continues generating. Each call is independent -- there is no
-        cross-sentence queueing in Phase 1, so overlapping calls will produce
-        overlapping audio. app.py is responsible for serializing calls.
+        Claude continues generating.
         """
         ...
 
@@ -90,20 +85,35 @@ class TTS(ABC):
     def stop(self) -> None:
         """Interrupt current speech.
 
-        Phase 1 wires the API but only partially implements cancellation
-        (Phase 2 Issue #36 feature). Sets a stop flag that newly-spawned
-        speak() threads check at startup and on each chunk -- in-progress
-        chunks already in the sounddevice buffer still play out.
+        Sets a stop flag that speak() threads check at startup and on each
+        chunk.
         """
         ...
+
+    def warm(self) -> None:
+        """Open the provider connection ahead of the first sentence. Never raises."""
+
+    _error_callback: Callable[[BaseException], None] | None = None
+
+    def on_error(self, callback: Callable[[BaseException], None]) -> None:
+        """Register a callback for failures inside the background workers."""
+        self._error_callback = callback
+
+    def _report_error(self, exc: BaseException) -> None:
+        cb = self._error_callback
+        if cb is not None:
+            try:
+                cb(exc)
+            except Exception:
+                pass
 
     def arm_first_chunk_callback(self, cb: Callable[[], None]) -> None:
         """Arm a one-shot callback that fires when the next audible chunk
         starts playing.
 
         Used by ``app.py:_pipeline_worker`` to log the first-audible-word
-        timestamp per interaction — closes the measurement gap between
-        ``CLAUDE: streaming started`` and the moment the user actually
+        timestamp per interaction. That closes the measurement gap between
+        ``LLM: streaming started`` and the moment the user actually
         hears something. Subclasses override only if they need custom
         slot semantics; the default stores the callback on
         ``self._first_chunk_callback`` and the playback loop consumes +
@@ -118,23 +128,133 @@ class TTS(ABC):
         return None
 
 
+# --- One audio stream per voice --------------------------------------------------
+
+class _OutputStream:
+    """One audio output stream per voice, kept open between sentences.
+
+    Opening a Windows audio device takes 0.4-0.9 s; restarting a stream that
+    is already open takes about 75 ms. stop() aborts the stream, dropping any
+    buffered audio at once, and the next press restarts it.
+
+    Writes, restarts and closes take turns under _io_lock. A write checks its
+    sentence's cancel flag and restarts the stream inside _state_lock, the
+    lock abort() takes after stop() sets that flag, so a cancelled sentence
+    can never restart a stream stop() just silenced. abort() never waits on a
+    write in progress.
+    """
+
+    _ABORT_WAIT_S = 1.0  # longer means a restart or close is stuck in the driver
+
+    def __init__(self, sample_rate: int) -> None:
+        self._sample_rate = sample_rate
+        self._stream = None
+        self._io_lock = threading.Lock()
+        self._state_lock = threading.Lock()
+
+    def acquire(self):
+        """The stream, running: opened on first use, restarted after an abort."""
+        with self._io_lock:
+            return self._ready(None)
+
+    def write(self, samples: np.ndarray, cancel: threading.Event) -> None:
+        """Play samples unless their sentence was cancelled."""
+        with self._io_lock:
+            stream = self._ready(cancel)
+            if stream is not None:
+                try:
+                    stream.write(samples)
+                finally:
+                    self._cut_if_interrupted(cancel)
+
+    def finish(self, cancel: threading.Event) -> None:
+        """End a sentence with a little silence. MME plays a device buffer only
+        once it is full, so without it the last few milliseconds of every
+        answer would never be heard."""
+        with self._io_lock:
+            if self._stream is None:
+                return
+            stream = self._ready(cancel)
+            if stream is not None:
+                pad = max(int(stream.latency * self._sample_rate) + 1, 2048)
+                try:
+                    stream.write(np.zeros(pad, dtype=np.float32))
+                finally:
+                    self._cut_if_interrupted(cancel)
+
+    def abort(self) -> None:
+        """Silence the stream now, dropping buffered audio. Never raises."""
+        if not self._state_lock.acquire(timeout=self._ABORT_WAIT_S):
+            return  # a restart or close is stuck; neither leaves audio playing
+        try:
+            stream = self._stream
+            if stream is not None and not stream.stopped:
+                stream.abort()
+        except Exception:
+            pass
+        finally:
+            self._state_lock.release()
+
+    def drop(self) -> None:
+        """Close the stream after a device error; the next sentence opens it again."""
+        with self._io_lock:
+            self._close()
+
+    def _ready(self, cancel: threading.Event | None):
+        """The running stream, or None if `cancel` is set. Hold _io_lock."""
+        opened = None
+        if self._stream is None:
+            import sounddevice as sd
+
+            opened = sd.OutputStream(
+                samplerate=self._sample_rate, channels=1, dtype="float32",
+            )
+            try:
+                opened.start()
+            except Exception:
+                opened.close()
+                raise
+        with self._state_lock:
+            if opened is not None:
+                self._stream = opened
+            if cancel is not None and cancel.is_set():
+                return None
+            if self._stream.stopped:
+                self._stream.start()
+                if cancel is not None and cancel.is_set():
+                    return None  # stop() gave up waiting while the driver restarted
+            return self._stream
+
+    def _cut_if_interrupted(self, cancel: threading.Event) -> None:
+        """Close the device if stop() landed during the write just finished:
+        after an abort, MME keeps queuing the rest of that chunk and only a
+        close drops it. The next press reopens the stream while the user talks.
+        Hold _io_lock."""
+        if cancel.is_set():
+            self._close()
+
+    def _close(self) -> None:
+        """Hold _io_lock."""
+        with self._state_lock:
+            stream, self._stream = self._stream, None
+            if stream is not None:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+
+
 # --- CartesiaSonicTTS concrete implementation --------------------------------
 
 class CartesiaSonicTTS(TTS):
-    """Phase 1 TTS using Cartesia Sonic-3 streaming.
+    """Cartesia Sonic TTS.
 
-    Uses the Cartesia Python SDK's `tts.bytes()` sync iterator over raw PCM
-    float32 chunks at 44.1kHz, played via sounddevice. First-audible-word
-    target is <400ms from speak() call (measured by the __main__ gate).
-
-    Threading: speak() spawns a daemon thread per call. The thread opens the
-    HTTP stream, iterates chunks, writes each chunk to an OutputStream. On
-    error, it raises RuntimeError with diagnostic instructions -- the error
-    propagates via threading.excepthook since Python has no built-in way to
-    rethrow background exceptions.
-
-    No fallback: if Cartesia is unreachable, the app is voiceless. Phase 2
-    Pyttsx3TTS subclass is ~1 hour of work if that ever happens.
+    Each sentence is one streaming HTTP request on a reused client; raw
+    float32 PCM plays through sounddevice chunk by chunk as it arrives.
+    speak_sentence() feeds a prefetch worker and a playback worker so the
+    next sentence is already streaming while the current one plays. speak()
+    is the one-shot path on its own daemon thread; its errors surface through
+    threading.excepthook.
     """
 
     def __init__(
@@ -156,9 +276,8 @@ class CartesiaSonicTTS(TTS):
             client_factory: Optional DI hook returning the Cartesia client.
                 Defaults to `cartesia.Cartesia`. Tests inject a MagicMock.
             player_factory: Optional DI hook returning a callable that plays
-                a single float32 numpy chunk. Defaults to a sounddevice-based
-                player that opens an OutputStream on first use. Tests inject
-                a MagicMock.
+                a single float32 numpy chunk. Defaults to one sounddevice
+                stream kept open across sentences. Tests inject a MagicMock.
 
         No network I/O happens here -- client + player are lazy on first speak.
         """
@@ -168,18 +287,20 @@ class CartesiaSonicTTS(TTS):
         self.sample_rate = sample_rate
         self._client_factory = client_factory
         self._player_factory = player_factory
+        self._output = _OutputStream(sample_rate)
+        self._client = None  # built once; every sentence reuses its connection
+        self._http = None  # the client's httpx pool, warmed on hotkey press
         self._cancel_event = threading.Event()
         self._current_thread: threading.Thread | None = None
         self._active_response = None  # Cartesia HTTP response, closed by stop()
         self._active_audio_stream = None  # sounddevice stream, aborted by stop()
         self._first_chunk_callback: Callable[[], None] | None = None  # one-shot, armed by app.py
 
-        # Option B: HTTP double-buffer. _sentence_queue feeds the prefetch
-        # worker which calls generate() (blocks for full audio body download,
-        # ~200-400ms) and hands (epoch, sentence, response) to the playback
-        # worker via _prefetch_queue. Size=1 keeps exactly one sentence warm
-        # ahead of the playing one. _epoch is bumped by stop() so stale
-        # responses that slipped past the drain are rejected at playback time.
+        # Double buffer: the prefetch worker opens sentence N+1's audio stream
+        # while N plays, and hands (epoch, sentence, response) to the playback
+        # worker through _prefetch_queue. Size 1 keeps exactly one sentence
+        # warm. stop() bumps _epoch so a response that slipped past the drain
+        # is rejected at playback time.
         self._sentence_queue: queue.Queue = queue.Queue()
         self._prefetch_queue: queue.Queue = queue.Queue(maxsize=1)
         self._epoch: int = 0
@@ -231,28 +352,29 @@ class CartesiaSonicTTS(TTS):
         """
         if not sentence or not sentence.strip():
             return
-        self._sentence_queue.put(sentence)
+        self._sentence_queue.put((self._epoch, sentence))
 
     def _prefetch_worker(self) -> None:
-        """Pops sentences from _sentence_queue, calls generate() (blocks for
-        full audio body download), hands (epoch, sentence, response) to
+        """Pops sentences from _sentence_queue, calls _generate_response()
+        (returns once headers arrive), hands (epoch, sentence, response) to
         _playback_worker via _prefetch_queue.
 
-        Blocks on _prefetch_queue.put() when size=1 is full — backpressure
-        guarantees we don't prefetch more than one sentence ahead. Epoch
-        is captured BEFORE generate() so a concurrent stop() (which bumps
-        the epoch) is detectable at playback time, preventing orphaned
-        responses from playing after a user-triggered abort.
+        Blocks on _prefetch_queue.put() when size=1 is full; backpressure
+        guarantees we don't prefetch more than one sentence ahead. Each
+        sentence carries the epoch it was queued under, so a stop() (which
+        bumps the epoch) rejects it at playback time even if it had already
+        left the queue.
         """
         while True:
-            sentence = self._sentence_queue.get()
-            if sentence is _SHUTDOWN_SENTINEL:
+            item = self._sentence_queue.get()
+            if item is _SHUTDOWN_SENTINEL:
                 break
-            my_epoch = self._epoch
+            my_epoch, sentence = item
             try:
                 response = self._generate_response(sentence)
             except Exception as exc:
                 print(f"[tts] prefetch error for {sentence!r}: {exc}", flush=True)
+                self._report_error(exc)
                 response = None
             try:
                 self._prefetch_queue.put((my_epoch, sentence, response))
@@ -282,21 +404,24 @@ class CartesiaSonicTTS(TTS):
             try:
                 cancel = threading.Event()
                 self._cancel_event = cancel
+                if my_epoch != self._epoch:
+                    cancel.set()  # stop() landed while this sentence was handed over
                 self._play_response(sentence, response, cancel)
             except Exception as exc:
                 print(f"[tts] playback error for {sentence!r}: {exc}", flush=True)
+                self._report_error(exc)
 
     def stop(self) -> None:
         """Kill audio playback INSTANTLY + drain both queues.
 
-        Six-pronged kill (Option B extends Path A's drain with epoch guard):
-        1. Bump _epoch              — any response prefetched under the old epoch
-                                      will be rejected by _playback_worker
-        2. Drain _sentence_queue    — pending sentences never start
-        3. Drain _prefetch_queue    — prefetched responses closed, not played
-        4. Set cancel event         — currently-playing sentence exits its loop
-        5. Abort sounddevice stream — stops audio output mid-sample
-        6. Close HTTP response      — interrupts active iter_bytes() read
+        Six-pronged kill:
+        1. Bump _epoch: any response prefetched under the old epoch will be
+           rejected by _playback_worker
+        2. Drain _sentence_queue: pending sentences never start
+        3. Drain _prefetch_queue: prefetched responses closed, not played
+        4. Set cancel event: currently-playing sentence exits its loop
+        5. Abort sounddevice stream: stops audio output mid-sample
+        6. Close HTTP response: interrupts active iter_bytes() read
 
         Race hardening: if prefetch is mid-generate() when stop() fires, its
         eventual put() will carry the OLD epoch. _playback_worker compares
@@ -316,7 +441,7 @@ class CartesiaSonicTTS(TTS):
                 break
 
         # 3. Drain prefetch queue. Any response sitting here was paid for
-        #    but never played — close it to release the HTTP connection.
+        #    but never played; close it to release the HTTP connection.
         while not self._prefetch_queue.empty():
             try:
                 _, _, pending_response = self._prefetch_queue.get_nowait()
@@ -328,7 +453,7 @@ class CartesiaSonicTTS(TTS):
             except queue.Empty:
                 break
 
-        # 4-6. Existing abort path for the currently-playing sentence.
+        # 4-6. Abort the currently-playing sentence.
         self._cancel_event.set()
         stream = self._active_audio_stream
         if stream is not None:
@@ -336,6 +461,7 @@ class CartesiaSonicTTS(TTS):
                 stream.abort()
             except Exception:
                 pass
+        self._output.abort()  # audio buffered after the last sentence stops too
         resp = self._active_response
         if resp is not None:
             try:
@@ -344,17 +470,14 @@ class CartesiaSonicTTS(TTS):
                 pass
 
     def _generate_response(self, text: str):
-        """Call Cartesia TTS HTTP endpoint. Returns a BinaryAPIResponse whose
-        body has been fully downloaded into memory (verified: the SDK's
-        non-streaming path eagerly reads the full body before returning).
+        """Open a streaming Cartesia request and return the live response.
 
-        Blocks ~200-400ms per typical sentence. No playback, no player
-        construction — that's _play_response's job. Lets the prefetch worker
-        run this call for sentence N+1 while the playback worker is draining
-        N's already-buffered audio.
+        Returns once headers arrive; audio keeps arriving while the sentence
+        is still being synthesized, and _play_response plays each chunk as it
+        lands. The caller owns the response and must close() it.
         """
         client = self._build_client()
-        return client.tts.generate(
+        return client.tts.with_streaming_response.generate(
             model_id=self.model_id,
             transcript=text,
             voice={"id": self.voice_id, "mode": "id"},
@@ -363,7 +486,7 @@ class CartesiaSonicTTS(TTS):
                 "encoding": "pcm_f32le",
                 "sample_rate": self.sample_rate,
             },
-        )
+        ).__enter__()
 
     def _play_response(self, text: str, response, cancel: threading.Event) -> None:
         """Iterate an already-generated Cartesia response and play chunks.
@@ -372,29 +495,36 @@ class CartesiaSonicTTS(TTS):
         a warm response to the playback worker. Sets _active_response /
         _active_audio_stream so stop() can abort mid-stream.
         """
-        if cancel.is_set():
-            return
-
         import time as _t
         _tts_start = _t.time()
-        print(f"[tts] _play_response START: {len(text)} chars", flush=True)
         audio_stream = None
         try:
+            if cancel.is_set():
+                return  # the finally still releases the connection
+            print(f"[tts] _play_response START: {len(text)} chars", flush=True)
             self._active_response = response
             chunk_iter = response.iter_bytes()
-            play, audio_stream = self._build_player()
+            play, audio_stream = self._build_player(cancel)
             self._active_audio_stream = audio_stream
+            # Network chunks split at arbitrary bytes; carry the tail of a
+            # partial float32 sample into the next chunk.
+            leftover = b""
             for chunk in chunk_iter:
                 if cancel.is_set():
                     return
                 if not chunk:
                     continue
-                samples = np.frombuffer(chunk, dtype=np.float32)
+                chunk = leftover + chunk
+                usable = len(chunk) - len(chunk) % 4
+                leftover = chunk[usable:]
+                samples = np.frombuffer(chunk[:usable], dtype=np.float32)
                 if samples.size == 0:
                     continue
                 play(samples)
+                if cancel.is_set():
+                    return  # a refused write: the sentence was interrupted
                 # Fire one-shot first-chunk callback after the first
-                # successful play() — this is the moment the user actually
+                # successful play(): this is the moment the user actually
                 # hears something. Used by app.py to log first-audible-word
                 # latency per interaction. Subsequent sentences in the same
                 # interaction don't re-fire (callback slot cleared).
@@ -405,9 +535,12 @@ class CartesiaSonicTTS(TTS):
                         cb()
                     except Exception:
                         pass  # never let a logging error break audio
+            if self._player_factory is None:
+                self._output.finish(cancel)
         except Exception as exc:
             if cancel.is_set():
                 return
+            self._output.drop()
             raise RuntimeError(
                 "Cartesia Sonic-3 playback failed. Diagnostic checklist:\n"
                 "  1. Is CARTESIA_API_KEY set in .env?\n"
@@ -416,17 +549,15 @@ class CartesiaSonicTTS(TTS):
                 f"Underlying error: {type(exc).__name__}: {exc}"
             ) from exc
         finally:
+            try:
+                response.close()
+            except Exception:
+                pass
             self._active_response = None
             self._active_audio_stream = None
             duration_ms = (_t.time() - _tts_start) * 1000
             cancelled = cancel.is_set()
             print(f"[tts] _play_response END: {duration_ms:.0f}ms, cancelled={cancelled}", flush=True)
-            if audio_stream is not None:
-                try:
-                    audio_stream.abort()
-                    audio_stream.close()
-                except Exception:
-                    pass
 
     def _do_speak(self, text: str, cancel: threading.Event) -> None:
         """One-shot speak path (used by speak(), not speak_sentence()).
@@ -444,72 +575,81 @@ class CartesiaSonicTTS(TTS):
                 return
             raise RuntimeError(
                 "Cartesia Sonic-3 TTS failed. Diagnostic checklist:\n"
-                "  1. Is CARTESIA_API_KEY set in .env? (check https://play.cartesia.ai/)\n"
+                "  1. Is the Cartesia key in Settings correct? (check https://play.cartesia.ai/)\n"
                 "  2. Is your internet connection up?\n"
                 "  3. Is Cartesia up? (status page: https://status.cartesia.ai)\n"
-                "  4. Reactive fix: subclass TTS as Pyttsx3TTS for an offline\n"
-                "     fallback -- ~1 hour of work, see Phase 2 notes.\n"
                 f"Underlying error: {type(exc).__name__}: {exc}"
             ) from exc
         self._play_response(text, response, cancel)
 
     def _build_client(self):
-        """Lazily construct the Cartesia client on first use."""
-        if self._client_factory is not None:
-            return self._client_factory(api_key=self.api_key)
-        # Default: real Cartesia SDK. Imported lazily so tests that inject
-        # a mock client_factory don't need the real SDK import to succeed.
-        from cartesia import Cartesia
-        return Cartesia(api_key=self.api_key)
+        """Build the Cartesia client on first use, then reuse it so every
+        sentence rides the same keep-alive connection (no TLS per sentence)."""
+        if self._client is None:
+            if self._client_factory is not None:
+                self._client = self._client_factory(api_key=self.api_key)
+            else:
+                from cartesia import Cartesia, DefaultHttpxClient
+                self._http = DefaultHttpxClient()
+                self._client = Cartesia(api_key=self.api_key, http_client=self._http)
+        return self._client
 
-    def _build_player(self):
-        """Lazily construct a callable that plays one float32 numpy chunk.
+    def warm(self) -> None:
+        """Open the Cartesia connection and restart the audio stream while the
+        user is still talking, so the first sentence skips both. Never raises."""
+        self._warm_output()
+        try:
+            client = self._build_client()
+            if self._http is not None:
+                self._http.head(str(client.base_url), timeout=5)
+        except Exception:
+            pass
 
-        Returns (play_fn, stream) so the caller can close the stream in a
-        finally block. Tests inject player_factory returning (MagicMock, None).
-        """
+    def warmup(self) -> None:
+        """Open the audio stream at startup, so the first answer skips it."""
+        self._warm_output()
+
+    def _warm_output(self) -> None:
+        if self._player_factory is None:
+            try:
+                self._output.acquire()
+            except Exception:
+                pass
+
+    def _build_player(self, cancel: threading.Event):
+        """Return (play_fn, stream). The voice's own stream is reached only
+        through _output, so stop() never races a close, and a write for a
+        cancelled sentence is refused. Tests inject player_factory returning
+        (MagicMock, None)."""
         if self._player_factory is not None:
             return self._player_factory(sample_rate=self.sample_rate)
-        import sounddevice as sd
-
-        stream = sd.OutputStream(
-            samplerate=self.sample_rate,
-            channels=1,
-            dtype="float32",
-        )
-        stream.start()
-
-        def _play(samples: np.ndarray) -> None:
-            stream.write(samples)
-
-        return _play, stream
+        return (lambda samples: self._output.write(samples, cancel)), None
 
 
-# --- ElevenLabsTTS (Sprint 4 — opt-in alternative to Cartesia) ---------------
+# --- ElevenLabsTTS (opt-in alternative to Cartesia) --------------------------
 
 
 class ElevenLabsTTS(TTS):
     """ElevenLabs Flash v2.5 streaming TTS as an opt-in alternative to
-    Cartesia. Mirrors CartesiaSonicTTS Option B prefetch+playback
-    architecture with three deliberate divergences:
+    Cartesia. Mirrors CartesiaSonicTTS's prefetch+playback architecture
+    with three deliberate divergences:
 
     1. ``_generate_response`` calls ``client.text_to_speech.stream(...)``
-       which returns an ``Iterator[bytes]`` DIRECTLY (true streaming, no
-       body pre-fetch). Cartesia's ``generate(...)`` blocks for the full
-       body before returning a response with ``.iter_bytes()``.
+       which returns an ``Iterator[bytes]`` DIRECTLY. Cartesia returns a
+       response object read with ``.iter_bytes()``.
     2. ``_play_response`` converts each int16 PCM chunk to float32 inline:
        ``samples = np.frombuffer(chunk, np.int16).astype(np.float32) / 32768.0``.
        Cartesia emits float32 directly so no conversion needed.
-    3. ``stop()`` is 5-pronged (not 6): no ``response.close()`` — the
-       elevenlabs SDK doesn't expose one. Cancellation = break the for
-       loop via cancel event. Python GC closes the underlying httpx
+    3. ``stop()`` is 5-pronged (not 6): there is no ``response.close()``
+       because the elevenlabs SDK doesn't expose one. Cancellation = break
+       the for loop via cancel event. Python GC closes the underlying httpx
        connection. Functionally equivalent kill latency to Cartesia's
        6-pronged stop because the cancel event check fires once per chunk
        and chunks arrive at <50ms intervals.
 
     Default sample rate is 22050 (NOT 44.1k) because ElevenLabs free tier
     doesn't include 44.1kHz PCM (Pro tier feature). Each TTS subclass owns
-    its own sample_rate — sounddevice OutputStream is constructed
+    its own sample_rate; the sounddevice OutputStream is constructed
     per-instance via ``_build_player``.
     """
 
@@ -528,13 +668,14 @@ class ElevenLabsTTS(TTS):
         self.sample_rate = sample_rate
         self._client_factory = client_factory
         self._player_factory = player_factory
+        self._output = _OutputStream(sample_rate)
 
         self._cancel_event = threading.Event()
         self._current_thread: threading.Thread | None = None
         self._active_audio_stream = None  # sounddevice stream, aborted by stop()
         self._first_chunk_callback: Callable[[], None] | None = None  # one-shot, armed by app.py
 
-        # Option B: prefetch+playback two-thread architecture, mirrors
+        # Prefetch+playback two-thread architecture, mirrors
         # CartesiaSonicTTS verbatim except no _active_response (elevenlabs
         # has no response.close()).
         self._sentence_queue: queue.Queue = queue.Queue()
@@ -574,18 +715,19 @@ class ElevenLabsTTS(TTS):
     def speak_sentence(self, sentence: str) -> None:
         if not sentence or not sentence.strip():
             return
-        self._sentence_queue.put(sentence)
+        self._sentence_queue.put((self._epoch, sentence))
 
     def _prefetch_worker(self) -> None:
         while True:
-            sentence = self._sentence_queue.get()
-            if sentence is _SHUTDOWN_SENTINEL:
+            item = self._sentence_queue.get()
+            if item is _SHUTDOWN_SENTINEL:
                 break
-            my_epoch = self._epoch
+            my_epoch, sentence = item
             try:
                 response = self._generate_response(sentence)
             except Exception as exc:
                 print(f"[tts] elevenlabs prefetch error for {sentence!r}: {exc}", flush=True)
+                self._report_error(exc)
                 response = None
             try:
                 self._prefetch_queue.put((my_epoch, sentence, response))
@@ -599,23 +741,26 @@ class ElevenLabsTTS(TTS):
                 break
             my_epoch, sentence, response = item
             if my_epoch != self._epoch or response is None:
-                # Stale or failed — skip without playing. No response.close()
+                # Stale or failed: skip without playing. No response.close()
                 # to call (elevenlabs SDK iterator has no explicit close).
                 continue
             try:
                 cancel = threading.Event()
                 self._cancel_event = cancel
+                if my_epoch != self._epoch:
+                    cancel.set()  # stop() landed while this sentence was handed over
                 self._play_response(sentence, response, cancel)
             except Exception as exc:
                 print(f"[tts] elevenlabs playback error for {sentence!r}: {exc}", flush=True)
+                self._report_error(exc)
 
     def stop(self) -> None:
         """5-pronged kill (no response.close vs Cartesia's 6-pronged):
-        1. Bump _epoch — any in-flight prefetch becomes stale at playback time
-        2. Drain _sentence_queue — pending sentences never start
-        3. Drain _prefetch_queue — prefetched iterators dropped
-        4. Set cancel event — currently-playing sentence's loop exits
-        5. Abort sounddevice stream — stops audio output mid-sample
+        1. Bump _epoch: any in-flight prefetch becomes stale at playback time
+        2. Drain _sentence_queue: pending sentences never start
+        3. Drain _prefetch_queue: prefetched iterators dropped
+        4. Set cancel event: currently-playing sentence's loop exits
+        5. Abort sounddevice stream: stops audio output mid-sample
         """
         self._epoch += 1
 
@@ -629,7 +774,7 @@ class ElevenLabsTTS(TTS):
         while not self._prefetch_queue.empty():
             try:
                 self._prefetch_queue.get_nowait()
-                # No response.close — elevenlabs iterator has no explicit close.
+                # No response.close: the elevenlabs iterator has no explicit close.
                 # Python GC will close the underlying httpx connection.
             except queue.Empty:
                 break
@@ -641,10 +786,11 @@ class ElevenLabsTTS(TTS):
                 stream.abort()
             except Exception:
                 pass
+        self._output.abort()  # audio buffered after the last sentence stops too
 
     def _generate_response(self, text: str):
         """Call ElevenLabs streaming endpoint. Returns Iterator[bytes]
-        directly — TRUE streaming, no body pre-fetch.
+        directly (true streaming, no body pre-fetch).
         """
         client = self._build_client()
         return client.text_to_speech.stream(
@@ -666,7 +812,7 @@ class ElevenLabsTTS(TTS):
         print(f"[tts] elevenlabs _play_response START: {len(text)} chars", flush=True)
         audio_stream = None
         try:
-            play, audio_stream = self._build_player()
+            play, audio_stream = self._build_player(cancel)
             self._active_audio_stream = audio_stream
             for chunk in response:
                 if cancel.is_set():
@@ -681,6 +827,8 @@ class ElevenLabsTTS(TTS):
                 if samples.size == 0:
                     continue
                 play(samples)
+                if cancel.is_set():
+                    return  # a refused write: the sentence was interrupted
                 # Fire one-shot first-chunk callback (mirrors Cartesia path).
                 cb = self._first_chunk_callback
                 if cb is not None:
@@ -689,9 +837,12 @@ class ElevenLabsTTS(TTS):
                         cb()
                     except Exception:
                         pass  # never let a logging error break audio
+            if self._player_factory is None:
+                self._output.finish(cancel)
         except Exception as exc:
             if cancel.is_set():
                 return
+            self._output.drop()
             raise RuntimeError(
                 "ElevenLabs TTS playback failed. Diagnostic checklist:\n"
                 "  1. Is ELEVENLABS_API_KEY set + valid?\n"
@@ -705,12 +856,6 @@ class ElevenLabsTTS(TTS):
             duration_ms = (_t.time() - _tts_start) * 1000
             cancelled = cancel.is_set()
             print(f"[tts] elevenlabs _play_response END: {duration_ms:.0f}ms, cancelled={cancelled}", flush=True)
-            if audio_stream is not None:
-                try:
-                    audio_stream.abort()
-                    audio_stream.close()
-                except Exception:
-                    pass
 
     def _do_speak(self, text: str, cancel: threading.Event) -> None:
         """One-shot speak path: get the iterator + play. Used by speak().
@@ -738,22 +883,22 @@ class ElevenLabsTTS(TTS):
         from elevenlabs import ElevenLabs
         return ElevenLabs(api_key=self.api_key)
 
-    def _build_player(self):
+    def warm(self) -> None:
+        """Restart the audio stream while the user is still talking."""
+        self.warmup()
+
+    def warmup(self) -> None:
+        """Open the audio stream ahead of the first sentence. Never raises."""
+        if self._player_factory is None:
+            try:
+                self._output.acquire()
+            except Exception:
+                pass
+
+    def _build_player(self, cancel: threading.Event):
         if self._player_factory is not None:
             return self._player_factory(sample_rate=self.sample_rate)
-        import sounddevice as sd
-
-        stream = sd.OutputStream(
-            samplerate=self.sample_rate,
-            channels=1,
-            dtype="float32",
-        )
-        stream.start()
-
-        def _play(samples: np.ndarray) -> None:
-            stream.write(samples)
-
-        return _play, stream
+        return (lambda samples: self._output.write(samples, cancel)), None
 
 
 # --- KokoroTTS (local offline TTS, opt-in) -----------------------------------
@@ -820,8 +965,10 @@ class KokoroTTS(CartesiaSonicTTS):
         return self._kokoro
 
     def warmup(self) -> None:
-        """Pre-load the Kokoro model so the first spoken reply isn't blocked by
-        a cold model load. app.py calls this in a background thread at startup."""
+        """Pre-load the Kokoro model and open the audio stream, so the first
+        reply isn't blocked by either. app.py calls this in a background thread
+        at startup."""
+        self._warm_output()
         self._ensure_kokoro()
 
     def _generate_response(self, text: str):
@@ -840,13 +987,15 @@ class KokoroTTS(CartesiaSonicTTS):
         samples = np.asarray(response, dtype=np.float32)
         audio_stream = None
         try:
-            play, audio_stream = self._build_player()
+            play, audio_stream = self._build_player(cancel)
             self._active_audio_stream = audio_stream
             block = max(1, int(self.sample_rate * 0.25))
             for i in range(0, samples.size, block):
                 if cancel.is_set():
                     return
                 play(samples[i : i + block])
+                if cancel.is_set():
+                    return
                 cb = self._first_chunk_callback
                 if cb is not None:
                     self._first_chunk_callback = None
@@ -854,14 +1003,14 @@ class KokoroTTS(CartesiaSonicTTS):
                         cb()
                     except Exception:
                         pass
+            if self._player_factory is None:
+                self._output.finish(cancel)
+        except Exception:
+            if not cancel.is_set():
+                self._output.drop()
+            raise
         finally:
             self._active_audio_stream = None
-            if audio_stream is not None:
-                try:
-                    audio_stream.abort()
-                    audio_stream.close()
-                except Exception:
-                    pass
 
 
 # --- Factory: route provider string to the right TTS subclass ----------------
@@ -875,7 +1024,7 @@ def create_tts_client(provider: str, api_key: str) -> TTS:
     keyring via config.resolve_setting).
 
     Args:
-        provider: "cartesia" or "elevenlabs". Case-insensitive.
+        provider: "cartesia", "elevenlabs" or "kokoro". Case-insensitive.
         api_key: provider-specific API key (CARTESIA_API_KEY or
             ELEVENLABS_API_KEY).
 
@@ -921,7 +1070,7 @@ if __name__ == "__main__":
     tts = CartesiaSonicTTS(api_key=CARTESIA_API_KEY)
 
     test_text = (
-        "Hello, I am Clicky Windows. I am your voice AI buddy built on "
+        "Hello, I am Clicky Windows, your voice assistant, built on "
         "Cartesia Sonic three."
     )
     print(f"\nSpeaking: {test_text!r}")

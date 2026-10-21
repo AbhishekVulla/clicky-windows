@@ -6,10 +6,9 @@ A blue animated pointer is drawn via `QPainter.paintEvent` and moved by
 `QPropertyAnimation` on a `pyqtProperty`. Click-through is enforced by
 Win32 extended window styles applied via ctypes AFTER `QWidget.show()`.
 
-See docs/superpowers/plans/2026-04-11-overlay.md (or the source plan at
-~/.claude/plans/streamed-tumbling-sunbeam.md) for the full design rationale,
-research findings, and the "islands-of-screens" DPI gotcha that drove the
-per-monitor architecture decision.
+Overlays are per-monitor rather than one window spanning the virtual
+desktop because of Qt 6's "islands of screens" behavior on mixed-DPI
+Windows 11: each screen gets its own logical coordinate space.
 
 Responsibility boundary:
 - THIS MODULE lives in Space A (physical pixels from capture.py) and
@@ -19,17 +18,8 @@ Responsibility boundary:
 - app.py owns threading and calls OverlayController methods from the
   main Qt thread only (PyQt6 is not thread-safe).
 
-Top-to-bottom order (so `python -m overlay` works):
-    1. Module docstring
-    2. Imports
-    3. Win32 constants (_GWL_EXSTYLE, _WS_EX_*, _SWP_*, _HWND_TOPMOST,
-       _CLICKTHROUGH_FLAGS)
-    4. apply_clickthrough_styles(hwnd) ctypes helper
-    5. screen_for_monitor(monitor, screens) pure function
-    6. physical_to_local_logical(x, y, screen) pure function
-    7. OverlayWindow(QWidget) class
-    8. OverlayController class
-    9. __main__ block for manual click-through verification
+The `__main__` block (manual click-through verification) stays last so
+`python -m overlay` works.
 """
 from __future__ import annotations
 
@@ -42,6 +32,7 @@ from enum import Enum, auto
 from PyQt6.QtCore import (
     QPoint,
     QPointF,
+    QRectF,
     QTimer,
     QVariantAnimation,
     Qt,
@@ -56,13 +47,13 @@ class _OverlayState(Enum):
     HIDDEN = auto()
 
 
-# --- Path A Task 8: Quadratic bezier flight arc math -------------------------
+# --- Quadratic bezier flight arc math ----------------------------------------
 #
-# Ports farzaa/clicky leanring-buddy/OverlayWindow.swift:491-568 with ONE
+# Ports farzaa/clicky OverlayWindow.swift:491-568 with ONE
 # deliberate deviation: no tangent rotation. Our cursor is a tip-anchored
-# polygon (commit a775c55 replaced ball with cursor polygon) — the tip IS
-# the pointer, so we keep it pointing at the target throughout flight
-# instead of rotating along the tangent like Clicky's isosceles triangle.
+# polygon whose tip IS the pointer, so we keep it pointing at the target
+# throughout flight instead of rotating along the tangent like Clicky's
+# isosceles triangle.
 
 def _bezier_position(
     t: float,
@@ -89,25 +80,25 @@ def _flight_duration_s(distance_px: float) -> float:
 
 
 def _scale_pulse(linear_t: float) -> float:
-    """Sine scale pulse: 1.0 at endpoints → 1.3 at midpoint. Not eased —
+    """Sine scale pulse: 1.0 at endpoints → 1.3 at midpoint. Not eased:
     runs on LINEAR progress (not smoothstep'd) so the peak lands dead-center.
     Ports OverlayWindow.swift:567."""
     return 1.0 + math.sin(linear_t * math.pi) * 0.3
 
 
-# --- Path A Task 9: Waveform widget (LISTENING state visual) -----------------
+# --- Waveform widget (LISTENING state visual) --------------------------------
 #
-# Ports farzaa/clicky leanring-buddy/OverlayWindow.swift:705-743 verbatim.
+# Ports farzaa/clicky OverlayWindow.swift:705-743 verbatim.
 # While PTT is held, the cursor polygon hides and this 5-bar waveform renders
-# at the cursor position. Bar heights are driven by mic RMS (from stt.py
-# Task 7) × a profile curve + an independent sine idle-pulse so bars are
-# never fully flat. Rendered at ~36 fps via QTimer.
+# at the cursor position. Bar heights are driven by mic RMS (from stt.py)
+# × a profile curve + an independent sine idle-pulse so bars are never
+# fully flat. Rendered at ~36 fps via QTimer.
 
 _WAVEFORM_BAR_COUNT = 5
 _WAVEFORM_BAR_PROFILE: tuple[float, ...] = (0.4, 0.7, 1.0, 0.7, 0.4)
 """Per-bar amplitude multiplier. Center bar (idx 2) scales by 1.0 = taller.
 Edges (idx 0, 4) scale by 0.4 = shorter. Matches Clicky's visual rhythm."""
-_WAVEFORM_BASE_HEIGHT = 3.0  # minimum px — bars are never fully flat
+_WAVEFORM_BASE_HEIGHT = 3.0  # minimum px, so bars are never fully flat
 _WAVEFORM_MAX_REACTIVE = 10.0  # max extra px from audio-driven component
 _WAVEFORM_IDLE_PULSE_AMP = 1.5  # max extra px from independent sine pulse
 
@@ -146,7 +137,7 @@ def _waveform_bar_height(bar_index: int, audio_level: float, phase_seconds: floa
 # --- Cursor polygon shape ----------------------------------------------------
 
 _CURSOR_VERTICES = [
-    (0, 0),       # tip (anchor point — lands on the target coordinate)
+    (0, 0),       # tip (anchor point, lands on the target coordinate)
     (0, 24),      # left edge down
     (5, 19),      # notch inward
     (10, 28),     # lower-right barb tip
@@ -161,7 +152,7 @@ Translucent dodger-blue fill with thin dark outline.
 _CURSOR_FOLLOW_LERP = 0.15
 """Spring interpolation factor for cursor following. Each frame, cursor moves
 15% of the remaining distance toward the target. Lower = smoother/laggier.
-0.15 gives a natural 'buddy following you' feel — like a puppy trotting after you.
+0.15 gives a natural 'following you' feel, like a puppy trotting after you.
 """
 
 
@@ -233,8 +224,8 @@ def apply_clickthrough_styles(hwnd: int) -> None:
     result = user32.SetWindowLongW(hwnd, _GWL_EXSTYLE, new_style)
     # SetWindowLongW returns the previous value on success, 0 on failure.
     # Previous value could legitimately be 0 if no ex-styles were set yet,
-    # so we also check GetLastError. In practice current != 0 (Qt sets
-    # some ex-styles) so a 0 return is always a failure.
+    # so a 0 return only counts as failure when current != 0. In practice
+    # current != 0 (Qt sets some ex-styles) so a 0 return is always a failure.
     if result == 0 and current != 0:
         raise RuntimeError(
             f"SetWindowLongW failed for HWND {hwnd}: {ctypes.WinError()}"
@@ -254,16 +245,18 @@ def screen_for_monitor(monitor: dict, screens: list[QScreen]) -> QScreen:
 
     capture.py produces CaptureResult.monitor = {"left": phys_x, "top": phys_y,
     "width": phys_w, "height": phys_h} where all fields are in virtual-desktop
-    physical pixel coordinates (from mss). QScreen.geometry() returns coords
-    in Qt's DIP (logical) space. We compare by converting each QScreen's DIP
-    dimensions to physical via its per-screen devicePixelRatio().
+    physical pixel coordinates (from mss). Qt 6 keeps each QScreen.geometry()
+    top-left at the monitor's physical position and divides only the size by
+    that screen's devicePixelRatio (QScreenPrivate::updateGeometry), so the
+    origin compares as-is and the size is scaled back up. The size allows one
+    logical pixel of rounding at fractional scales like 125%.
 
     Args:
         monitor: mss-style dict with 'left', 'top', 'width', 'height' keys
             (all values in physical pixels).
         screens: list of QScreen-compatible objects, each with geometry() ->
-            QRect-like (DIP coords) and devicePixelRatio() -> float. In tests
-            this is a list of _MockScreen duck-types, not real QScreens.
+            QRect-like (physical top-left, DIP size) and devicePixelRatio() ->
+            float. In tests these are _MockScreen duck-types, not real QScreens.
 
     Returns:
         The QScreen whose physical bounds match the monitor dict. Falls back
@@ -277,14 +270,10 @@ def screen_for_monitor(monitor: dict, screens: list[QScreen]) -> QScreen:
     for screen in screens:
         ratio = screen.devicePixelRatio()
         geom = screen.geometry()
-        phys_w = int(geom.width() * ratio)
-        phys_h = int(geom.height() * ratio)
-        phys_left = int(geom.left() * ratio)
-        phys_top = int(geom.top() * ratio)
-        if (phys_w == target_w
-                and phys_h == target_h
-                and phys_left == target_left
-                and phys_top == target_top):
+        if (geom.left() == target_left
+                and geom.top() == target_top
+                and abs(geom.width() * ratio - target_w) <= ratio
+                and abs(geom.height() * ratio - target_h) <= ratio):
             return screen
     return screens[0]
 
@@ -311,7 +300,8 @@ def physical_to_local_logical(
         physical_x: virtual-desktop physical pixel x (from capture.py).
         physical_y: virtual-desktop physical pixel y.
         screen: QScreen-compatible object with geometry() returning a
-            QRect-like (DIP coords) and devicePixelRatio() returning a float.
+            QRect-like (physical top-left, DIP size) and devicePixelRatio()
+            returning a float.
 
     Returns:
         (local_log_x, local_log_y) integer tuple in the screen's local
@@ -320,10 +310,9 @@ def physical_to_local_logical(
     """
     ratio = screen.devicePixelRatio()
     geom = screen.geometry()
-    screen_phys_left = int(geom.left() * ratio)
-    screen_phys_top = int(geom.top() * ratio)
-    local_phys_x = physical_x - screen_phys_left
-    local_phys_y = physical_y - screen_phys_top
+    # Qt keeps the screen's top-left at its physical position; only sizes scale.
+    local_phys_x = physical_x - geom.left()
+    local_phys_y = physical_y - geom.top()
     local_log_x = int(local_phys_x / ratio)
     local_log_y = int(local_phys_y / ratio)
     return local_log_x, local_log_y
@@ -335,12 +324,11 @@ def annotations_to_local(annotations: list, screen) -> list:
 
     Points (centers, endpoints) go through physical_to_local_logical (which
     subtracts the screen origin + divides by the per-screen devicePixelRatio).
-    Lengths (radius, width) are NOT positions — they only divide by the ratio,
+    Lengths (radius, width) are NOT positions: they only divide by the ratio,
     no origin subtraction. Returns NEW annotation objects (inputs untouched).
 
-    Pure function so the coordinate math is unit-testable without a QApplication
-    (the [POINT] path proved this transform correct: 253,52 -> 569,117 landed on
-    the button). The per-screen ratio is never cached globally — mixed-DPI
+    Pure function so the coordinate math is unit-testable without a
+    QApplication. The per-screen ratio is never cached globally: mixed-DPI
     setups have a different ratio per screen.
     """
     from annotations import Arrow, Circle, Underline, Label
@@ -366,6 +354,17 @@ def annotations_to_local(annotations: list, screen) -> list:
 
 # --- Overlay window ----------------------------------------------------------
 
+def _circle_label_origin(x: float, y: float, r: float, text_width: float, ascent: float) -> tuple[float, float]:
+    """Baseline origin for a circle's label: centred above the circle, or below
+    it when there is no room above. Labels beside the circle would run over a
+    neighbouring circle on the same line of text."""
+    gap = 6
+    top_baseline = y - r - gap
+    if top_baseline - ascent >= 0:
+        return (x - text_width / 2, top_baseline)
+    return (x - text_width / 2, y + r + gap + ascent)
+
+
 class OverlayWindow(QWidget):
     """One transparent click-through overlay for a single QScreen.
 
@@ -375,12 +374,9 @@ class OverlayWindow(QWidget):
     - Expose a pointerPos pyqtProperty so QPropertyAnimation can drive it
     - Apply Win32 click-through ex-styles via ctypes after show()
 
-    The per-monitor architecture (see DECISIONS.md 2026-04-11 "Per-monitor
-    overlays instead of virtual-desktop-spanning") means each OverlayWindow
-    operates entirely in its own screen's local DIP coordinate space. No
-    global virtual-desktop coordinates are ever used here -- that's the
-    whole point of the architectural reversal from CLAUDE.md's original
-    "spans full virtual desktop" wording.
+    Each OverlayWindow operates entirely in its own screen's local DIP
+    coordinate space. No global virtual-desktop coordinates are ever used
+    here.
 
     Thread safety: PyQt6 is NOT thread-safe. All methods must be called
     from the main Qt thread only. app.py enforces this via pyqtSignal
@@ -422,18 +418,18 @@ class OverlayWindow(QWidget):
         self._pointer_pos = QPoint(0, 0)
         self._pointer_visible = False
 
-        # Visual state flags — gates cursor polygon paint + widget positions.
+        # Visual state flags: gate cursor polygon paint + widget positions.
         # Only one of these can be true at a time (Farza's verbatim state
-        # machine — cursor polygon never coexists with waveform or spinner).
+        # machine: cursor polygon never coexists with waveform or spinner).
         self._waveform_visible = False
         self._spinner_visible = False
         self._waveform_widget = None  # lazy-created on first show_waveform()
         self._spinner_widget = None   # lazy-created on first show_spinner()
 
-        # Bezier flight animation (Path A Task 8). Replaces the old linear
-        # QPropertyAnimation with Farza's quadratic-bezier-arc + smoothstep +
-        # scale-pulse. Port of OverlayWindow.swift:491-568 (no tangent rotation
-        # — our cursor is tip-anchored; the tip stays on target through flight).
+        # Bezier flight animation: Farza's quadratic-bezier-arc + smoothstep +
+        # scale-pulse. Port of OverlayWindow.swift:491-568 with no tangent
+        # rotation: our cursor is tip-anchored, so the tip stays on target
+        # through flight.
         self._flight_anim = QVariantAnimation(self)
         self._flight_anim.setStartValue(0.0)
         self._flight_anim.setEndValue(1.0)
@@ -443,7 +439,7 @@ class OverlayWindow(QWidget):
         self._flight_p2: tuple[float, float] = (0.0, 0.0)
         self._flight_scale: float = 1.0
 
-        # Hackathon: teaching annotations (arrows/circles/underlines/labels)
+        # Teaching annotations (arrows/circles/underlines/labels)
         # drawn IN ADDITION to the cursor. Stored in this window's LOCAL-logical
         # coords (the controller transforms physical->local before storing, the
         # same way point_at computes local_x/local_y). Auto-clear after 30s or
@@ -538,7 +534,11 @@ class OverlayWindow(QWidget):
             if isinstance(ann, Circle):
                 painter.drawEllipse(QPointF(ann.x, ann.y), float(ann.r), float(ann.r))
                 if ann.label:
-                    painter.drawText(QPointF(ann.x + ann.r + 6, ann.y), ann.label)
+                    metrics = painter.fontMetrics()
+                    lx, ly = _circle_label_origin(
+                        ann.x, ann.y, ann.r, metrics.horizontalAdvance(ann.label), metrics.ascent(),
+                    )
+                    self._draw_label(painter, lx, ly, ann.label)
             elif isinstance(ann, Arrow):
                 painter.drawLine(
                     QPointF(ann.x1, ann.y1), QPointF(ann.x2, ann.y2)
@@ -549,7 +549,23 @@ class OverlayWindow(QWidget):
                     QPointF(ann.x, ann.y), QPointF(ann.x + ann.w, ann.y)
                 )
             elif isinstance(ann, Label):
-                painter.drawText(QPointF(ann.x, ann.y), ann.text)
+                self._draw_label(painter, ann.x, ann.y, ann.text)
+
+    @staticmethod
+    def _draw_label(painter: QPainter, x: float, y: float, text: str) -> None:
+        """Label text on a light backing, so it stays readable over a busy screen."""
+        metrics = painter.fontMetrics()
+        pad = 4
+        box = QRectF(
+            x - pad, y - metrics.ascent() - pad / 2,
+            metrics.horizontalAdvance(text) + 2 * pad, metrics.height() + pad,
+        )
+        painter.save()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(255, 255, 255, 235))
+        painter.drawRoundedRect(box, 4, 4)
+        painter.restore()
+        painter.drawText(QPointF(x, y), text)
 
     @staticmethod
     def _draw_arrowhead(
@@ -578,7 +594,7 @@ class OverlayWindow(QWidget):
 
         Ports farzaa/clicky OverlayWindow.swift:491-568 verbatim with ONE
         deliberate deviation: no tangent rotation. Our cursor is a tip-anchored
-        polygon — the tip IS the pointer, so it keeps pointing at the target
+        polygon: the tip IS the pointer, so it keeps pointing at the target
         through flight instead of rotating along the tangent.
 
         Curve: P0=current pointer, P1=midpoint lifted up by min(dist*0.2, 80px),
@@ -626,7 +642,7 @@ class OverlayWindow(QWidget):
         x, y = _bezier_position(eased_t, self._flight_p0, self._flight_p1, self._flight_p2)
         self._pointer_pos = QPoint(int(x), int(y))
         self._flight_scale = _scale_pulse(t)
-        # On completion, snap to P2 and reset scale (defensive — Qt sometimes
+        # On completion, snap to P2 and reset scale (defensive: Qt sometimes
         # emits valueChanged(1.0) slightly early and we want exact landing).
         if t >= 0.9999:
             self._pointer_pos = QPoint(int(self._flight_p2[0]), int(self._flight_p2[1]))
@@ -641,9 +657,9 @@ class OverlayWindow(QWidget):
     # --- Waveform + Spinner widgets (LISTENING / THINKING states) --------
     #
     # Both widgets position themselves at self._pointer_pos every follow-tick
-    # (matches Clicky's .position(cursorPosition) binding — verified from
-    # farzaa/clicky OverlayWindow.swift:326-329 + 411-438, the widgets follow
-    # the OS cursor at 60Hz, they DO NOT stay pinned at press-time position).
+    # (matches Clicky's .position(cursorPosition) binding in farzaa/clicky
+    # OverlayWindow.swift:326-329 + 411-438: the widgets follow the OS cursor
+    # at 60Hz, they DO NOT stay pinned at press-time position).
     #
     # show_waveform / show_spinner just create the widget + flip a visibility
     # flag. The 60Hz _on_follow_tick drives their positions.
@@ -660,7 +676,7 @@ class OverlayWindow(QWidget):
         self.update()
 
     def hide_waveform(self) -> None:
-        """Exit LISTENING state. Does NOT restore cursor visibility — caller
+        """Exit LISTENING state. Does NOT restore cursor visibility: caller
         is expected to transition into THINKING (show_spinner) or IDLE (tick
         will re-show the cursor when no waveform/spinner is active)."""
         if getattr(self, "_waveform_widget", None) is not None:
@@ -695,9 +711,9 @@ class OverlayWindow(QWidget):
 
 # --- Spinner widget (THINKING state) -----------------------------------------
 #
-# Ports farzaa/clicky leanring-buddy/OverlayWindow.swift:749-773 (the
+# Ports farzaa/clicky OverlayWindow.swift:749-773 (the
 # BlueCursorSpinnerView). Shown between hotkey RELEASE and Claude returning
-# a coordinate. Same visual vocabulary as Clicky's macOS shipping buddy.
+# a coordinate. Same visual vocabulary as the shipping macOS Clicky.
 
 _SPINNER_PERIOD_S = 0.8
 """Full-rotation period. Matches Clicky's linear(duration: 0.8) forever-repeat."""
@@ -705,7 +721,7 @@ _SPINNER_PERIOD_S = 0.8
 _SPINNER_ARC_START_DEG = 54.0   # 0.15 * 360
 _SPINNER_ARC_SPAN_DEG = 252.0   # (0.85 - 0.15) * 360  → 70% of full circle
 
-_SPINNER_WIDGET_SIZE = 28  # px — leaves room around the 14px arc for stroke + glow
+_SPINNER_WIDGET_SIZE = 28  # px, leaves room around the 14px arc for stroke + glow
 _SPINNER_ARC_DIAMETER = 14.0
 _SPINNER_STROKE_WIDTH = 2.5
 
@@ -734,7 +750,7 @@ class SpinnerWidget(QWidget):
     """
 
     WIDGET_SIZE = _SPINNER_WIDGET_SIZE
-    UPDATE_INTERVAL_MS = 28  # ~36 fps — same cadence as waveform for consistency
+    UPDATE_INTERVAL_MS = 28  # ~36 fps, same cadence as waveform for consistency
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -770,7 +786,7 @@ class SpinnerWidget(QWidget):
         painter.rotate(angle)
         painter.translate(-cx, -cy)
 
-        # Outer glow — a faint circle slightly larger than the arc.
+        # Outer glow: a faint circle slightly larger than the arc.
         glow_pen = QPen(QColor(30, 144, 255, 90))
         glow_pen.setWidthF(_SPINNER_STROKE_WIDTH + 2.0)
         glow_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
@@ -788,7 +804,7 @@ class SpinnerWidget(QWidget):
             int(_SPINNER_ARC_SPAN_DEG * 16),
         )
 
-        # Main arc — fully opaque dodger blue.
+        # Main arc: fully opaque dodger blue.
         main_pen = QPen(QColor(30, 144, 255, 220))
         main_pen.setWidthF(_SPINNER_STROKE_WIDTH)
         main_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
@@ -805,7 +821,7 @@ class SpinnerWidget(QWidget):
 class WaveformWidget(QWidget):
     """5-bar audio-level waveform rendered via QPainter at ~36 fps.
 
-    Ports farzaa/clicky leanring-buddy/OverlayWindow.swift:705-743. During
+    Ports farzaa/clicky OverlayWindow.swift:705-743. During
     PTT hold, this widget shows at the cursor position (OverlayWindow hides
     the cursor polygon). Bar heights come from _waveform_bar_height() using
     the RMS level set via set_audio_level() + an independent idle-pulse sine
@@ -818,7 +834,7 @@ class WaveformWidget(QWidget):
 
     BAR_WIDTH = 2
     BAR_SPACING = 2
-    WIDGET_HEIGHT = 18  # px — slightly taller than cursor for visibility
+    WIDGET_HEIGHT = 18  # px, slightly taller than cursor for visibility
     WIDGET_WIDTH = _WAVEFORM_BAR_COUNT * BAR_WIDTH + (_WAVEFORM_BAR_COUNT - 1) * BAR_SPACING  # = 18
     UPDATE_INTERVAL_MS = 28  # ~36 fps, matches Farza's 1/36s cadence
 
@@ -843,7 +859,7 @@ class WaveformWidget(QWidget):
         self._audio_level = max(0.0, min(float(level), 1.0))
 
     def _tick(self) -> None:
-        """Trigger a repaint on each timer tick — bars redraw at ~36 fps."""
+        """Trigger a repaint on each timer tick, so bars redraw at ~36 fps."""
         self.update()
 
     def paintEvent(self, _event) -> None:
@@ -879,7 +895,7 @@ class OverlayController:
       3s dwell, then fly back to mouse, resume IDLE
     - HIDDEN: timer stopped, overlays hidden for screen capture
 
-    Phase 1 = always-visible mode only. Cursor visible from launch.
+    Always-visible mode only: the cursor is visible from launch.
 
     Dependency injection: overlay_factory, screens, and cursor_pos_fn are
     injectable so tests can substitute mocks without real QWidgets.
@@ -918,11 +934,11 @@ class OverlayController:
         self._follow_timer.start()
 
     def _on_follow_tick(self) -> None:
-        """Poll cursor position and lerp the buddy cursor toward it.
+        """Poll cursor position and lerp the Clicky cursor toward it.
 
         Instead of snapping directly to the mouse position (which looks like
         teleporting), each frame moves 15% of the remaining distance. This
-        creates a smooth 'buddy following you' feel — the cursor lazily
+        creates a smooth 'following you' feel: the cursor lazily
         drifts toward your mouse like a puppy trotting after you.
         """
         if self._state != _OverlayState.IDLE:
@@ -1040,7 +1056,7 @@ class OverlayController:
         self._pointing_overlay.animate_pointer_to(target.x(), target.y())
 
     def _on_return_finished(self) -> None:
-        """Return flight complete — resume mouse following."""
+        """Return flight complete: resume mouse following."""
         if self._pointing_overlay:
             self._pointing_overlay._flight_anim.finished.disconnect(
                 self._on_return_finished
@@ -1117,8 +1133,7 @@ class OverlayController:
     # args. The monitor arg is retained for multi-monitor routing: the widget
     # is created on the OverlayWindow whose screen the cursor is on AT PRESS/
     # RELEASE time. If the cursor crosses monitors mid-hold, the widget stays
-    # on its original monitor (known limitation, deferred as future work —
-    # see ROADMAP.md "Future visual + TTS refinements").
+    # on its original monitor (known limitation).
 
     def show_waveform(self, physical_x: int, physical_y: int, monitor: dict) -> None:
         """Show waveform on the overlay containing (physical_x, physical_y).
@@ -1152,7 +1167,7 @@ class OverlayController:
 
     def set_audio_level(self, level: float) -> None:
         """Forward audio level to ALL overlays (only the one with a showing
-        waveform widget renders — others are no-ops)."""
+        waveform widget renders, others are no-ops)."""
         for overlay in self.overlays:
             if hasattr(overlay, "set_audio_level"):
                 overlay.set_audio_level(level)
@@ -1181,7 +1196,6 @@ if __name__ == "__main__":
     # by watching the overlay and trying to click on apps underneath.
     import sys
 
-    from PyQt6.QtCore import QTimer
     from PyQt6.QtWidgets import QApplication
 
     from capture import set_dpi_awareness

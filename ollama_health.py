@@ -1,4 +1,4 @@
-"""Ollama health + compatibility helpers (v0.2.1 — Issue #1 fix D).
+"""Ollama health + compatibility helpers.
 
 When the user picks Ollama as the LLM provider, certain vision models
 require a minimum Ollama version. ``llama3.2-vision`` (mllama
@@ -46,7 +46,7 @@ def detect_ollama_version(host: str, timeout: float = 2.0) -> Optional[str]:
     """Ping ``{host}/api/version`` and return the version string.
 
     Returns None on any failure (network error, non-200, parse error,
-    timeout). Caller should treat None as "couldn't check" — distinct
+    timeout). Caller should treat None as "couldn't check", distinct
     from "checked, found incompatible."
 
     Short timeout (2s) so Clicky startup isn't blocked if Ollama is
@@ -72,7 +72,7 @@ def _parse_version(version_str: str) -> Optional[tuple[int, ...]]:
     """Parse a dotted-decimal version string into a tuple of ints.
 
     Returns None for anything that doesn't parse cleanly (e.g. dev
-    builds with hashes appended). Conservative — when we can't parse,
+    builds with hashes appended). Conservative: when we can't parse,
     we skip the compatibility check rather than guess wrong.
     """
     parts = version_str.split(".")
@@ -107,7 +107,7 @@ def check_model_compatibility(
 
     Returns None when:
     - Model has no recorded minimum (works on all versions)
-    - Ollama version couldn't be detected (don't guess — let the
+    - Ollama version couldn't be detected (don't guess: let the
       real call fail with the actual error if it does)
     - Either version string can't be parsed
 
@@ -136,6 +136,6 @@ def check_model_compatibility(
         return None  # compatible
 
     return (
-        f"{model_clean} needs Ollama >={min_required} — yours is "
+        f"{model_clean} needs Ollama {min_required} or newer; yours is "
         f"{ollama_version}. Switch to llava:7b or upgrade Ollama."
     )

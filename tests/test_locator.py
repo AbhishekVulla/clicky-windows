@@ -1,8 +1,4 @@
-"""Unit tests for locator.py — two-stage grid-locator for pixel-pointing.
-
-Adapted from Bitshank-2338/clicky-windows ai/universal_locator.py (MIT) to
-Clicky's sync code style + coord conventions + AIClient context-manager
-interface (returns _StreamingResponse, not async iterator).
+"""Unit tests for locator.py, the two-stage grid-locator for pixel-pointing.
 
 Tests cover:
     TestDrawGrid          - grid annotation visual correctness
@@ -15,7 +11,6 @@ from __future__ import annotations
 
 import base64
 import io
-import pytest
 from PIL import Image
 
 
@@ -45,7 +40,7 @@ class TestDrawGrid:
 
         # Expect at least ~500 pixels different (grid lines + ~96 label boxes,
         # tiny image so labels overlap).
-        assert diff_pixels > 500, f"only {diff_pixels} pixels changed — grid not drawn?"
+        assert diff_pixels > 500, f"only {diff_pixels} pixels changed; grid not drawn?"
 
     def test_grid_includes_red_pixels(self):
         """The grid colour is red (255, 0, 0). After alpha-compositing on a
@@ -168,9 +163,9 @@ class TestAskGridPick:
         assert result is None
 
     def test_logs_distinct_message_on_llm_transport_failure(self, mocker):
-        """Codex MED fix: when LLM call raises (Ollama timeout, model not
+        """When the LLM call raises (Ollama timeout, model not
         pulled, network error), _ask_grid_pick must emit a distinct
-        debug-log message identifying the FAILURE TYPE — not just silently
+        debug-log message identifying the FAILURE TYPE, not just silently
         return None. Without distinguishing transport failures from
         'model said no UI element', operators can't tell whether to debug
         Ollama or rephrase the question."""
@@ -197,8 +192,8 @@ class TestAskGridPick:
         assert "ConnectionError" in " ".join(captured_logs) or "ollama unreachable" in joined.lower()
 
     def test_logs_distinct_message_on_unparseable_reply(self, mocker):
-        """Codex MED fix sibling: when LLM responds but reply is unparseable
-        (no JSON, no integer 1-96), log a DIFFERENT distinct message — so
+        """When the LLM responds but the reply is unparseable
+        (no JSON, no integer 1-96), log a DIFFERENT distinct message, so
         operator can distinguish 'model rambled' from 'model uncertain
         (cell 0)' from 'transport failure'."""
         from locator import _ask_grid_pick, _img_to_jpeg_b64
@@ -293,7 +288,7 @@ class TestLocateViaGrid:
         assert 0 < y < 800
 
     def test_returns_none_when_stage1_says_cell_zero(self, mocker):
-        """If LLM responds {"cell": 0}, the question is conceptual — return None."""
+        """If LLM responds {"cell": 0}, the question is conceptual: return None."""
         from locator import locate_via_grid
 
         mock_client = self._mock_client_replies(mocker, ['{"cell": 0}'])
@@ -351,9 +346,6 @@ class TestLocateViaGrid:
         """At 200% DPI, logical Qt coords should be half of physical coords."""
         from locator import locate_via_grid
 
-        mock_client = self._mock_client_replies(
-            mocker, ['{"cell": 42}', '{"cell": 18}']
-        )
         # 1280x800 JPEG; 2560x1600 physical monitor at 200% DPI → 1280x800 logical
         jpeg_b64 = self._build_jpeg_b64(1280, 800)
 
@@ -381,7 +373,7 @@ class TestLocateViaGrid:
         assert abs(result_2x[1] - result_1x[1]) <= 1
 
     def test_coord_transform_handles_secondary_monitor_origin(self, mocker):
-        """Secondary monitor at physical origin (1920, 0) — coords should
+        """Secondary monitor at physical origin (1920, 0): coords should
         include that offset (since QCursor.pos() is in virtual-desktop space)."""
         from locator import locate_via_grid
 

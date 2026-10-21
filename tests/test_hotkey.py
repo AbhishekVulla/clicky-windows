@@ -7,20 +7,15 @@ instead of pynput.keyboard.Listener.
 
 The hotkey is Ctrl+Alt+Space (all 3 must be held for RECORDING; any
 release of any of the 3 ends it). suppress=False means the listener
-observes but never consumes keys — global typing still works.
+observes but never consumes keys, so global typing still works.
 
-Pivoted from Ctrl+Shift+Space to Ctrl+Alt+Space on 2026-04-12 evening
-after empirically confirming Ctrl+Shift+Space conflicts with Excel +
-Google Sheets "Select entire worksheet" binding. See DECISIONS.md
-2026-04-12 (evening) "Ctrl+Alt+Space replaces Ctrl+Shift+Space" for
-the full rationale including research-backed rejection of Fn+Space.
+Not Ctrl+Shift+Space: Excel + Google Sheets bind it to "Select entire
+worksheet". The hotkey.py module docstring covers the other alternatives.
 
 What's NOT tested here (manual verification gate only):
 - Actual Windows low-level hook installation
-- suppress=False actually NOT blocking global typing (the whole point of
-  the earlier Alt+Space -> Ctrl+Shift+Space pivot from suppress=True)
-- Excel "Select entire worksheet" NOT firing on Ctrl+Alt+Space (the whole
-  point of THIS pivot from Ctrl+Shift+Space)
+- suppress=False actually NOT blocking global typing
+- Excel "Select entire worksheet" NOT firing on Ctrl+Alt+Space
 - Callback latency (<50ms)
 - Windows window menu NOT opening on the combo (only Alt+Space alone opens it)
 All of the above are verified by `py -3.13 -m hotkey`.
@@ -196,11 +191,8 @@ class TestStartLifecycle:
 
     def test_start_creates_listener_with_suppress_false(self):
         """start() must instantiate the injected listener_class exactly once
-        with suppress=False (load-bearing: pynput's suppress is all-or-nothing
-        global, so suppress=True would disable ALL typing globally -- the
-        exact bug that forced the original Alt+Space -> Ctrl+Shift+Space
-        pivot, and by extension the current Ctrl+Shift+Space -> Ctrl+Alt+Space
-        pivot inherits the same suppress=False model).
+        with suppress=False (pynput's suppress is all-or-nothing
+        global, so suppress=True would disable ALL typing globally).
 
         on_press and on_release handlers must be wired to self._handle_press
         / self._handle_release."""
@@ -219,8 +211,7 @@ class TestStartLifecycle:
         kwargs = fake_listener_class.call_args.kwargs
         assert kwargs["suppress"] is False, (
             "suppress MUST be False for Ctrl+Alt+Space -- pynput suppress=True "
-            "is globally destructive and blocks all typing. See DECISIONS.md "
-            "2026-04-12 (evening) entry 'Ctrl+Alt+Space replaces Ctrl+Shift+Space'."
+            "is globally destructive and blocks all typing."
         )
         assert kwargs["on_press"] == hk._handle_press
         assert kwargs["on_release"] == hk._handle_release

@@ -1,24 +1,23 @@
-"""Path A benchmark harness — measure before/after PTT latency with stats.
+"""PTT latency benchmark harness: measure before/after latency with stats.
 
 Usage
 -----
-1. Checkout the branch BEFORE Path A (e.g. `git checkout 4716260`) and record
-   baseline interactions:
+1. Check out the baseline commit and record baseline interactions:
 
-       py -3.13 -m tools.bench_path_a record --label before --n 20
+       py -3.13 -m tools.bench_latency record --label before --n 20
 
    (Launch ``py -3.13 -m app`` in another terminal, do N real PTT presses
    with roughly the same question + same app, then return to the harness
    and press Enter. It scrapes ~/.clicky-windows/debug/ for the N most-
    recent folders.)
 
-2. Checkout Path A (this branch) and record:
+2. Check out the change under test and record:
 
-       py -3.13 -m tools.bench_path_a record --label after --n 20
+       py -3.13 -m tools.bench_latency record --label after --n 20
 
 3. Compare the two runs:
 
-       py -3.13 -m tools.bench_path_a compare \\
+       py -3.13 -m tools.bench_latency compare \\
            ~/.clicky-windows/bench/before.json \\
            ~/.clicky-windows/bench/after.json
 
@@ -36,8 +35,6 @@ Why these stats
 - **Bootstrap CI on median**: percentile method, 9999 resamples. Gives an
   interpretable error-bar around the post-fix median without assuming
   Gaussianity. Report deltas WITH the CI.
-
-See ROADMAP.md "Step 2 (Path A parallelism)" for the full context.
 """
 from __future__ import annotations
 
@@ -140,29 +137,20 @@ def _scrape_latest_n(n: int) -> dict:
         reverse=True,
     )[:n]
 
-    metrics = {
-        "stt_finalize_ms": [],
-        "capture_end_ms": [],
-        "claude_first_token_ms": [],
-        "tts_called_ms": [],
+    markers = {
+        "stt_finalize_ms": "STT: final transcript",
+        "llm_first_token_ms": "LLM: first token",
+        "first_audible_ms": "TTS: first audible chunk played",
     }
+    metrics: dict[str, list[float]] = {name: [] for name in markers}
     for folder in folders:
         log_path = folder / "interaction.log"
         if not log_path.exists():
             continue
-        stt_end = _extract_timing(log_path, "STT: final transcript")
-        capture_end = _extract_timing(log_path, "CAPTURE:", last=True)
-        claude_start = _extract_timing(log_path, "CLAUDE: streaming started")
-        tts_start = _extract_timing(log_path, "TTS: ")
-
-        if stt_end is not None:
-            metrics["stt_finalize_ms"].append(stt_end)
-        if capture_end is not None:
-            metrics["capture_end_ms"].append(capture_end)
-        if claude_start is not None:
-            metrics["claude_first_token_ms"].append(claude_start)
-        if tts_start is not None:
-            metrics["tts_called_ms"].append(tts_start)
+        for name, marker in markers.items():
+            ms = _extract_timing(log_path, marker)
+            if ms is not None:
+                metrics[name].append(ms)
     return metrics
 
 
@@ -171,10 +159,10 @@ def _scrape_latest_n(n: int) -> dict:
 def record_cmd(label: str, n: int) -> None:
     """Prompt the user to run N real PTT interactions, then scrape ~/.clicky-windows/debug/."""
     print(f"Recording {n} PTT interactions labeled {label!r}.")
-    print(f"  1. In another terminal, run: py -3.13 -m app")
+    print("  1. In another terminal, run: py -3.13 -m app")
     print(f"  2. Do {n} PTT presses (Ctrl+Alt+Space). Aim for the same question")
-    print(f"     in the same app so interactions are comparable.")
-    print(f"  3. Return here and press Enter.")
+    print("     in the same app so interactions are comparable.")
+    print("  3. Return here and press Enter.")
     input(f"Press Enter after completing {n} interactions... ")
 
     metrics = _scrape_latest_n(n)
@@ -216,8 +204,8 @@ def compare_cmd(before_path: str, after_path: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="tools.bench_path_a",
-        description="Path A benchmark harness for Clicky Windows latency measurement.",
+        prog="tools.bench_latency",
+        description="Compare Clicky push-to-talk latency before and after a change.",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 

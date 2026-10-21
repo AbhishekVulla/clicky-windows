@@ -1,4 +1,4 @@
-"""Unit tests for tray.py — system tray menu + folder actions.
+"""Unit tests for tray.py: system tray menu + folder actions.
 
 Tray icon construction needs a QApplication. We use a session-scoped
 fixture that creates one if none exists. The actual rendering
@@ -78,7 +78,7 @@ class TestClickyTrayMenu:
     ):
         """Open Knowledge Folder must call os.startfile on KB_DIR
         AND mkdir-p the path if it doesn't exist. First-launch users
-        haven't dropped any .md files yet — no error dialog."""
+        haven't dropped any .md files yet, so no error dialog."""
         kb_path = tmp_path / "knowledge"
         assert not kb_path.exists()
 
@@ -118,7 +118,7 @@ class TestClickyTrayMenu:
         self, qapp, mocker
     ):
         """If QSystemTrayIcon.isSystemTrayAvailable() returns False (rare
-        Windows config — kiosk mode, custom shell, certain VMs), the
+        Windows config: kiosk mode, custom shell, certain VMs), the
         constructor must raise RuntimeError so the caller can show a
         QMessageBox + exit cleanly. Without this guard the tray icon
         silently doesn't appear and users have no diagnostic."""

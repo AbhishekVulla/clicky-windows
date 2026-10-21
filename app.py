@@ -1,4 +1,4 @@
-"""Clicky Windows orchestrator — wires all 7 building blocks into the PTT loop.
+"""Clicky Windows orchestrator: wires all 7 building blocks into the PTT loop.
 
 One sequential pipeline worker thread per PTT press, cancel-on-re-press.
 Matches Clicky's Swift Task pattern (CompanionManager.swift lines 490-720).
@@ -17,6 +17,7 @@ Top-to-bottom order (so `python -m app` works):
 from __future__ import annotations
 
 import ctypes
+import math
 import os
 import queue
 import re
@@ -31,9 +32,7 @@ from PyQt6.QtWidgets import QApplication
 import kb
 from ai import (
     _CLICKY_ANNOTATION_SYSTEM_PROMPT,
-    GeminiClient,
     OllamaClient,
-    OpenAIVisionClient,
     create_ai_client,
 )
 from annotations import parse_annotations
@@ -49,24 +48,21 @@ from capture import (
 )
 from config import (
     ANNOTATION_MODE,
-    ANTHROPIC_API_KEY,
     ASSEMBLYAI_API_KEY,
     CARTESIA_API_KEY,
-    GEMINI_API_KEY,
     GEMINI_MODEL_VISION,
     MODEL_ID,
     OLLAMA_HOST,
     OLLAMA_MODEL_VISION,
-    OPENAI_API_KEY,
     OPENAI_MODEL_VISION,
+    default_llm_provider,
     resolve_api_key,
+    resolve_model,
     resolve_setting,
 )
-# Note: LLM_PROVIDER is intentionally NOT imported as a module-level
-# constant — _resolve_llm_credentials() calls resolve_setting fresh on
-# every invocation so any change the user made in the Settings dialog
-# (which writes to keyring) is picked up without an app restart. The
-# module-level constant would be frozen at import time.
+# LLM_PROVIDER and the LLM keys are read fresh (resolve_setting /
+# resolve_api_key) instead of imported, so a key saved in the first-launch
+# dialog is used in the same session. Module constants freeze at import.
 from hotkey import PushToTalkHotkey
 from memory import MemoryStore
 from overlay import OverlayController
@@ -82,17 +78,16 @@ _MAX_HISTORY_EXCHANGES = 10
 
 _REUSE_THRESHOLD_PX = 150
 """Max cursor movement between press and release for reusing press-time
-captures. Raised from 50 → 150 on 2026-04-21 after real-session logs
-showed 100-150px cursor hovers were re-capturing unnecessarily.
-150px = ~3cm on a 200% DPI laptop display — within 'target hover'
-intent, not 'user repositioned intentionally'."""
+captures. Cursor hovers of 100-150px while talking are normal and should
+not trigger a re-capture. 150px = ~3cm on a 200% DPI laptop display,
+still 'target hover' intent, not 'user repositioned intentionally'."""
 
 
 def flush_sentences(buffer: str) -> tuple[list[str], str]:
     """Split buffer into complete sentences and leftover.
 
     Returns (list_of_complete_sentences, remaining_buffer).
-    Splits on .!? followed by whitespace. The system prompt tells Claude
+    Splits on .!? followed by whitespace. The system prompt tells the model
     to avoid abbreviations like 'e.g.' so false splits are rare.
     """
     sentences: list[str] = []
@@ -103,22 +98,22 @@ def flush_sentences(buffer: str) -> tuple[list[str], str]:
     return sentences, buffer
 
 
-# --- Grid-locator fallback (v0.2.0 Ollama pixel-pointing) --------------------
+# --- Grid-locator fallback (Ollama pixel-pointing) ---------------------------
 
 _DIRECTIONAL_QUERY_WORDS = (
     "where", "click", "show me", "find", "point", "open", "select", "press",
     "navigate", "locate", "tap", "look at", "go to",
 )
 """Words/phrases that suggest the user wants Clicky to point at a UI element.
-Grid-locator only fires for queries containing one of these — skips
+Grid-locator only fires for queries containing one of these, so it skips
 conceptual asks like 'what is HTML' that don't have a UI target."""
 
 
 def _looks_directional(query: str) -> bool:
     """True if the query contains a directional word like 'where', 'click', 'show me'.
 
-    Used as a cheap pre-filter before firing the grid-locator (which is 2 extra
-    LLM calls — expensive on local Ollama). For conceptual questions Clicky
+    Used as a cheap pre-filter before firing the grid-locator, which costs 2
+    extra LLM calls (expensive on local Ollama). For conceptual questions Clicky
     should just answer with TTS and not try to point anywhere.
     """
     if not query:
@@ -127,16 +122,32 @@ def _looks_directional(query: str) -> bool:
     return any(word in q_lower for word in _DIRECTIONAL_QUERY_WORDS)
 
 
+def _drawing_anchor(annotations: list) -> tuple[int, int] | None:
+    """Where the cursor lands when a draw-mode answer has shapes but no
+    [POINT]: the first shape, in screenshot coords, placed so the cursor does
+    not cover what the shape marks. A text label alone is not a target."""
+    from annotations import Arrow, Circle, Underline
+
+    for ann in annotations:
+        if isinstance(ann, Circle):
+            edge = math.ceil(ann.r * 0.7071)  # 45 degrees: on the circle's lower-right edge
+            return (ann.x + edge, ann.y + edge)
+        if isinstance(ann, Arrow):
+            return (ann.x2, ann.y2)
+        if isinstance(ann, Underline):
+            return (ann.x + ann.w // 2, ann.y)
+    return None
+
+
 def _annotations_to_physical(annotations: list, cursor_capture) -> list:
     """Map screenshot-pixel annotation coords -> physical virtual-desktop
-    coords using the SAME proven transform the [POINT] cursor uses
-    (capture.unscale_claude_coords: clamp -> *scale -> +monitor-origin). The
-    v0.1.0 marker proved this exact transform correct (253,52 -> 569,117 landed
-    on the button). No grid-locator — Claude is natively accurate at coords;
-    GPT-4o/Ollama are selectable and forgiving for big worksheet regions.
+    coords using the SAME transform the [POINT] cursor uses
+    (capture.unscale_claude_coords: clamp -> *scale -> +monitor-origin).
+    No grid-locator: Claude is natively accurate at coords, and GPT-4o/Ollama
+    are forgiving enough for big worksheet regions.
 
     Lengths (circle radius, underline width) only scale by scale_x (they're
-    sizes, not positions — no origin, no clamp). Returns NEW annotation objects.
+    sizes, not positions: no origin, no clamp). Returns NEW annotation objects.
     """
     from annotations import Arrow, Circle, Underline, Label
 
@@ -186,9 +197,9 @@ def _maybe_locate_via_grid(
     """Grid-locator fallback for weak-vision responses lacking a [POINT:x,y] tag.
 
     Triggers ONLY if:
-        1. ai_client is a weak-at-pixel-coords vision model — OllamaClient
-           (local) or OpenAIVisionClient (GPT-4o is weaker than Claude at
-           raw coordinates, same as Ollama; both lean on the grid-locator)
+        1. ai_client is a local Ollama model. Cloud models point accurately on
+           their own, so a missing point from them means there is nothing to
+           point at, not a miss worth extra calls.
         2. result.coordinate is None (model didn't emit a usable [POINT:x,y])
         3. query is directional (contains 'where' / 'click' / 'show me' / etc.)
 
@@ -197,18 +208,18 @@ def _maybe_locate_via_grid(
     can't find a target.
 
     The output is in physical coords (not logical) so the caller can pass it
-    straight to overlay.sig_point_at.emit() — same convention the existing
-    Claude-coordinate path uses.
+    straight to overlay.sig_point_at.emit(), the same convention the
+    model-coordinate path uses.
 
     Args:
         ai_client: the active AIClient (OllamaClient / AnthropicClient / etc.)
-        result: PointParseResult from stream.final_result() — used to check
+        result: PointParseResult from stream.final_result(), used to check
             if coordinate is already set
         cursor_capture: capture.LabeledCapture for the primary screen
         query: user's transcript (the question they asked)
         dbg: optional DebugSession for logging the grid-locator outcome
     """
-    if not isinstance(ai_client, (OllamaClient, OpenAIVisionClient, GeminiClient)):
+    if not isinstance(ai_client, OllamaClient):
         return None
     if result.coordinate is not None:
         return None
@@ -228,14 +239,12 @@ def _maybe_locate_via_grid(
 
     monitor = cursor_capture.monitor
     # locate_via_grid returns coords pre-divided by dpi_scale. We want
-    # PHYSICAL virtual-desktop coords (matching the existing app.py pipeline),
-    # so pass dpi_scale=1.0 — locator returns (vx, vy) i.e. physical coords.
-    # v0.2.0 Codex MED fix: thread dbg.log into the locator so transport
-    # failures (Ollama timeout, image-decode error) are distinguishable from
-    # model uncertainty (cell 0 / unparseable reply) in the debug log.
-    # Without this, a broken Ollama looked identical to "model said no UI
-    # element" — operator couldn't tell whether to debug their Ollama setup
-    # or just rephrase the question.
+    # PHYSICAL virtual-desktop coords (matching the rest of the pipeline),
+    # so pass dpi_scale=1.0 and the locator returns physical (vx, vy).
+    # dbg.log is threaded into the locator so transport failures (Ollama
+    # timeout, image-decode error) are distinguishable from model uncertainty
+    # (cell 0 / unparseable reply) in the debug log. Otherwise a broken Ollama
+    # looks identical to "model said no UI element".
     phys_xy = locate_via_grid(
         llm_client=ai_client,
         screenshot_jpeg_b64=jpeg_b64,
@@ -301,6 +310,50 @@ def get_foreground_app() -> tuple[str, str]:
 
 # --- ClickyApp orchestrator ---------------------------------------------------
 
+def _request_host(exc: BaseException) -> str | None:
+    """Host of the HTTP request behind an httpx error, if it has one."""
+    try:
+        return exc.request.url.host  # httpx raises if the request was never set
+    except Exception:
+        return None
+
+
+def _friendly_error(stage: str, exc: BaseException) -> str:
+    """One plain sentence for the tray. ``stage`` is "AI", "voice" or
+    "speech-to-text". Looks through wrapped exceptions for the HTTP status."""
+    chain: list[BaseException] = []
+    e: BaseException | None = exc
+    while e is not None and e not in chain:
+        chain.append(e)
+        e = e.__cause__ or e.__context__
+    # SDK errors carry status_code; a rejected WebSocket handshake carries it on .response.
+    codes = (getattr(x, "status_code", None) or getattr(getattr(x, "response", None), "status_code", None) for x in chain)
+    status = next((c for c in codes if isinstance(c, int)), None)
+    text = " ".join(str(x) for x in chain).lower()
+    names = " ".join(type(x).__name__ for x in chain)
+    if status in (401, 403) or any(t in text for t in ("invalid x-api-key", "invalid api key", "incorrect api key", "unauthorized")):
+        return f"Your {stage} key was rejected. Right-click the Clicky tray icon, open Settings, and paste it again."
+    # An empty balance can arrive as 402, 400 or 429 (OpenAI's insufficient_quota),
+    # so billing words decide it; a bare "quota" is a temporary per-minute limit.
+    if status == 402 or any(t in text for t in (
+        "insufficient_quota", "insufficient credit", "insufficient funds", "insufficient balance",
+        "out of credit", "credit balance", "billing", "payment required",
+    )):
+        return f"Your {stage} account is out of credit. Top it up, then try again."
+    if status == 429 or any(t in text for t in ("rate limit", "quota", "resource_exhausted", "too many requests")):
+        return f"The {stage} service is rate-limiting you. Try again in a minute."
+    if status == 404 or "model not found" in text:
+        return f"The {stage} model isn't available on your key. Pick another provider in Settings."
+    timed_out = any(isinstance(x, TimeoutError) or "Timeout" in type(x).__name__ for x in chain)
+    if timed_out and any(_request_host(x) in ("localhost", "127.0.0.1", "::1") for x in chain):
+        return f"The local {stage} model took too long to answer. It needs a strong GPU; a cloud model is much faster."
+    if any(isinstance(x, (ConnectionError, TimeoutError)) for x in chain) or any(
+        n in names for n in ("ConnectError", "ConnectionError", "Timeout")
+    ):
+        return f"Couldn't reach the {stage} service. Check your internet connection."
+    return f"The {stage} step failed. Details are in the debug log."
+
+
 class ClickyApp(QObject):
     """Main orchestrator. Owns all services + signals + worker lifecycle."""
 
@@ -310,21 +363,22 @@ class ClickyApp(QObject):
     sig_show_overlay = pyqtSignal()
     sig_point_at = pyqtSignal(int, int, dict)
     sig_record_memory = pyqtSignal(str, str, str, str, list)
-    # Path A Task 10 — LISTENING-state signals + audio-level forwarding.
+    # LISTENING-state signals + audio-level forwarding.
     sig_show_waveform = pyqtSignal(int, int, dict)
     sig_hide_waveform = pyqtSignal()
     sig_audio_level = pyqtSignal(float)
-    # THINKING-state spinner (post-Path-A UX fix): shown between release and
-    # Claude returning a coordinate, so the user sees feedback during the
-    # ~4-7s LLM wait (instead of the cursor just sitting there).
+    # THINKING-state spinner: shown between release and the model returning
+    # a coordinate, so the user sees feedback during the ~4-7s LLM wait.
     sig_show_spinner = pyqtSignal(int, int, dict)
     sig_hide_spinner = pyqtSignal()
-    # v0.3.0 hackathon: draw-on-screen teaching annotations. Carries a list of
-    # annotation dataclasses (PHYSICAL coords) + the target monitor dict.
+    # Draw-on-screen teaching annotations. Carries a list of annotation
+    # dataclasses (PHYSICAL coords) + the target monitor dict.
     sig_show_annotations = pyqtSignal(list, dict)
     # Clear all teaching shapes (fired at the start of each press so stale
     # annotations never survive a no-speech / cancelled / errored turn).
     sig_clear_annotations = pyqtSignal()
+    # One plain-language sentence for the tray when a provider call fails.
+    sig_notify = pyqtSignal(str)
 
     def __init__(
         self,
@@ -337,10 +391,9 @@ class ClickyApp(QObject):
     ) -> None:
         super().__init__()
 
-        # v0.2.0: respect LLM_PROVIDER setting (Settings dialog dropdown).
+        # Respect the LLM_PROVIDER setting (Settings dialog dropdown).
         # _resolve_llm_credentials returns the effective model_id + api_key
-        # based on whether the user picked Anthropic or Ollama in Settings.
-        # Without this branch the dropdown was cosmetic — see helper docstring.
+        # for the provider the user picked in Settings.
         if ai_client is None:
             _model_id, _api_key = _resolve_llm_credentials()
             ai_client = create_ai_client(
@@ -350,23 +403,26 @@ class ClickyApp(QObject):
             )
         self._ai = ai_client
 
-        # v0.3.0: GPT-Realtime speech-to-speech mode. Selected via
-        # LLM_PROVIDER='openai-realtime'. This is a PARALLEL pipeline — when
+        # GPT-Realtime speech-to-speech mode, selected via
+        # LLM_PROVIDER='openai-realtime'. This is a PARALLEL pipeline: when
         # active, _handle_press/_handle_release branch to the realtime session
         # (mic streams to the WS, model speaks back + points) instead of the
         # STT->AI->TTS chain. The realtime session's rough point_at coordinate
-        # is refined by the grid-locator (via a GPT-4o client). Everything is
+        # is replaced by a vision pass (_realtime_on_coordinate). Everything is
         # fail-safe: a realtime setup failure logs + leaves _realtime None so
         # the app still runs (just without realtime).
         self._realtime = None
-        self._realtime_vision = None  # OpenAIVisionClient for grid-locator refinement
+        self._realtime_vision = None  # OpenAIVisionClient for the vision pass
         self._realtime_capture = None  # cursor-screen capture for the current turn
-        if resolve_setting("LLM_PROVIDER", default="anthropic") == "openai-realtime":
+        if resolve_setting("LLM_PROVIDER", default=default_llm_provider()) == "openai-realtime":
             self._setup_realtime()
         self._stt = stt_client or AssemblyAIStreamingSTT(
             api_key=ASSEMBLYAI_API_KEY
         )
         self._tts = tts_client or CartesiaSonicTTS(api_key=CARTESIA_API_KEY)
+        self._tts.on_error(lambda exc: self._notify("voice", exc))
+        self._notice_times: dict[str, float] = {}  # message -> when it was last shown
+        self._notice_lock = threading.Lock()
         self._memory = memory_store or MemoryStore()
         self._overlay = overlay_controller
         self._hotkey = hotkey_instance
@@ -377,10 +433,10 @@ class ClickyApp(QObject):
         self._current_app: str = "unknown"
         self._current_title: str = ""
 
-        # Press-time capture state (Path A Task 4). Shifts capture + memory
-        # recall off the release-time critical path — saves ~250ms wall-clock.
-        # Release-time pipeline re-captures only if cursor moved >50px
-        # (user intentionally repositioned mid-utterance).
+        # Press-time capture state. Shifts capture + memory recall off the
+        # release-time critical path, saving ~250ms wall-clock. The release-time
+        # pipeline re-captures only if the cursor moved more than
+        # _REUSE_THRESHOLD_PX (user intentionally repositioned mid-utterance).
         self._press_captures: list | None = None
         self._press_memory: str = ""
         self._press_cursor_pos: tuple[int, int] | None = None
@@ -438,7 +494,7 @@ class ClickyApp(QObject):
 
     # --- Hotkey handlers (called on Qt main thread via pyqtSignal) ---
 
-    # --- v0.3.0 GPT-Realtime (parallel pipeline) ---------------------------
+    # --- GPT-Realtime (parallel pipeline) ----------------------------------
 
     def _setup_realtime(self) -> None:
         """Build + connect the GPT-Realtime session. Fail-safe: any error
@@ -446,10 +502,9 @@ class ClickyApp(QObject):
         try:
             from realtime import RealtimeSession
             from ai import OpenAIVisionClient
-            key = OPENAI_API_KEY or ""
-            # Accurate vision client for the realtime PIXEL pass — gpt-5.4 by
-            # default (pixel-perfect grounding, live-verified 5px off Claude;
-            # NO grid-locator, which the old gpt-4o path needed). Same
+            key = resolve_api_key("OPENAI_API_KEY") or ""
+            # Accurate vision client for the realtime PIXEL pass: gpt-5.4 by
+            # default, precise enough to need no grid-locator. Same
             # OPENAI_MODEL_VISION the standard OpenAI path uses.
             self._realtime_vision = OpenAIVisionClient(
                 api_key=key, model_id=f"openai/{OPENAI_MODEL_VISION}",
@@ -463,15 +518,14 @@ class ClickyApp(QObject):
             _log("REALTIME: session connected (gpt-realtime speech-to-speech mode)")
         except Exception as exc:
             self._realtime = None
-            _log(f"REALTIME: setup failed, falling back to normal pipeline — {exc}")
+            _log(f"REALTIME: setup failed, falling back to normal pipeline: {exc}")
 
     def _realtime_on_coordinate(self, x: int, y: int, label: str) -> None:
-        """Realtime called point_at(x,y,label) — the user wants visual help.
+        """Realtime called point_at(x,y,label): the user wants visual help.
         Runs on the realtime recv thread. We DISCARD the model's rough (x,y)
         (realtime is weak at pixels) and do an ACCURATE vision pass (gpt-5.4)
         on the screenshot instead: when draw mode is on, render shapes;
-        otherwise point the cursor. Both via gpt-5.4 — drops the old gpt-4o
-        grid-locator entirely."""
+        otherwise point the cursor."""
         cap = self._realtime_capture
         if cap is None:
             return
@@ -489,7 +543,7 @@ class ClickyApp(QObject):
                 self.sig_point_at.emit(phys[0], phys[1], cap.monitor)
                 _log(f"REALTIME: pointed at {phys} (label={label!r})")
         except Exception as exc:
-            _log(f"REALTIME: vision pass failed — {exc}")
+            _log(f"REALTIME: vision pass failed: {exc}")
 
     def _realtime_render_annotations(self, label, cap, vision_client) -> list:
         """Accurate annotation vision pass for realtime draw mode: send the
@@ -497,8 +551,8 @@ class ClickyApp(QObject):
         tags, map to physical coords. Returns physical shapes (possibly empty).
 
         Uses ask_stream (not ask) because only ask_stream accepts a
-        system_prompt override. The spoken text is discarded — GPT-Realtime
-        already speaks; this pass is pixels-only."""
+        system_prompt override. The spoken text is discarded: GPT-Realtime
+        already speaks, so this pass is pixels-only."""
         img_label = (
             f"primary focus (image dimensions: "
             f"{cap.target_width}x{cap.target_height} pixels)"
@@ -520,7 +574,7 @@ class ClickyApp(QObject):
         return _annotations_to_physical(anns, cap)
 
     def _realtime_locate_point(self, label, cap, vision_client):
-        """Accurate single-point vision pass for realtime cursor mode — gpt-5.4
+        """Accurate single-point vision pass for realtime cursor mode: gpt-5.4
         returns a precise [POINT] directly. Returns physical (x,y) or None."""
         query = (
             f"where is: {label}" if label
@@ -544,10 +598,25 @@ class ClickyApp(QObject):
             target_h=cap.target_height,
         )
 
+    def _notify(self, stage: str, exc: BaseException) -> None:
+        """Tell the user in plain words, at most once a minute per message."""
+        import time
+        message = _friendly_error(stage, exc)
+        now = time.time()
+        with self._notice_lock:  # the AI worker and the voice thread both report
+            if now - self._notice_times.get(message, 0.0) < 60:
+                return
+            self._notice_times[message] = now
+        self.sig_notify.emit(message)
+
+    def _warm_connections(self) -> None:
+        self._ai.warm()
+        self._tts.warm()
+
     def _handle_press(self) -> None:
         """Hotkey pressed: kill TTS + start recording + capture foreground app."""
         import time
-        # v0.3.0: GPT-Realtime mode takes a separate path — stream mic to the
+        # GPT-Realtime mode takes a separate path: stream the mic to the
         # realtime WS instead of STT. The normal STT/AI/TTS chain is skipped.
         if self._realtime is not None:
             _log("PRESS handler START (realtime mode)")
@@ -560,7 +629,7 @@ class ClickyApp(QObject):
                 if mon is not None:
                     self.sig_show_waveform.emit(cursor_x, cursor_y, mon)
             except Exception as exc:
-                _log(f"REALTIME: press failed — {exc}")
+                _log(f"REALTIME: press failed: {exc}")
             return
         _log("PRESS handler START")
         t0 = time.time()
@@ -572,7 +641,7 @@ class ClickyApp(QObject):
         # cancel; the new worker gets a fresh cancel_event at release.
         if self._worker_thread and self._worker_thread.is_alive():
             self._cancel_event.set()
-        # Clear any stale spinner from a prior interaction (defensive — if the
+        # Clear any stale spinner from a prior interaction (defensive: if the
         # previous pipeline errored before hide_spinner fired, we don't want
         # to leave a spinner spinning when a new PTT starts).
         self.sig_hide_spinner.emit()
@@ -584,7 +653,7 @@ class ClickyApp(QObject):
         self._tts.stop()
         # Prevent TTS speaker decay from leaking into this PTT's transcript
         # (acoustic feedback loop). 200ms window tuned to real laptop-mic decay.
-        # MUST be set before the chime — on cold-start the chime triggers a
+        # MUST be set before the chime: on cold start the chime triggers a
         # 400-500ms numpy/sounddevice cold-path init we don't want to count
         # against the grace window start time.
         self._stt.set_tts_grace_until(time.time() + 0.200)
@@ -603,8 +672,13 @@ class ClickyApp(QObject):
             self._stt.start_recording()
             _log(f"  start_recording() in {(time.time()-t0)*1000:.0f}ms")
         except RuntimeError as exc:
-            _log(f"ERROR: STT start failed — {exc}")
+            _log(f"ERROR: STT start failed: {exc}")
+            self._notify("speech-to-text", exc)
             return
+
+        # Open the LLM and TTS connections while the user is still talking, so
+        # the requests on release skip the TCP and TLS handshake.
+        threading.Thread(target=self._warm_connections, daemon=True, name="clicky-warm").start()
 
         # Kick off capture + memory recall in the background so they overlap
         # with the user speaking. Release-time pipeline uses cached result.
@@ -619,7 +693,7 @@ class ClickyApp(QObject):
         )
         self._capture_thread.start()
 
-        # Show the LISTENING-state waveform at the cursor position (Path A Task 10).
+        # Show the LISTENING-state waveform at the cursor position. The
         # cursor polygon hides; bars replace it for the duration of the utterance.
         cursor_x, cursor_y = self._press_cursor_pos
         try:
@@ -627,15 +701,16 @@ class ClickyApp(QObject):
             if mon is not None:
                 self.sig_show_waveform.emit(cursor_x, cursor_y, mon)
         except Exception as exc:
-            _log(f"WARN: show_waveform dispatch failed — {exc}")
+            _log(f"WARN: show_waveform dispatch failed: {exc}")
 
     def _press_time_capture(self, app_name: str) -> None:
         """Background thread launched at press time. Captures screens + recalls
         memory while the user is still speaking. Result stored on self for
         the release-time pipeline worker to consume.
 
-        Invariant #3 preserved: overlay.hide_for_capture() fires BEFORE the
-        mss.grab() call via sig_hide_overlay (Qt signal to main thread).
+        overlay.hide_for_capture() fires BEFORE the mss.grab() call via
+        sig_hide_overlay (Qt signal to main thread), so the model never sees
+        our own cursor.
         """
         try:
             self.sig_hide_overlay.emit()
@@ -645,7 +720,7 @@ class ClickyApp(QObject):
             self._press_captures = captures
             self._press_memory = self._memory.recall(app_name)
         except Exception as exc:
-            _log(f"ERROR: press-time capture failed — {type(exc).__name__}: {exc}")
+            _log(f"ERROR: press-time capture failed: {type(exc).__name__}: {exc}")
             self._press_captures = None  # Release-time path falls back to re-capture
 
     def _release_capture_worker(
@@ -656,16 +731,16 @@ class ClickyApp(QObject):
     ) -> None:
         """Background thread launched at hotkey release. Runs in parallel with
         stt.stop_recording() so re-capture wall-clock is hidden under STT
-        finalize latency. Makes the reuse-vs-recapture decision itself to
-        preserve 'no flicker on cursor-still sessions' UX — mirrors the
-        serial logic in _pipeline_worker pre-refactor.
+        finalize latency. Makes the reuse-vs-recapture decision itself so a
+        still cursor causes no overlay flicker.
 
         Pushes a tuple (captures, memory_context, reason_log_str) to
         result_queue. On exception pushes (None, None, error_str) so the
         main thread's queue.get() never hangs.
 
-        Invariant #3 preserved: overlay.hide_for_capture() fires BEFORE every
-        mss.grab() via sig_hide_overlay (Qt signal to main thread).
+        overlay.hide_for_capture() fires BEFORE every mss.grab() via
+        sig_hide_overlay (Qt signal to main thread), so the model never sees
+        our own cursor.
         """
         try:
             # If press-time capture is still running, wait briefly for it to
@@ -696,7 +771,7 @@ class ClickyApp(QObject):
                 )
                 return
 
-            # Re-capture path — fire invariant-preserving hide → grab → show.
+            # Re-capture path: hide overlay → grab → show.
             if self._press_captures is None:
                 reason_suffix = "no press-time capture available"
             else:
@@ -714,7 +789,7 @@ class ClickyApp(QObject):
             result_queue.put((captures, memory_context, reason))
         except Exception as exc:
             _log(
-                f"ERROR: release capture worker failed — "
+                f"ERROR: release capture worker failed: "
                 f"{type(exc).__name__}: {exc}"
             )
             result_queue.put(
@@ -724,7 +799,7 @@ class ClickyApp(QObject):
     def _handle_release(self) -> None:
         """Hotkey released: cancel previous worker, spawn new pipeline."""
         import time
-        # v0.3.0: GPT-Realtime mode — capture the screen, hand it to the
+        # GPT-Realtime mode: capture the screen and hand it to the
         # realtime session, which commits the spoken audio + requests a
         # response (model speaks back + emits point_at). Coordinate refinement
         # happens in _realtime_on_coordinate. Normal pipeline is skipped.
@@ -752,12 +827,12 @@ class ClickyApp(QObject):
                     if mon is not None:
                         self.sig_show_spinner.emit(cx, cy, mon)
             except Exception as exc:
-                _log(f"REALTIME: release failed — {exc}")
+                _log(f"REALTIME: release failed: {exc}")
             return
-        _log(f"RELEASE handler START (Qt main thread)")
+        _log("RELEASE handler START (Qt main thread)")
         # LISTENING → THINKING transition: hide waveform, show spinner at the
         # current cursor position. Cursor polygon stays hidden while spinner
-        # runs; buddy reappears when pipeline hides spinner + fires bezier.
+        # runs; it reappears when pipeline hides spinner + fires bezier.
         self.sig_hide_waveform.emit()
 
         # Snapshot release-time cursor synchronously. Taken here (not at
@@ -772,7 +847,7 @@ class ClickyApp(QObject):
             if mon is not None:
                 self.sig_show_spinner.emit(cursor_x, cursor_y, mon)
         except Exception as exc:
-            _log(f"WARN: show_spinner dispatch failed — {exc}")
+            _log(f"WARN: show_spinner dispatch failed: {exc}")
         if release_cursor is None:
             release_cursor = self._press_cursor_pos or (0, 0)
 
@@ -780,7 +855,7 @@ class ClickyApp(QObject):
             _log("  cancelling previous worker + stopping TTS")
             self._cancel_event.set()
             self._tts.stop()
-            # Same 200ms grace as press — prevents aborted TTS tail from
+            # Same 200ms grace as press: keeps the aborted TTS tail from
             # contaminating the new PTT's transcript.
             self._stt.set_tts_grace_until(time.time() + 0.200)
 
@@ -830,15 +905,14 @@ class ClickyApp(QObject):
         ``max(STT, capture)`` instead of ``STT + capture``.
         """
         dbg = DebugSession.start(app_name, window_title)
-        # v0.4.1: log the ACTUAL providers this interaction used. The old
-        # "AssemblyAI"/"CLAUDE" log labels were hardcoded and lied about which
-        # provider ran; this line lets you open any interaction.log and see
-        # exactly what was used (STT, LLM, TTS).
+        # Log the ACTUAL providers this interaction used, so any
+        # interaction.log shows exactly what ran (STT, LLM, TTS).
         dbg.log(
             f"PROVIDERS: STT={type(self._stt).__name__} | "
             f"LLM={getattr(self._ai, 'model_id', None) or type(self._ai).__name__} | "
             f"TTS={type(self._tts).__name__}"
         )
+        stage = "speech-to-text"
         try:
             if cancel.is_set():
                 return
@@ -850,7 +924,7 @@ class ClickyApp(QObject):
             dbg.log(f"STT: final transcript ({len(transcript)} chars): {transcript!r}")
             _log(f"Transcript: {transcript!r}")
             if not transcript.strip():
-                dbg.log("NO SPEECH DETECTED — skipping interaction")
+                dbg.log("NO SPEECH DETECTED, skipping interaction")
                 _log("No speech detected, skipping.")
                 return
 
@@ -858,8 +932,8 @@ class ClickyApp(QObject):
                 return
 
             # Read capture result from the worker that's been running in
-            # parallel with stt.stop_recording above. Timeout is 5s — far
-            # above any realistic capture time (~300ms worst case) — so if
+            # parallel with stt.stop_recording above. Timeout is 5s (far
+            # above any realistic capture time, ~300ms worst case), so if
             # the worker errored silently we fail loudly instead of hanging.
             # Fallback on timeout or error: use press-time captures if
             # available, else abort pipeline.
@@ -868,15 +942,15 @@ class ClickyApp(QObject):
                     timeout=5.0
                 )
             except queue.Empty:
-                dbg.log("CAPTURE: worker timeout after 5s — falling back to press-time")
+                dbg.log("CAPTURE: worker timeout after 5s, falling back to press-time")
                 captures = self._press_captures
                 memory_context = self._press_memory
-                capture_reason = "worker timeout — press-time fallback"
+                capture_reason = "worker timeout, press-time fallback"
 
             if captures is None:
                 if self._press_captures is not None:
                     dbg.log(
-                        f"CAPTURE: worker failed ({capture_reason}) — "
+                        f"CAPTURE: worker failed ({capture_reason}), "
                         f"using press-time fallback"
                     )
                     captures = self._press_captures
@@ -884,9 +958,9 @@ class ClickyApp(QObject):
                 else:
                     dbg.log(
                         f"CAPTURE: worker failed and no press-time fallback "
-                        f"({capture_reason}) — aborting pipeline"
+                        f"({capture_reason}), aborting pipeline"
                     )
-                    _log("ERROR: No screenshots available for Claude, aborting.")
+                    _log("ERROR: No screenshots available for the model, aborting.")
                     return
 
             dbg.log(f"CAPTURE: {capture_reason}")
@@ -911,16 +985,15 @@ class ClickyApp(QObject):
                 )
 
             # Curated KB recall (user-uploaded per-app docs). Empty tuple
-            # if no .md file exists for this app — Claude proceeds with
-            # vision + memory only ("Claude already knows that software"
-            # path). When present, ask_stream injects as a 2nd
+            # if no .md file exists for this app, and the model answers from
+            # vision + memory only. When present, ask_stream injects as a 2nd
             # cache_control system block (Anthropic) or concats into
             # system string (Gemini).
             #
             # Wrapped in try/except because KB files are user-controlled
             # and could be malformed (bad encoding, permission errors,
             # symlink loops, etc.). Failure here must NOT crash the
-            # pipeline — Claude can still answer with vision + memory.
+            # pipeline: the model can still answer with vision + memory.
             try:
                 kb_content, kb_app_name = kb.recall(app_name)
             except Exception as exc:
@@ -944,11 +1017,11 @@ class ClickyApp(QObject):
                 return
 
             dbg.log("LLM: streaming started...")
-            _log("Asking Claude...")
+            _log("Asking the model...")
 
             # Arm one-shot first-audible-word log. Fires on the first
             # successful sounddevice.play(samples) in the TTS playback
-            # worker — closes the gap between "CLAUDE: streaming started"
+            # worker, measuring the gap between "LLM: streaming started"
             # (when we open the HTTP connection) and the actual moment
             # the user hears something. Per-interaction (slot clears
             # after firing once); next interaction re-arms.
@@ -956,9 +1029,9 @@ class ClickyApp(QObject):
                 lambda: dbg.log("TTS: first audible chunk played")
             )
 
-            # Sentence-level TTS streaming (Path A Task 6). Flush complete
-            # sentences from the buffer as each .!? boundary arrives, so TTS
-            # starts on sentence 1 (~1200ms into Claude stream) instead of
+            # Sentence-level TTS streaming. Flush complete sentences from
+            # the buffer as each .!? boundary arrives, so TTS starts on
+            # sentence 1 (~1200ms into the stream) instead of
             # after the full response (~3700ms). Saves ~2s perceived latency.
             #
             # Tag-safety: stop flushing the moment '[' appears in the buffer
@@ -968,14 +1041,14 @@ class ClickyApp(QObject):
             tag_started = False
             already_flushed_chars = 0
 
-            # v0.3.0 hackathon: draw-on-screen teaching mode. Uses the module-
-            # level cached config.ANNOTATION_MODE (resolved ONCE at import) — NOT
-            # a fresh resolve_setting() — so there is ZERO per-interaction keyring
+            # Draw-on-screen teaching mode. Uses the module-level cached
+            # config.ANNOTATION_MODE (resolved ONCE at import), NOT a fresh
+            # resolve_setting(), so there is ZERO per-interaction keyring
             # read/write on the hot path (resolve_setting writes to keyring on
             # every call when the value is in env). Trade-off: toggling needs an
-            # app restart, which is fine (set once in .env). When on, swap in the
-            # annotation system prompt so the model emits shape tags. Default
-            # off = unchanged behavior (the [POINT] cursor prompt).
+            # app restart. When on, swap in the annotation system prompt so the
+            # model emits shape tags. Off (the default) keeps the [POINT] cursor
+            # prompt.
             annotation_mode = ANNOTATION_MODE == "on"
             _ask_kwargs = dict(
                 images=images,
@@ -987,10 +1060,15 @@ class ClickyApp(QObject):
             if annotation_mode:
                 _ask_kwargs["system_prompt"] = _CLICKY_ANNOTATION_SYSTEM_PROMPT
 
+            stage = "AI"
             with self._ai.ask_stream(**_ask_kwargs) as stream:
+                first_token = True
                 for delta in stream.text_deltas():
                     if cancel.is_set():
                         return
+                    if first_token:
+                        dbg.log("LLM: first token")
+                        first_token = False
                     sentence_buffer += delta
                     if "[" in sentence_buffer:
                         tag_started = True
@@ -1004,6 +1082,7 @@ class ClickyApp(QObject):
                             already_flushed_chars += len(s) + 1
 
                 result = stream.final_result()
+                dbg.log(f"LLM: usage {stream.usage()}")
 
             if cancel.is_set():
                 return
@@ -1012,14 +1091,15 @@ class ClickyApp(QObject):
             dbg.log(f"LLM: spoken_text: {result.spoken_text!r}")
             dbg.log(f"LLM: coordinate={result.coordinate}, label={result.element_label!r}, screen={result.screen_number}")
 
-            # v0.3.0 annotation mode: the shape tags ([ARROW]/[CIRCLE]/...) are
-            # still in result.spoken_text — ai.py's parser only strips [POINT].
+            # Annotation mode: the shape tags ([ARROW]/[CIRCLE]/...) are still
+            # in result.spoken_text because ai.py's parser only strips [POINT].
             # Parse + strip them here so TTS never reads coordinates aloud, and
             # map their screenshot coords to physical for the overlay.
             spoken_text = result.spoken_text
             phys_annotations: list = []
+            _anns: list = []
             if annotation_mode and result.spoken_text:
-                # Strip FIRST, outside the try — parse_annotations is pure regex
+                # Strip FIRST, outside the try: parse_annotations is pure regex
                 # and cannot raise, so spoken_text is ALWAYS tag-stripped before
                 # the tail flush (coords never reach TTS even if the coordinate
                 # transform below fails). Only the physical transform is guarded.
@@ -1034,11 +1114,11 @@ class ClickyApp(QObject):
                             f"{len(phys_annotations)} physical"
                         )
                     except Exception as exc:  # never break the pipeline
-                        dbg.log(f"ANNOTATIONS: transform skipped — {exc}")
+                        dbg.log(f"ANNOTATIONS: transform skipped: {exc}")
 
             # Flush the tail (everything in spoken_text that hasn't yet been
-            # sent to TTS). Uses the tag-stripped spoken_text — avoids ever
-            # speaking the [POINT:x,y:label] OR shape tags aloud.
+            # sent to TTS). Uses the tag-stripped spoken_text so the
+            # [POINT:x,y:label] and shape tags are never spoken aloud.
             if spoken_text:
                 tail = spoken_text[already_flushed_chars:].strip()
                 if tail:
@@ -1050,29 +1130,28 @@ class ClickyApp(QObject):
 
             _log(f"Response: {result.spoken_text[:80]}...")
 
-            # v0.2.0: Grid-locator fallback for Ollama / weak vision models.
-            # If Claude returned no [POINT:x,y] tag AND we're using Ollama AND
-            # the query was directional, run grid-locator on the cursor
-            # screenshot to derive coordinates. Returns physical virtual-desktop
-            # coords (same convention as unscale_claude_coords output), or None
-            # if the locator can't find a target.
+            # Grid-locator fallback for Ollama / weak vision models.
+            # If the model returned no [POINT:x,y] tag AND the client is a
+            # weak-vision one AND the query was directional, run grid-locator
+            # on the cursor screenshot to derive coordinates. Returns physical
+            # virtual-desktop coords (same convention as unscale_claude_coords
+            # output), or None if the locator can't find a target.
             #
             # CANCEL GUARD: skip the locator entirely if cancel fired between
-            # stream.final_result() and here (e.g. ESC during sentence
-            # streaming). Without this, locator's 2 Ollama calls would run for
+            # stream.final_result() and here (e.g. a re-press during sentence
+            # streaming). Otherwise the locator's 2 LLM calls would run for
             # 5-10s on a cancelled worker and emit pointer + memory side
-            # effects for an interaction the user already aborted. Caught by
-            # codex adversarial review 2026-06-05 (HIGH 2).
+            # effects for an interaction the user already aborted.
             if cancel.is_set():
                 return
             if annotation_mode:
                 # Annotation mode draws SHAPES, not a grid-located cursor point.
-                # Skip the grid-locator entirely — it would otherwise fire for
+                # Skip the grid-locator entirely: it would otherwise fire for
                 # weak-vision providers (OpenAI/Ollama) on directional queries
                 # since annotation responses carry no [POINT] tag, adding 2 extra
                 # LLM calls + emitting an unrelated cursor point that competes
                 # with the shapes. Keeps annotation behavior identical across
-                # providers (Codex review 2026-06-25).
+                # providers.
                 locator_phys_xy = None
             else:
                 locator_phys_xy = _maybe_locate_via_grid(
@@ -1083,18 +1162,24 @@ class ClickyApp(QObject):
                     dbg=dbg,
                 )
             # POST-LOCATOR cancel guard: if locator just ran (took seconds on
-            # Ollama), the user may have hit ESC or pressed Ctrl+Alt+Space
-            # again. Stop before emitting any pointer / memory side effects
-            # — those would race the new pipeline and write history for an
-            # interaction that no longer matters.
+            # Ollama), the user may have pressed Ctrl+Alt+Space again. Stop
+            # before emitting any pointer / memory side effects, which would
+            # race the new pipeline and write history for an interaction that
+            # no longer matters.
             if cancel.is_set():
                 return
+
+            # Draw mode often answers with shapes only; the cursor still flies
+            # to the first one, so Clicky points in both modes.
+            draw_anchor = (
+                _drawing_anchor(_anns) if annotation_mode and not result.coordinate else None
+            )
 
             if result.coordinate:
                 x_claude, y_claude = result.coordinate
                 screen_num = result.screen_number
 
-                # Save screenshot with red marker at Claude's coordinate
+                # Save screenshot with red marker at the model's coordinate
                 dbg.save_screenshot(
                     cursor_capture.image,
                     "screenshot_with_marker.jpg",
@@ -1126,27 +1211,43 @@ class ClickyApp(QObject):
                 # cursor at the same time during the transition).
                 self.sig_hide_spinner.emit()
                 self.sig_point_at.emit(phys_x, phys_y, target_capture.monitor)
+            elif draw_anchor is not None:
+                # Shapes are always on the cursor screen.
+                phys_x, phys_y = unscale_claude_coords(
+                    claude_x=draw_anchor[0],
+                    claude_y=draw_anchor[1],
+                    scale_x=cursor_capture.scale_x,
+                    scale_y=cursor_capture.scale_y,
+                    monitor_left=cursor_capture.monitor["left"],
+                    monitor_top=cursor_capture.monitor["top"],
+                    target_w=cursor_capture.target_width,
+                    target_h=cursor_capture.target_height,
+                )
+                dbg.log(f"COORDS: drawing anchor {draw_anchor} -> physical=({phys_x},{phys_y})")
+                self.sig_hide_spinner.emit()
+                self.sig_point_at.emit(phys_x, phys_y, cursor_capture.monitor)
             elif locator_phys_xy is not None:
-                # Grid-locator fallback (Ollama path): coords already in PHYSICAL
-                # virtual-desktop space — skip unscale_claude_coords, emit directly.
+                # Grid-locator fallback: coords are already in PHYSICAL
+                # virtual-desktop space, so skip unscale_claude_coords and
+                # emit directly.
                 phys_x, phys_y = locator_phys_xy
                 dbg.log(f"COORDS: grid-locator -> physical=({phys_x},{phys_y})")
                 self.sig_hide_spinner.emit()
                 self.sig_point_at.emit(phys_x, phys_y, cursor_capture.monitor)
             else:
                 dbg.log("COORDS: no coordinate returned (text-only response)")
-                # Text-only path: spinner still needs to go away so the buddy
-                # returns to follow-cursor mode during TTS playback.
+                # Text-only path: spinner still needs to go away so the cursor
+                # goes back to following the mouse during TTS playback.
                 self.sig_hide_spinner.emit()
 
-            # v0.3.0: draw the teaching annotations (additive to the cursor).
-            # Independent of the [POINT]/locator branches above — shapes show
+            # Draw the teaching annotations (additive to the cursor).
+            # Independent of the [POINT]/locator branches above: shapes show
             # during SPEAKING and auto-clear after 30s. Emit on EVERY annotation-
             # mode turn (even with zero shapes) so a no-shape answer clears any
             # stale circles/arrows from the previous turn immediately, instead of
             # leaving them on screen (misleading) until the 30s timer fires.
             # Final cancel guard: if the user re-pressed (which cancels this
-            # worker), do NOT repaint — the press already cleared the overlay.
+            # worker), do NOT repaint; the press already cleared the overlay.
             if cancel.is_set():
                 return
             if annotation_mode:
@@ -1157,15 +1258,17 @@ class ClickyApp(QObject):
             pointer_targets = []
             if result.coordinate:
                 pointer_targets.append(result.coordinate)
+            elif draw_anchor is not None:
+                pointer_targets.append(draw_anchor)
             elif locator_phys_xy is not None:
                 # Memory recording: store the grid-locator coords (physical
                 # virtual-desktop space) so future recall can reference them
-                # the same way Claude coords are referenced.
+                # the same way model coords are referenced.
                 pointer_targets.append(locator_phys_xy)
 
             # Use the tag-stripped `spoken_text` (== result.spoken_text in
             # normal mode; shape-tags removed in annotation mode) so memory +
-            # history never store [CIRCLE]/[ARROW] control tags — otherwise
+            # history never store [CIRCLE]/[ARROW] control tags; otherwise
             # recall() would re-inject coordinates into future prompts and
             # stale tags could resurface on non-annotation turns.
             self.sig_record_memory.emit(
@@ -1189,18 +1292,23 @@ class ClickyApp(QObject):
                     _MAX_HISTORY_EXCHANGES * 2
                 ):]
 
-            dbg.log("DONE — interaction complete")
+            dbg.log("DONE: interaction complete")
 
         except Exception as exc:
             if not cancel.is_set():
                 dbg.log(f"ERROR: {type(exc).__name__}: {exc}")
-                _log(f"ERROR: Pipeline failed — {type(exc).__name__}: {exc}")
+                _log(f"ERROR: Pipeline failed: {type(exc).__name__}: {exc}")
+                self._notify(stage, exc)
         finally:
             # Always hide spinner on pipeline exit (success, error, cancel).
             # Prevents a stuck-spinning arc if anything above raises before
             # the normal hide_spinner emit fires.
             self.sig_hide_spinner.emit()
-            dbg.close()
+            # Kept open a little longer: the first audio often plays after the
+            # model has finished, and its "first audible chunk" line belongs here.
+            closer = threading.Timer(20.0, dbg.close)
+            closer.daemon = True
+            closer.start()
 
     # --- Signal slot handlers (run on Qt main thread) ---
 
@@ -1233,9 +1341,9 @@ class ClickyApp(QObject):
                 pointer_targets=pointer_targets,
             )
         except Exception as exc:
-            _log(f"ERROR: Memory record failed — {exc}")
+            _log(f"ERROR: Memory record failed: {exc}")
 
-    # Path A Task 10 — LISTENING-state slot handlers (run on Qt main thread)
+    # LISTENING-state slot handlers (run on Qt main thread)
 
     def _on_show_waveform(self, physical_x: int, physical_y: int, monitor: dict) -> None:
         if self._overlay:
@@ -1249,7 +1357,7 @@ class ClickyApp(QObject):
         if self._overlay:
             self._overlay.set_audio_level(level)
 
-    # Post-Path-A UX fix — THINKING-state slot handlers (Qt main thread)
+    # THINKING-state slot handlers (Qt main thread)
 
     def _on_show_spinner(self, physical_x: int, physical_y: int, monitor: dict) -> None:
         if self._overlay:
@@ -1271,12 +1379,12 @@ class ClickyApp(QObject):
 _T0 = __import__("time").time()
 
 
-# --- Sprint 3.8: single-instance mutex --------------------------------------
+# --- Single-instance mutex --------------------------------------------------
 #
 # Without this, double-clicking the installed shortcut spawns multiple
 # Clicky.exe processes. Each installs its own pynput.Listener (suppress=False
-# is observe-only — multiple listeners coexist), so one Ctrl+Alt+Space press
-# fires N parallel STT->Claude->TTS pipelines. User hears N overlapping
+# is observe-only, so multiple listeners coexist), so one Ctrl+Alt+Space press
+# fires N parallel STT->LLM->TTS pipelines. User hears N overlapping
 # voices answering one question.
 #
 # Pattern: Win32 named mutex acquired before QApplication construction.
@@ -1285,10 +1393,10 @@ _T0 = __import__("time").time()
 # Same pattern Spotify, Slack, Discord, Raycast all use.
 
 _MUTEX_NAME = "Local\\ClickyWindows-SingleInstance-v1"
-"""Per-logon-session namespace (Local\\) — admin and non-admin in the same
+"""Per-logon-session namespace (Local\\): admin and non-admin in the same
 session see the same mutex (correct), but different Windows users on the
 same machine each get their own Clicky (also correct). Global\\ would
-block second user on a shared RDP host — wrong for portfolio scope."""
+block the second user on a shared RDP host."""
 
 _ERROR_ALREADY_EXISTS = 183  # winerror.h ERROR_ALREADY_EXISTS
 
@@ -1297,7 +1405,7 @@ def _acquire_single_instance_mutex(kernel32=None):
     """Try to acquire the named mutex. Returns the HANDLE (truthy int) if
     we are the first instance, ``None`` if another Clicky already owns it,
     or the string ``"fail-open"`` on rare CreateMutexW genuine failure (in
-    which case caller should proceed with startup — better to risk a
+    which case caller should proceed with startup: better to risk a
     duplicate than block the user with a broken installer).
 
     The ``kernel32`` parameter is a DI hook for tests (pass a MagicMock).
@@ -1309,8 +1417,8 @@ def _acquire_single_instance_mutex(kernel32=None):
 
     The returned handle MUST be retained for the process lifetime (a
     module-global reference is sufficient). The Windows kernel auto-
-    releases the mutex when the process terminates — including on crash
-    or Task Manager kill — so no explicit cleanup is needed at shutdown.
+    releases the mutex when the process terminates (including on crash
+    or Task Manager kill), so no explicit cleanup is needed at shutdown.
     """
     if kernel32 is None:
         kernel32 = ctypes.windll.kernel32
@@ -1321,7 +1429,7 @@ def _acquire_single_instance_mutex(kernel32=None):
         kernel32.GetLastError.restype = wintypes.DWORD
         kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
 
-    # bInitialOwner=False — for single-instance detection we need the
+    # bInitialOwner=False: for single-instance detection we need the
     # kernel object's *existence* as a flag, not ownership/synchronization
     # semantics. Setting True would make first instance pointlessly own a
     # mutex it never releases.
@@ -1330,11 +1438,11 @@ def _acquire_single_instance_mutex(kernel32=None):
     # mocks use return_value=0 for convenience; both are falsy so `not handle`
     # handles both representations safely.
     if not handle:
-        # Genuine CreateMutexW failure (rare). Fail open — don't block startup.
+        # Genuine CreateMutexW failure (rare). Fail open: don't block startup.
         return "fail-open"
     # GetLastError MUST be the next Win32 call after CreateMutexW; any
     # intervening kernel32 call could clobber the thread-local last-error.
-    # The `if not handle` branch above is pure Python — safe.
+    # The `if not handle` branch above is pure Python, so it is safe.
     if kernel32.GetLastError() == _ERROR_ALREADY_EXISTS:
         # Another Clicky owns the mutex. Close OUR handle to the same
         # kernel object (the original mutex is still held by the first
@@ -1344,39 +1452,90 @@ def _acquire_single_instance_mutex(kernel32=None):
     return handle
 
 
-# --- Path A Task 11: listening chime (lazy-built + async playback) ----------
+# --- Listening chime (lazy-built + async playback) --------------------------
 
 _CHIME_SAMPLE_RATE = 44100
 _CHIME_SAMPLES = None  # float32 numpy array, built on first play
+_CHIME_STREAM = None  # output stream opened once; opening the device takes 300-700 ms
+_CHIME_LOCK = threading.Lock()  # one thread opens or writes the stream at a time
+_CHIME_WAIT_S = 1.0  # a chime that cannot reach the device by then is skipped
 
 
-def _play_chime_async() -> None:
-    """Play a short 'mic is hot' chime on hotkey PRESS. Non-blocking.
-
-    Generated in-memory the first time it's called (no asset file to manage,
-    no soundfile dep). 60ms, 880Hz (A5), exponential decay envelope.
-    ``sounddevice.play()`` returns immediately — audio plays through the
-    portaudio output buffer while the rest of the press handler proceeds.
-
-    Errors are swallowed — the chime is UX-only; if sounddevice / the audio
-    device is unavailable, we silently skip rather than break the PTT flow.
-    """
-    global _CHIME_SAMPLES
-    try:
+def _chime_stream():
+    """The chime's output stream, opened on first use and kept open: opening
+    an audio device takes 300-700 ms on Windows, every time. Hold _CHIME_LOCK."""
+    global _CHIME_STREAM
+    if _CHIME_STREAM is None:
         import sounddevice as _sd
-        if _CHIME_SAMPLES is None:
-            import numpy as _np
-            duration_s = 0.060
-            freq_hz = 880.0
-            t = _np.linspace(0.0, duration_s,
-                             int(_CHIME_SAMPLE_RATE * duration_s), endpoint=False)
-            envelope = _np.exp(-t * 40.0)
-            _CHIME_SAMPLES = (
-                _np.sin(2.0 * _np.pi * freq_hz * t) * envelope * 0.3
-            ).astype(_np.float32)
-        _sd.play(_CHIME_SAMPLES, _CHIME_SAMPLE_RATE)
-    except Exception:
-        pass
+        stream = _sd.OutputStream(samplerate=_CHIME_SAMPLE_RATE, channels=1, dtype="float32")
+        try:
+            stream.start()
+        except Exception:
+            stream.close()
+            raise
+        _CHIME_STREAM = stream
+    return _CHIME_STREAM
+
+
+def _drop_chime_stream() -> None:
+    """Close a stream whose device failed (headphones unplugged, for example)
+    so the next chime opens it again. Hold _CHIME_LOCK."""
+    global _CHIME_STREAM
+    stream, _CHIME_STREAM = _CHIME_STREAM, None
+    if stream is not None:
+        try:
+            stream.close()
+        except Exception:
+            pass
+
+
+def _play_chime_async() -> threading.Thread:
+    """Play a short 'mic is hot' chime on hotkey PRESS without blocking it.
+
+    60ms, 880Hz (A5), exponential decay, generated in memory on first use.
+    Written to a stream that stays open, from a background thread, so the
+    press handler never waits on the audio device. Errors are swallowed: the
+    chime is UX-only.
+    """
+    def _play() -> None:
+        global _CHIME_SAMPLES
+        try:
+            if _CHIME_SAMPLES is None:
+                import numpy as _np
+                duration_s = 0.060
+                freq_hz = 880.0
+                t = _np.linspace(0.0, duration_s,
+                                 int(_CHIME_SAMPLE_RATE * duration_s), endpoint=False)
+                envelope = _np.exp(-t * 40.0)
+                _CHIME_SAMPLES = (
+                    _np.sin(2.0 * _np.pi * freq_hz * t) * envelope * 0.3
+                ).astype(_np.float32)
+            if not _CHIME_LOCK.acquire(timeout=_CHIME_WAIT_S):
+                return  # the device is busy or stuck: skip this chime
+            try:
+                _chime_stream().write(_CHIME_SAMPLES)
+            except Exception:
+                _drop_chime_stream()
+            finally:
+                _CHIME_LOCK.release()
+        except Exception:
+            pass
+    thread = threading.Thread(target=_play, daemon=True, name="chime")
+    thread.start()
+    return thread
+
+
+def _warm_chime() -> threading.Thread:
+    """Open the chime stream at startup, off the main thread."""
+    def _open() -> None:
+        try:
+            with _CHIME_LOCK:
+                _chime_stream()
+        except Exception:
+            pass
+    thread = threading.Thread(target=_open, daemon=True, name="chime-warm")
+    thread.start()
+    return thread
 
 
 def _log(msg: str) -> None:
@@ -1387,7 +1546,7 @@ def _log(msg: str) -> None:
     print(f"[clicky {ts} +{elapsed:.0f}ms] {msg}", flush=True)
 
 
-# --- Sprint 4: TTS provider resolution --------------------------------------
+# --- Provider resolution ----------------------------------------------------
 
 
 def _resolve_tts_credentials() -> tuple[str, str | None]:
@@ -1413,10 +1572,12 @@ def _resolve_stt_credentials() -> tuple[str, str]:
     _resolve_tts_credentials. faster-whisper is local offline (no key).
     Resolved fresh (env→keyring) so a Settings change is honored on restart.
     """
-    provider = resolve_setting("STT_PROVIDER", default="assemblyai")
+    provider = resolve_setting("STT_PROVIDER", default="cartesia")
     if provider in ("faster-whisper", "local"):
         return "faster-whisper", ""
-    return "assemblyai", resolve_api_key("ASSEMBLYAI_API_KEY") or ""
+    if provider == "assemblyai":
+        return "assemblyai", resolve_api_key("ASSEMBLYAI_API_KEY") or ""
+    return "cartesia", resolve_api_key("CARTESIA_API_KEY") or ""
 
 
 def _openrouter_key() -> str:
@@ -1425,18 +1586,19 @@ def _openrouter_key() -> str:
     One OpenRouter key works for every model namespace (anthropic/, openai/,
     google/), so a power user pastes it once and it is reused across all LLM
     providers (cache + reuse). Direct provider keys (sk-ant-, sk-..., Google
-    AIza) are NOT reused here — they only authenticate their own provider, so
+    AIza) are NOT reused here: they only authenticate their own provider, so
     each is matched by its own slot. create_ai_client then routes an sk-or-
     key to OpenRouter and a direct key to that provider's native endpoint.
     """
-    for k in (ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY):
-        if (k or "").startswith("sk-or-"):
+    for slot in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"):
+        k = resolve_api_key(slot) or ""
+        if k.startswith("sk-or-"):
             return k
     return ""
 
 
 def _resolve_llm_credentials() -> tuple[str, str]:
-    """Resolve (effective_model_id, api_key) at startup based on LLM_PROVIDER (v0.2.0).
+    """Resolve (effective_model_id, api_key) at startup based on LLM_PROVIDER.
 
     Reads LLM_PROVIDER via config.resolve_setting (env→keyring→default).
     - LLM_PROVIDER='ollama'    → returns ("ollama/<OLLAMA_MODEL_VISION>", ""),
@@ -1448,46 +1610,36 @@ def _resolve_llm_credentials() -> tuple[str, str]:
                                   ('anthropic/...' or 'claude...') to
                                   AnthropicClient.
     - any other value          → falls back to anthropic path (forward-compat).
-
-    Without this helper the Settings dropdown was cosmetic (caught by codex
-    adversarial review 2026-06-05): LLM_PROVIDER='ollama' got persisted to
-    keyring but app.py only ever read MODEL_ID, so the user's choice was
-    silently ignored and AnthropicClient was always constructed with whatever
-    MODEL_ID env var defaulted to.
+    - nothing chosen yet       → config.default_llm_provider(): the provider
+                                  there is a key for, else OpenAI.
 
     Note: MODEL_ID env var takes precedence over LLM_PROVIDER ONLY when
     MODEL_ID already routes to a non-Anthropic prefix (the factory dispatches
     on MODEL_ID prefix first). For the GUI-flow (user clicks Ollama in the
-    dropdown), LLM_PROVIDER='ollama' is sufficient — they never need to know
+    dropdown), LLM_PROVIDER='ollama' is sufficient; they never need to know
     about MODEL_ID.
     """
-    provider = resolve_setting("LLM_PROVIDER", default="anthropic")
+    provider = resolve_setting("LLM_PROVIDER", default=default_llm_provider())
     if provider in ("openai", "openai-realtime"):
-        # v0.3.0: OpenAI native GPT-4o vision. 'openai/' prefix routes
-        # create_ai_client → OpenAIVisionClient. Pointing accuracy is refined
-        # via the grid-locator (GPT-4o is weaker at raw pixel coords than
-        # Claude). For 'openai-realtime', the GPT-Realtime speech-to-speech
-        # session runs as a parallel pipeline (see _setup_realtime); the main
-        # ai_client built here is a valid GPT-4o client used by the realtime
-        # path's grid-locator refinement, harmless otherwise.
+        # OpenAI native vision. 'openai/' prefix routes create_ai_client →
+        # OpenAIVisionClient. For 'openai-realtime', the GPT-Realtime
+        # speech-to-speech session runs as a parallel pipeline (see
+        # _setup_realtime); the main ai_client built here is a valid OpenAI
+        # vision client, harmless if unused.
         # Direct OpenAI key (sk-...) → api.openai.com; an OpenRouter key →
         # OpenRouter (create_ai_client routes by prefix). If the OpenAI slot is
         # empty, reuse a cached OpenRouter key so one sk-or- key serves OpenAI too.
-        return f"openai/{OPENAI_MODEL_VISION}", OPENAI_API_KEY or _openrouter_key()
+        return f"openai/{OPENAI_MODEL_VISION}", resolve_api_key("OPENAI_API_KEY") or _openrouter_key()
     if provider == "gemini":
-        # Gemini routes via OpenRouter — the SAME endpoint Claude uses. Reuse
-        # the user's OpenRouter (sk-or-) key from the Anthropic slot if no
-        # separate GEMINI_API_KEY is set, so there's no extra key to enter
-        # (v0.4.1 minimal-UX). Pointing is refined by the grid-locator.
         # Own slot first (a direct Google AI Studio key, or a per-Gemini
         # OpenRouter key), else reuse any cached OpenRouter key so one sk-or-
-        # key serves Gemini too. create_ai_client routes by key prefix.
-        return GEMINI_MODEL_VISION, GEMINI_API_KEY or _openrouter_key()
+        # key serves Gemini too and there's no extra key to enter.
+        # create_ai_client routes by key prefix.
+        return GEMINI_MODEL_VISION, resolve_api_key("GEMINI_API_KEY") or _openrouter_key()
     if provider == "ollama":
-        # v0.2.1 (Issue #1 fix D): log detected Ollama version + warn
-        # about model/version mismatches at startup. Stderr only — the
-        # Settings dialog catches this case interactively. This is
-        # belt-and-suspenders for users who set OLLAMA_MODEL_VISION via
+        # Log detected Ollama version + warn about model/version mismatches
+        # at startup. Stderr only: the Settings dialog catches this case
+        # interactively. This covers users who set OLLAMA_MODEL_VISION via
         # env var and never touch the Settings UI.
         try:
             from ollama_health import (
@@ -1498,7 +1650,7 @@ def _resolve_llm_credentials() -> tuple[str, str]:
             if version is None:
                 print(
                     f"[ollama] could not reach {OLLAMA_HOST}/api/version "
-                    "— is `ollama serve` running?",
+                    "(is `ollama serve` running?)",
                     file=sys.stderr,
                 )
             else:
@@ -1517,13 +1669,12 @@ def _resolve_llm_credentials() -> tuple[str, str]:
         # Construct an ollama/ prefixed model id so create_ai_client routes
         # correctly. api_key is empty (Ollama is unauthenticated local).
         return f"ollama/{OLLAMA_MODEL_VISION}", ""
-    # anthropic (default). v0.3.0: the Settings model dropdown persists
-    # ANTHROPIC_MODEL (e.g. claude-opus-4-8 for max accuracy) — honor it. An
-    # explicitly-set MODEL_ID env var still takes precedence (advanced override).
-    ant_key = ANTHROPIC_API_KEY or _openrouter_key()
+    # anthropic (default). A MODEL_ID env var overrides everything; otherwise
+    # ANTHROPIC_MODEL (env or keyring) picks the model.
+    ant_key = resolve_api_key("ANTHROPIC_API_KEY") or _openrouter_key()
     if os.getenv("MODEL_ID"):
         return MODEL_ID, ant_key
-    ant_model = resolve_setting("ANTHROPIC_MODEL", default="claude-sonnet-4-6")
+    ant_model = resolve_model("ANTHROPIC_MODEL", "claude-haiku-5-5")
     return f"anthropic/{ant_model}", ant_key
 
 
@@ -1531,9 +1682,9 @@ def _should_connect_stt(realtime) -> bool:
     """Whether to open the AssemblyAI STT mic at startup.
 
     FALSE in realtime mode: GPT-Realtime owns the 24 kHz mic (realtime.py
-    start_turn opens its own RawInputStream). Opening the 16 kHz AssemblyAI
-    STT mic too is the 'two-mic bug' — both grab the input device and the
-    realtime path produces no audio. So in realtime mode we skip STT entirely.
+    start_turn opens its own RawInputStream). If the 16 kHz AssemblyAI STT
+    mic opens too, both grab the input device and the realtime path produces
+    no audio. So in realtime mode we skip STT entirely.
     """
     return realtime is None
 
@@ -1546,7 +1697,7 @@ if __name__ == "__main__":
     except (AttributeError, OSError):
         pass
 
-    # Single-instance check — MUST run before QApplication construction
+    # Single-instance check. MUST run before QApplication construction
     # so a duplicate-launch exits fast without spinning up Qt / SDKs.
     # The handle is assigned to a __main__-module binding to keep it
     # alive for the process lifetime; Windows auto-releases on exit.
@@ -1568,12 +1719,12 @@ if __name__ == "__main__":
     # _mutex_handle == "fail-open" or a real handle: proceed with startup.
 
     print("=" * 70)
-    print("Clicky Windows — push-to-talk AI buddy")
+    print("Clicky Windows: hold Ctrl+Alt+Space and ask")
     print("=" * 70)
 
     set_dpi_awareness()
     qt_app = QApplication(sys.argv)
-    # App-level icon — used by Qt for any window that doesn't set its
+    # App-level icon, used by Qt for any window that doesn't set its
     # own (overlay, future dialogs). Belt-and-suspenders alongside
     # clicky.spec's `icon=` (which embeds the icon as a Windows EXE
     # resource for taskbar/Alt-Tab/etc). Path resolved via __file__
@@ -1584,7 +1735,7 @@ if __name__ == "__main__":
     if _icon_path.is_file():
         qt_app.setWindowIcon(_QIcon(str(_icon_path)))
     # Tray-only mode: closing the overlay (or any internal window)
-    # must NOT exit the app — only the Quit menu item should.
+    # must NOT exit the app; only the Quit menu item should.
     qt_app.setQuitOnLastWindowClosed(False)
 
     # First-launch / missing-keys flow: show modal until all 3 keys
@@ -1592,12 +1743,12 @@ if __name__ == "__main__":
     # is synchronous from main()'s perspective.
     from settings_dialog import SettingsDialog, required_keys_present
     if not required_keys_present():
-        print("First-launch setup — showing API key dialog...")
+        print("First-launch setup: showing the API key dialog...")
         dlg = SettingsDialog()
         if dlg.exec() != dlg.DialogCode.Accepted:
             print("Setup cancelled by user. Exiting.")
             sys.exit(1)
-        # Sanity check — Save was clicked AND all 3 keys are now resolvable.
+        # Sanity check: Save was clicked AND all 3 keys are now resolvable.
         if not required_keys_present():
             print(
                 "ERROR: Setup completed but at least one API key still "
@@ -1605,28 +1756,22 @@ if __name__ == "__main__":
             )
             sys.exit(1)
 
-    # Resolve keys AFTER the modal has run — module-level constants
-    # were captured at import time and may not reflect newly-saved
-    # values. config.resolve_api_key() always reads fresh.
-    api_anthropic = resolve_api_key("ANTHROPIC_API_KEY")
-    api_assemblyai = resolve_api_key("ASSEMBLYAI_API_KEY")
-
-    # v0.2.0: resolve effective LLM model + api key based on LLM_PROVIDER
-    # setting (Settings dialog dropdown). Reads keyring fresh so any change
-    # the user just made in the modal is honored. See _resolve_llm_credentials
-    # docstring for the Anthropic vs Ollama dispatch logic.
+    # Resolve effective LLM model + api key based on LLM_PROVIDER setting
+    # (Settings dialog dropdown). Reads keyring fresh so any change the user
+    # just made in the modal is honored. See _resolve_llm_credentials for the
+    # per-provider dispatch.
     _llm_model_id, _llm_api_key = _resolve_llm_credentials()
 
-    # Local STT (faster-whisper) is opt-in via STT_PROVIDER; default AssemblyAI.
+    # Listening provider from STT_PROVIDER: Cartesia by default (the voice's key).
     # Resolved fresh so a Settings change is honored without a code edit.
     _stt_provider, _stt_key = _resolve_stt_credentials()
 
-    # Sprint 4: dispatch TTS subclass based on TTS_PROVIDER setting.
+    # Dispatch TTS subclass based on TTS_PROVIDER setting.
     # Cartesia (default) and ElevenLabs (opt-in) are both supported;
     # user picks via Settings dialog dropdown which writes to keyring
     # under "TTS_PROVIDER" + the provider's key under e.g. "ELEVENLABS_API_KEY".
     tts_provider, tts_api_key = _resolve_tts_credentials()
-    # Local TTS (Kokoro) is keyless — skip the credential guard for it.
+    # Local TTS (Kokoro) is keyless, so skip the credential guard for it.
     if tts_provider != "kokoro" and not tts_api_key:
         ctypes.windll.user32.MessageBoxW(
             None,
@@ -1643,7 +1788,7 @@ if __name__ == "__main__":
         # Stale provider_id in keyring (e.g. user downgraded after a future
         # version added a new provider that no longer exists). Show a
         # friendly MessageBox instead of dumping a traceback into the
-        # bundled-EXE void. Per Sprint 4 review T2-1.
+        # bundled-EXE void.
         ctypes.windll.user32.MessageBoxW(
             None,
             f"Clicky's TTS configuration is invalid: {exc}\n\n"
@@ -1654,18 +1799,18 @@ if __name__ == "__main__":
         )
         sys.exit(1)
 
-    # Pre-load a local TTS model (Kokoro) in the background so the first spoken
-    # reply isn't blocked by a cold ~330MB model load. No-op for cloud TTS.
+    # Open the voice's audio stream in the background, and for Kokoro load the
+    # ~330MB model, so the first spoken reply waits for neither.
     import threading as _warmup_threading
     _warmup_threading.Thread(
         target=tts_instance.warmup, daemon=True, name="tts-warmup"
     ).start()
 
     clicky = ClickyApp(
-        # v0.2.0: route LLM_PROVIDER to the right model/client. When user
+        # Route LLM_PROVIDER to the right model/client. When the user
         # selected "Ollama (local)" in Settings, _llm_model_id is
-        # 'ollama/<vision-model>' and _llm_api_key is empty — create_ai_client
-        # dispatches to OllamaClient and Anthropic key is ignored.
+        # 'ollama/<vision-model>' and _llm_api_key is empty, so create_ai_client
+        # dispatches to OllamaClient and the Anthropic key is ignored.
         ai_client=create_ai_client(
             model_id=_llm_model_id,
             api_key=_llm_api_key,
@@ -1675,18 +1820,19 @@ if __name__ == "__main__":
         tts_client=tts_instance,
     )
 
-    # Two-mic fix: in realtime mode, GPT-Realtime owns the 24kHz mic, so we
-    # must NOT also open the 16kHz AssemblyAI STT mic (both grabbing the input
-    # device = no audio). Skip STT entirely when the realtime session is active.
+    # In realtime mode GPT-Realtime owns the 24kHz mic, so we must NOT also
+    # open the 16kHz AssemblyAI STT mic (both grabbing the input device = no
+    # audio). Skip STT entirely when the realtime session is active.
     if _should_connect_stt(clicky._realtime):
         _log("Pre-opening mic + WebSocket (one-time startup cost)...")
+        _warm_chime()
         try:
             clicky._stt.connect()
             clicky._stt.on_partial_transcript(
                 lambda text: print(f"[stt partial] {text}", flush=True)
             )
         except Exception as exc:
-            # v0.4.1: a provider that fails to load at startup (a local model
+            # A provider that fails to load at startup (a local model
             # with a missing bundled dep, or a stale keyring setting) must NOT
             # brick the app with a traceback. If we exit here the user can't
             # reach Settings to fix it. Show a friendly message and keep going
@@ -1707,19 +1853,19 @@ if __name__ == "__main__":
                 )
             except Exception:
                 pass
-            # Do NOT sys.exit — let the app open so the user can recover via Settings.
+            # Do NOT sys.exit: let the app open so the user can recover via Settings.
     else:
         _log("REALTIME: skipping AssemblyAI STT mic (GPT-Realtime owns the mic)")
 
     clicky.start()
 
-    # System tray icon — the ONLY clean exit path now that the overlay
+    # System tray icon: the ONLY clean exit path, since the overlay
     # has WS_EX_TOOLWINDOW (no taskbar entry) and there's no console
     # for Ctrl+C. Right-click tray → Quit triggers a clean shutdown.
     from tray import ClickyTray
 
     def _quit_via_tray() -> None:
-        _log("Quit requested via tray menu — shutting down...")
+        _log("Quit requested via tray menu, shutting down...")
         clicky.stop()
         qt_app.quit()
 
@@ -1728,11 +1874,10 @@ if __name__ == "__main__":
         if dlg.exec() != dlg.DialogCode.Accepted:
             return
         _log("Settings saved.")
-        # v0.4.1: providers/models are built ONCE at startup, so a Settings
-        # change can't affect the already-running instance. An earlier attempt
-        # to auto-relaunch popped a stray terminal and sometimes failed, so we
-        # do the reliable thing: close cleanly and tell the user to reopen.
-        # One manual click, but it always works.
+        # Providers/models are built ONCE at startup, so a Settings change
+        # can't affect the already-running instance. Close cleanly and tell
+        # the user to reopen. No auto-relaunch: it pops a stray terminal and
+        # sometimes fails.
         ctypes.windll.user32.MessageBoxW(
             None,
             "Settings saved.\n\nClicky will now close so your change can take "
@@ -1745,7 +1890,7 @@ if __name__ == "__main__":
         qt_app.quit()
 
     # Tray construction can raise RuntimeError if the user's Windows
-    # has no system tray available (rare — kiosk mode, custom shells,
+    # has no system tray available (rare: kiosk mode, custom shells,
     # certain VMs). Show a QMessageBox + exit cleanly rather than
     # leaving an invisible app running with no quit path.
     try:
@@ -1760,6 +1905,7 @@ if __name__ == "__main__":
         )
         clicky.stop()
         sys.exit(1)
+    clicky.sig_notify.connect(tray.notify)
 
     def _shutdown(*_args):
         _log("Shutting down...")
@@ -1768,7 +1914,7 @@ if __name__ == "__main__":
 
     signal.signal(signal.SIGINT, _shutdown)
 
-    _log(f"Model: {MODEL_ID}")
+    _log(f"Model: {_llm_model_id}")
     _log("Listening for Ctrl+Alt+Space... (Ctrl+C to quit)")
 
     sys.exit(qt_app.exec())

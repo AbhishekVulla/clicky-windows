@@ -1,10 +1,8 @@
-"""Curated knowledge base — user-uploadable per-app docs.
+"""Curated knowledge base: user-uploadable per-app docs.
 
-Lean architecture (decided 2026-05-04 after retracting JaySmith's
-folder+TOML+overview pattern as cargo-cult for our scale): one .md
-file per app at ``KB_DIR/<app_name>.md``. Match by .exe basename
-(sanitized identically to memory.py — same convention so users see
-matching filenames in `~/.clicky-windows/memory/` and KB folder).
+One .md file per app at ``KB_DIR/<app_name>.md``. Match by .exe basename
+(sanitized like memory.py, so users see matching filenames in
+`~/.clicky-windows/memory/` and the KB folder).
 No metadata files, no folder hierarchy, no keyword ranking.
 
 If the file is missing → ``recall()`` returns ``('', '')``. The
@@ -16,7 +14,7 @@ If the file is over ``KB_RECALL_MAX_CHARS``, tail-truncate (matches
 ``memory.recall()`` overflow handling).
 
 The user's mental model: drop ``edupack.exe.md`` (or whatever the
-.exe basename is — visible in their existing memory folder) into
+.exe basename is, visible in their existing memory folder) into
 ``KB_DIR``, Clicky picks it up next PTT.
 """
 from __future__ import annotations
@@ -62,7 +60,7 @@ def recall(
         marker after stripping the .exe suffix.
 
         Both empty if no file matches, ``app_name`` is blank, or
-        ``max_chars <= 0`` (defensive guard — Python's ``text[-0:]``
+        ``max_chars <= 0`` (defensive guard: Python's ``text[-0:]``
         otherwise returns the whole string, so a caller passing 0
         from a misconfigured override would get the FULL file).
     """

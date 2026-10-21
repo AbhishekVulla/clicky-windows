@@ -1,6 +1,6 @@
 """System tray icon for Clicky Windows.
 
-Provides the ONLY clean exit path from the running app — without this
+Provides the ONLY clean exit path from the running app: without this
 icon, users have no menu/taskbar entry to right-click and quit, and
 must reach for Task Manager (Ctrl+Shift+Esc) to kill ``Clicky.exe``.
 
@@ -12,14 +12,11 @@ Menu structure (right-click the tray icon):
     - Quit Clicky                   ← clean shutdown via callback
 
 Implementation notes:
-- ``QSystemTrayIcon`` is the PyQt6 native widget — no extra deps
-  (we explicitly chose this over ``pystray``, which hasn't shipped
-  since 2023-09 per the verified research). Plays nicely with our
-  existing Qt event loop.
+- ``QSystemTrayIcon`` is the PyQt6 native widget: no extra deps,
+  and it plays nicely with our existing Qt event loop.
 - Tray icon source: ``assets/clicky_tray.ico`` (multi-res 16/32/48/
-  64/128/256, hand-drawn blue cursor polygon — verified DALL-E /
-  GPT Image v2 fail at 16x16 so we generate via PIL programmatically).
-- "Open Folder" actions use ``os.startfile`` (Windows native — opens
+  64/128/256, blue cursor polygon).
+- "Open Folder" actions use ``os.startfile`` (Windows native, opens
   in File Explorer). Folders are auto-created if missing so the user
   doesn't get an error on first click before they've dropped any
   files.
@@ -62,7 +59,7 @@ class ClickyTray(QObject):
         # Guard against weird Windows configs without a system tray
         # (kiosk mode, custom shells, certain VMs). Without this check
         # the tray icon silently fails to appear and the user has no
-        # diagnostic — just an apparently-running app with no quit
+        # diagnostic, just an apparently-running app with no quit
         # menu. Caller in app.py wraps with try/except + QMessageBox
         # so the user gets an actionable dialog before exit.
         if not QSystemTrayIcon.isSystemTrayAvailable():
@@ -79,7 +76,7 @@ class ClickyTray(QObject):
         self._on_settings = on_settings
 
         self._icon = QSystemTrayIcon(parent=self)
-        self._icon.setToolTip("Clicky Windows — push-to-talk AI buddy")
+        self._icon.setToolTip("Clicky: hold Ctrl+Alt+Space and ask")
         icon_path = Path(__file__).parent / "assets" / "clicky_tray.ico"
         if icon_path.is_file():
             self._icon.setIcon(QIcon(str(icon_path)))
@@ -122,6 +119,10 @@ class ClickyTray(QObject):
         """
         path.mkdir(parents=True, exist_ok=True)
         os.startfile(str(path))
+
+    def notify(self, message: str) -> None:
+        """Show a short balloon from the tray icon."""
+        self._icon.showMessage("Clicky", message, QSystemTrayIcon.MessageIcon.Warning, 8000)
 
     def _open_kb_folder(self) -> None:
         self._open_in_explorer(KB_DIR)

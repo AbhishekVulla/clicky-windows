@@ -1,4 +1,4 @@
-"""Unit tests for ollama_health.py (v0.2.1 — Issue #1 fix D).
+"""Unit tests for ollama_health.py.
 
 Tests cover:
 - detect_ollama_version happy path (200 + valid JSON)
@@ -122,10 +122,9 @@ class TestDetectOllamaVersion:
 
 class TestCheckModelCompatibility:
     def test_warns_when_model_needs_newer_ollama(self):
-        """0.3.14 is below 0.4.0 threshold → warning. Note: reporter
-        wrote 'Ollama 0.30.4' in the issue but that semver-parses to
-        (0, 30, 4) which is > (0, 4, 0) — the actual versions where
-        mllama is unsupported are the 0.3.x line."""
+        """0.3.14 is below 0.4.0 threshold → warning. The versions where
+        mllama is unsupported are the 0.3.x line; '0.30.4' parses to
+        (0, 30, 4), which is > (0, 4, 0)."""
         from ollama_health import check_model_compatibility
 
         warning = check_model_compatibility("llama3.2-vision", "0.3.14")
@@ -141,7 +140,7 @@ class TestCheckModelCompatibility:
         assert check_model_compatibility("llama3.2-vision", "0.5.0") is None
 
     def test_no_warning_for_llava(self):
-        """llava:7b has no recorded minimum — compatible with all
+        """llava:7b has no recorded minimum: compatible with all
         Ollama versions that have any vision."""
         from ollama_health import check_model_compatibility
 
