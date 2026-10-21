@@ -17,6 +17,7 @@ Responsibility boundary:
 from __future__ import annotations
 
 import base64
+import json
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -29,6 +30,8 @@ from anthropic import DefaultHttpxClient as AnthropicHttpxClient
 from openai import DefaultHttpxClient as OpenAIHttpxClient
 from openai import OpenAI
 from PIL import Image
+
+from ollama_health import model_family
 
 
 # --- Constants ----------------------------------------------------------------
@@ -68,6 +71,26 @@ examples:
 - user asks how to commit in vs code: "see the source control icon in the left sidebar? click it, type a message, and press control enter to commit. [POINT:24,148:source control]"
 - element is on screen 2 (not where cursor is): "that's over on your other monitor — see the terminal window? [POINT:400,300:terminal:screen2]"\
 """
+
+# Local Qwen-VL models were trained to answer "locate X" with a box in their own
+# JSON format, and they point well when asked that way; asked for a [POINT] tag
+# at the end of a spoken answer, they get the place wrong. So they get the
+# persona without its pointing section, and the box request goes right after
+# the question, where a small model keeps hold of it. No coordinate space is
+# named: each family uses its own (see _ollama_box_style). They are sent only
+# the cursor's screen, since a box is read against one image, and the rule
+# about several screens is swapped for one that says so.
+_CLICKY_BOX_SYSTEM_PROMPT = "\n".join(
+    "- you only see the screen the cursor is on. if what they ask about isn't on it, "
+    "tell them to move the cursor to that screen and ask again."
+    if line.startswith("- if you receive multiple screen images") else line
+    for line in _CLICKY_SYSTEM_PROMPT.split("element pointing:")[0].rstrip().splitlines()
+) + "\n"
+_BOX_REQUEST = (
+    "\n\nanswer in one or two short spoken sentences. then, on a new line, give the "
+    'on-screen element i should click as json: {"bbox_2d": [x1, y1, x2, y2], "label": "..."}. '
+    "leave the json out if nothing on screen helps."
+)
 
 _CLICKY_ANNOTATION_SYSTEM_PROMPT = """\
 you're clicky, a patient tutor that teaches by drawing on the user's screen on windows. the user just spoke to you via push-to-talk and you can see their screen(s). your reply is spoken aloud via text-to-speech, so write the way you'd actually talk — all lowercase, casual, warm, one or two short sentences (longer only if they ask you to go deeper). write for the ear: no lists, no markdown, no symbols that sound weird read aloud.
@@ -249,6 +272,197 @@ def per_mille_to_pixels(
         return head + _NUM_RE.sub(scale, prefix.group(0)) + body[prefix.end():] + "]"
 
     return _COORD_TAG_RE.sub(rewrite, text)
+
+
+class _JsonObject(list):
+    """A decoded JSON object kept as its (key, value) pairs, so a repeated key
+    keeps every value in the order written."""
+
+
+_JSON = json.JSONDecoder(object_pairs_hook=_JsonObject)
+_JSON_OPEN_RE = re.compile(r"[\[{]")
+_FENCE_OPEN_RE = re.compile(r"```\w*\s*$")
+_FENCE_CLOSE_RE = re.compile(r"\s*```")
+# A JSON string, closed or running to the end of a cut-off answer.
+_JSON_STRING_RE = re.compile(r'"(?:[^"\\]|\\.)*(?:"|\\?$)')
+# What is left of JSON once its strings are removed: brackets, separators,
+# numbers, literals and fences. A word of prose, or a full stop, fails it.
+_JSON_RESIDUE_RE = re.compile(
+    r"(?:```\w*|true|false|null|NaN|-?Infinity|-?\d+(?:\.\d*)?(?:[eE][+-]?\d*)?|[\s\[\]{}:,])*"
+)
+# Read straight from box JSON that won't decode.
+_WRITTEN_BOX_RE = re.compile(r'"bbox_2d"\s*:\s*(\[[^\[\]]*\])')
+_WRITTEN_LABEL_RE = re.compile(r'"label"\s*:\s*("(?:[^"\\]|\\.)*")')
+_WRITTEN_ARRAY_RE = re.compile(r"\[[^\[\]]*\]")
+# An object opening with a key, alone or in a list: '{"' or '[{"'.
+_OBJECT_START_RE = re.compile(r'\[?\s*\{\s*"')
+_ANY_POINT_TAG_RE = re.compile(_POINT_TAG_RE.pattern.removesuffix(r"\s*$"))
+# Any [POINT ...] text, finished or not, to keep it out of speech.
+_POINT_TEXT_RE = re.compile(r"\s*\[point(?::[^\]]*)?(?:\]|$)", re.IGNORECASE)
+# No screen is wider than this; beyond it a "coordinate" is noise.
+_MAX_COORD = 100_000
+
+
+def _ollama_box_style(model_id: str) -> str | None:
+    """How a local model writes a box when asked in its own format: Qwen3-VL on
+    a 0-1000 grid, Qwen2.5-VL in pixels of the image it was given. None for
+    models without a trained box format; they keep the [POINT] tag."""
+    family = model_family(model_id)
+    if family.startswith("qwen3-vl"):
+        return "grid"
+    if family.startswith(("qwen2.5vl", "qwen2.5-vl")):
+        return "pixels"
+    return None
+
+
+def _is_box(value) -> bool:
+    """Four usable numbers: finite and no bigger than a screen."""
+    return (
+        isinstance(value, list)
+        and len(value) == 4
+        and all(
+            isinstance(n, (int, float)) and not isinstance(n, bool) and abs(n) <= _MAX_COORD
+            for n in value
+        )
+    )
+
+
+def _boxes(value, bare: bool):
+    """Each box in a decoded answer, in order, with the label beside it: every
+    "bbox_2d" value, and when bare, any [x1, y1, x2, y2] as well. A "bbox_2d"
+    that isn't four numbers yields None, so the JSON still counts as a box."""
+    if isinstance(value, _JsonObject):
+        label = next((v for k, v in value if k == "label" and isinstance(v, str)), None)
+        for key, item in value:
+            if key == "bbox_2d":
+                yield (item if _is_box(item) else None), label
+            else:
+                yield from _boxes(item, bare)
+    elif isinstance(value, list):
+        if bare and _is_box(value):
+            yield value, None
+        else:
+            for item in value:
+                yield from _boxes(item, bare)
+
+
+def _with_fence(text: str, start: int, end: int) -> tuple[int, int]:
+    """Widen a JSON span to the code fence around it, if there is one."""
+    fence = _FENCE_OPEN_RE.search(text, 0, start)
+    if fence:
+        start = fence.start()
+        close = _FENCE_CLOSE_RE.match(text, end)
+        if close:
+            end = close.end()
+    return start, end
+
+
+def _only_json(text: str) -> bool:
+    """Whether text holds nothing but JSON, fences and [POINT] tags."""
+    return bool(_JSON_RESIDUE_RE.fullmatch(_JSON_STRING_RE.sub("", _POINT_TEXT_RE.sub("", text))))
+
+
+def _written_boxes(broken: str) -> list:
+    """The first box still whole in JSON that won't decode, with its label
+    when that reads: a "bbox_2d" value, else any [x1, y1, x2, y2]."""
+    label = _WRITTEN_LABEL_RE.search(broken)
+    try:
+        label = json.loads(label.group(1)) if label else None
+    except ValueError:
+        label = None
+    keyed = [written.group(1) for written in _WRITTEN_BOX_RE.finditer(broken)]
+    for written in keyed or _WRITTEN_ARRAY_RE.findall(_JSON_STRING_RE.sub('""', broken)):
+        try:
+            box = json.loads(written)
+        except ValueError:
+            continue
+        if _is_box(box):
+            return [(box, label if keyed else None)]
+    return []
+
+
+def _broken_box_end(text: str, start: int) -> int | None:
+    """End of box JSON that won't decode for a reason other than being cut off,
+    such as a stray quote or a bad escape in its label: an object opening
+    with a key and holding "bbox_2d", on one line or inside a code fence. It
+    ends at its last closing bracket, so a sentence after it is still spoken."""
+    if not _OBJECT_START_RE.match(text, start):
+        return None
+    stop = text.find("```" if _FENCE_OPEN_RE.search(text, 0, start) else "\n", start)
+    stop = len(text) if stop < 0 else stop
+    if '"bbox_2d"' not in text[start:stop]:
+        return None
+    close = max(text.rfind("}", start, stop), text.rfind("]", start, stop))
+    return close + 1 if close >= 0 else stop
+
+
+def _answer_json(text: str) -> tuple[list[tuple[int, int]], list]:
+    """The spans of a local model's JSON in its answer, and the boxes in them.
+    JSON counts when it holds a "bbox_2d" key, sits in a code fence, or holds
+    [x1, y1, x2, y2] with only JSON after it; so does box JSON that won't
+    decode because the stream cut it off or the model wrote it badly. A
+    bracket, brace or backtick in a sentence is none of these, and neither is
+    JSON the sentence is talking about."""
+    spans, boxes, pos = [], [], 0
+    while (opening := _JSON_OPEN_RE.search(text, pos)):
+        start = opening.start()
+        pos = start + 1
+        if _POINT_TEXT_RE.match(text, start):
+            continue
+        try:
+            value, end = _JSON.raw_decode(text, start)
+            last = _only_json(text[end:])
+            found = list(_boxes(value, bare=False)) or (list(_boxes(value, bare=True)) if last else [])
+        except (ValueError, RecursionError):
+            fragment = text[start:]
+            if re.search(r'["\d]', fragment) and _only_json(fragment):
+                spans.append(_with_fence(text, start, len(text)))
+                boxes += _written_boxes(fragment)
+                break
+            end = _broken_box_end(text, start)
+            if end is not None:
+                spans.append(_with_fence(text, start, end))
+                boxes += _written_boxes(text[start:end])
+                pos = end
+            continue
+        span = _with_fence(text, start, end)
+        if found or span[0] != start:
+            spans.append(span)
+            boxes += found
+            pos = end
+    return spans, boxes
+
+
+def parse_box_answer(text: str, style: str, image_size: tuple[int, int]) -> PointParseResult:
+    """Split a local model's answer into speech and a point. Its JSON is never
+    spoken, whatever the shape (fenced, nested, a list, escaped, cut off), nor
+    is [POINT] text; everything else is, symbols included. The point is the
+    centre of the first box, or the [POINT] tag's when there is no box."""
+    spans, boxes = _answer_json(text)
+    pieces, last = [], 0
+    for start, end in spans:
+        pieces.append(text[last:start])
+        last = end
+    pieces.append(text[last:])
+    speech = " ".join(p.strip() for p in pieces if p.strip())
+    spoken = _POINT_TEXT_RE.sub("", speech).strip()
+    tag = _ANY_POINT_TAG_RE.search(text)
+    box, label = next(((b, lbl) for b, lbl in boxes if b), (None, None))
+    if box:
+        x1, y1, x2, y2 = box
+        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        if style == "grid":
+            cx, cy = cx * image_size[0] / 1000, cy * image_size[1] / 1000
+        return PointParseResult(spoken_text=spoken, coordinate=(round(cx), round(cy)),
+                                element_label=label, screen_number=None)
+    if tag and tag.group(1) is not None:
+        return PointParseResult(
+            spoken_text=spoken,
+            coordinate=(int(tag.group(1)), int(tag.group(2))),
+            element_label=tag.group(3),
+            screen_number=int(tag.group(4)) if tag.group(4) else None,
+        )
+    return PointParseResult(spoken_text=spoken, coordinate=None, element_label=None, screen_number=None)
 
 
 def image_to_base64_jpeg(img: Image.Image, quality: int = 85) -> str:
@@ -774,12 +988,11 @@ class OllamaClient(AIClient):
     ``images`` field (Ollama-specific extension to the OpenAI-style messages
     array).
 
-    **Pixel-pointing caveat:** local vision models (llama3.2-vision, qwen2.5-vl,
-    llava) generally cannot return precise pixel coordinates via free-text
-    [POINT:x,y:label] tags. app.py wires a grid-locator fallback (locator.py)
-    that runs AFTER the streamed response completes: if no [POINT:x,y] tag was
-    emitted AND the query was directional, the locator pass derives coordinates
-    via two-stage grid annotation (locator.py).
+    **Pointing:** Qwen-VL models are asked for their own {"bbox_2d": [...]}
+    box (see _CLICKY_BOX_SYSTEM_PROMPT) and point well that way. Other local
+    models rarely return usable [POINT:x,y:label] tags, so app.py runs a
+    grid-locator fallback (locator.py) after the answer when no point came
+    back and the question was directional.
 
     Public interface matches AnthropicClient + GeminiClient: ``ask_stream(...)``
     returns a context manager with .text_deltas() generator + .final_result()
@@ -794,6 +1007,7 @@ class OllamaClient(AIClient):
         else:
             self.model_id = model_id
         self.host = host.rstrip("/")
+        self.box_style = _ollama_box_style(self.model_id)
 
     def ask_stream(
         self,
@@ -823,6 +1037,9 @@ class OllamaClient(AIClient):
                     ...
                 result = stream.final_result()
         """
+        ask_for_box = self.box_style is not None and system_prompt is _CLICKY_SYSTEM_PROMPT
+        if ask_for_box:
+            system_prompt = _CLICKY_BOX_SYSTEM_PROMPT
         # Concat KB into system prompt (no multi-block support on Ollama).
         full_system = system_prompt
         if kb_content:
@@ -858,7 +1075,9 @@ class OllamaClient(AIClient):
             })
 
         # Current user turn: transcript as content, screenshots as images list
-        user_turn: dict = {"role": "user", "content": transcript}
+        user_turn: dict = {"role": "user", "content": transcript + (_BOX_REQUEST if ask_for_box else "")}
+        if ask_for_box:
+            images = images[:1]  # the cursor's screen; the box is read against it
         if images:
             user_turn["images"] = [
                 image_to_base64_jpeg(img) for img, _label in images
@@ -879,6 +1098,8 @@ class OllamaClient(AIClient):
             host=self.host,
             payload=payload,
             model_for_errors=self.model_id,
+            box_style=self.box_style if ask_for_box else None,
+            image_size=images[0][0].size if images else (0, 0),
         )
 
     def ask(
@@ -913,10 +1134,19 @@ class _OllamaStreamingResponse:
     stream). __exit__ closes both.
     """
 
-    def __init__(self, host: str, payload: dict, model_for_errors: str) -> None:
+    def __init__(
+        self,
+        host: str,
+        payload: dict,
+        model_for_errors: str,
+        box_style: str | None = None,
+        image_size: tuple[int, int] = (0, 0),
+    ) -> None:
         self._host = host
         self._payload = payload
         self._model_for_errors = model_for_errors
+        self._box_style = box_style
+        self._image_size = image_size
         self._httpx_client = None
         self._stream_cm = None
         self._response = None
@@ -929,7 +1159,9 @@ class _OllamaStreamingResponse:
         # entered, so __exit__ won't fire. Without the try/except below the
         # client would leak its connection pool every time Ollama is
         # unreachable (DNS failure, ECONNREFUSED, server crash, etc).
-        self._httpx_client = httpx.Client(timeout=120.0)
+        # Reading a new screenshot can take minutes on a laptop without a strong
+        # GPU, so allow that; Ollama not running at all still fails in seconds.
+        self._httpx_client = httpx.Client(timeout=httpx.Timeout(300.0, connect=10.0))
         self._httpx_client.__enter__()
         try:
             self._stream_cm = self._httpx_client.stream(
@@ -1041,6 +1273,8 @@ class _OllamaStreamingResponse:
                 # Already accumulated whatever streamed in; parse_point_tag
                 # below will return a PointParseResult with no coordinate.
                 pass
+        if self._box_style:
+            return parse_box_answer(self._accumulated, self._box_style, self._image_size)
         return parse_point_tag(self._accumulated)
 
     def usage(self) -> dict:

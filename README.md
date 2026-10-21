@@ -189,13 +189,13 @@ Observe-only has a catch: two Clicky processes both hear the hotkey and both ans
 ## FAQ
 
 <details>
-<summary><strong>Can I run it with no keys at all?</strong> Yes. Every piece has a local option.</summary>
+<summary><strong>Can I run it with no keys at all?</strong> Yes. Everything can run on your own machine, for privacy or to skip API costs.</summary>
 
 - **Listening:** pick **Local (faster-whisper)** in Settings. Whisper on your CPU, about 150 MB downloaded once.
 - **Voice:** pick **Local (Kokoro)**. About 330 MB downloaded once, then it speaks offline.
-- **AI model:** pick **Ollama (local)**. Install [Ollama](https://ollama.com/download), then `ollama pull llava:7b`, the default. Any Ollama vision model can be picked in Settings.
+- **AI model:** pick **Ollama (local)**. Install [Ollama](https://ollama.com/download) 0.12.7 or newer, then `ollama pull qwen3-vl:4b-instruct`.
 
-Local is free and private, and listening and voice run on a normal CPU. The AI model is the hard part: it needs a strong GPU. On a laptop without one, a local vision model took over a minute per answer in my test and missed every target, so treat it as the private option, not the everyday one.
+Listening and voice run fine on a normal CPU. The AI model wants a strong GPU: without one, an answer can take a few minutes. Local models also point at the right thing less often than the cloud ones, so for everyday use the two keys in Quick install are faster and more accurate.
 
 </details>
 

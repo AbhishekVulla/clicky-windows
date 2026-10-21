@@ -207,3 +207,38 @@ class TestParseVersion:
         assert _parse_version("") is None
         assert _parse_version("not-a-version") is None
         assert _parse_version("asdf") is None
+
+
+class TestVersionChecksForLocalPointing:
+    """The models Settings can suggest need a recent Ollama; a tagged name like
+    qwen3-vl:4b-instruct is checked like its family."""
+
+    def test_qwen3_vl_needs_ollama_0_12_7(self):
+        from ollama_health import check_model_compatibility
+        warning = check_model_compatibility("qwen3-vl:4b-instruct", "0.12.6")
+        assert warning is not None and "0.12.7" in warning and "0.12.6" in warning
+        assert check_model_compatibility("qwen3-vl:4b-instruct", "0.12.7") is None
+
+    def test_qwen2_5_vl_needs_ollama_0_7_1(self):
+        from ollama_health import check_model_compatibility
+        assert check_model_compatibility("qwen2.5vl:3b", "0.7.0") is not None
+        assert check_model_compatibility("qwen2.5vl:3b", "0.7.1") is None
+
+    def test_a_tagged_name_is_checked_like_its_family(self):
+        from ollama_health import check_model_compatibility
+        assert check_model_compatibility("llama3.2-vision:11b", "0.3.14") is not None
+
+    def test_the_warning_says_to_update_ollama(self):
+        from ollama_health import check_model_compatibility
+        warning = check_model_compatibility("qwen3-vl:4b-instruct", "0.10.0")
+        assert "ollama.com/download" in warning and "llava" not in warning
+
+
+class TestFullModelNames:
+    def test_a_registry_qualified_name_gets_its_version_check(self):
+        from ollama_health import check_model_compatibility
+        assert check_model_compatibility("registry.ollama.ai/library/qwen3-vl:4b-instruct", "0.12.6") is not None
+
+    def test_the_hyphenated_qwen2_5_vl_name_has_a_floor_too(self):
+        from ollama_health import check_model_compatibility
+        assert check_model_compatibility("qwen2.5-vl:7b", "0.7.0") is not None

@@ -48,16 +48,10 @@ from PyQt6.QtWidgets import (
 from config import KEYRING_SERVICE, OLLAMA_HOST
 
 
-# Pre-populated Ollama vision model suggestions for the dropdown (Issue #1).
-# `llava:7b` comes first since it's the default (works on all Ollama
-# versions with vision). The combobox is editable, so the user can also
-# type a custom model name.
-_OLLAMA_MODEL_SUGGESTIONS: tuple[str, ...] = (
-    "llava:7b",
-    "llama3.2-vision",
-    "qwen2.5-vl",
-    "llava-llama3",
-)
+# The Ollama model the dropdown suggests: qwen3-vl:4b-instruct, the local model
+# that points when asked in its own box format. The combobox is editable, so
+# any other model can still be typed in.
+_OLLAMA_MODEL_SUGGESTIONS: tuple[str, ...] = ("qwen3-vl:4b-instruct",)
 
 
 # --- Provider category data model -------------------------------------------

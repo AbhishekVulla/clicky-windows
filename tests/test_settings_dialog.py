@@ -441,13 +441,11 @@ class TestOllamaModelDropdown:
     persists to keyring + runs the Ollama compatibility check (which can
     block save via QMessageBox)."""
 
-    def test_model_suggestions_includes_llava_as_first(self):
-        """llava:7b must be index 0: it's the default.
-        llama3.2-vision comes after (more accurate but needs Ollama
-        >=0.4.x; users can pick it manually)."""
+    def test_only_the_default_model_is_suggested(self):
+        """Settings suggests only qwen3-vl:4b-instruct, the local model that
+        points when asked in its own format. Any other model can still be typed."""
         from settings_dialog import _OLLAMA_MODEL_SUGGESTIONS
-        assert _OLLAMA_MODEL_SUGGESTIONS[0] == "llava:7b"
-        assert "llama3.2-vision" in _OLLAMA_MODEL_SUGGESTIONS
+        assert _OLLAMA_MODEL_SUGGESTIONS == ("qwen3-vl:4b-instruct",)
 
     def test_model_row_hidden_for_anthropic_default(self, qapp, mocker):
         """Anthropic has no model sub-picker (minimal UX), so the model
@@ -470,7 +468,7 @@ class TestOllamaModelDropdown:
         combo = dlg._model_combos["LLM"]
         assert combo.isEditable() is True
         items = [combo.itemText(i) for i in range(combo.count())]
-        assert "llava:7b" in items
+        assert "qwen3-vl:4b-instruct" in items
 
     def test_save_persists_ollama_model_to_keyring(
         self, qapp, mocker, monkeypatch
@@ -491,9 +489,9 @@ class TestOllamaModelDropdown:
         dlg._key_inputs["LLM"].setText("http://localhost:11434")
         dlg._key_inputs["STT"].setText("stt-key")
         dlg._key_inputs["TTS"].setText("tts-key")
-        dlg._model_combos["LLM"].setCurrentText("qwen2.5-vl")
+        dlg._model_combos["LLM"].setCurrentText("my-vision-model")
         dlg._on_save()
-        assert saved[("clicky-windows", "OLLAMA_MODEL_VISION")] == "qwen2.5-vl"
+        assert saved[("clicky-windows", "OLLAMA_MODEL_VISION")] == "my-vision-model"
 
     def test_save_persists_draw_toggle(self, qapp, mocker, monkeypatch):
         """Ticking the Draw checkbox persists ANNOTATION_MODE=on on Save."""

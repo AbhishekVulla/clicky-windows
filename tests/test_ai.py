@@ -1850,3 +1850,207 @@ class TestWindowsPrompt:
         from ai import _CLICKY_ANNOTATION_SYSTEM_PROMPT, _CLICKY_SYSTEM_PROMPT
         for prompt in (_CLICKY_SYSTEM_PROMPT, _CLICKY_ANNOTATION_SYSTEM_PROMPT):
             assert "windows" in prompt.lower()
+
+
+class TestOllamaNativeBoxes:
+    """Local Qwen models point when asked in the box format they were trained
+    on; Clicky's [POINT] tag gets nothing usable from them."""
+
+    @staticmethod
+    def _answer(model_id, text, size=(1280, 800), **kw):
+        from PIL import Image
+        from ai import OllamaClient
+        client = OllamaClient(host="http://localhost:11434", model_id=model_id)
+        stream = client.ask_stream(images=[(Image.new("RGB", size), "label")],
+                                   transcript="where is it?", history=[], **kw)
+        stream._accumulated = text
+        stream._deltas_exhausted = True
+        return stream
+
+    def test_qwen3_vl_box_is_read_on_its_0_1000_grid(self):
+        text = ('the settings tab is up top.\n```json\n'
+                '{"bbox_2d": [690, 218, 752, 250], "label": "Settings"}\n```')
+        result = self._answer("ollama/qwen3-vl:4b-instruct", text).final_result()
+        assert result.coordinate == (923, 187)
+        assert result.element_label == "Settings"
+        assert result.spoken_text == "the settings tab is up top."
+
+    def test_qwen2_5_vl_box_is_read_in_pixels(self):
+        text = 'click eco audit. {"bbox_2d": [374, 49, 444, 65], "label": "Eco Audit"}'
+        result = self._answer("ollama/qwen2.5vl:3b", text).final_result()
+        assert result.coordinate == (409, 57)
+        assert result.spoken_text == "click eco audit."
+
+    def test_an_answer_without_a_box_points_nowhere(self):
+        result = self._answer("ollama/qwen3-vl:4b-instruct", "html is the skeleton of the web.").final_result()
+        assert result.coordinate is None
+        assert result.spoken_text == "html is the skeleton of the web."
+
+    def test_qwen_is_asked_for_its_own_box_format(self):
+        messages = self._answer("ollama/qwen3-vl:4b-instruct", "")._payload["messages"]
+        system, question = messages[0]["content"], messages[-1]["content"]
+        assert question.startswith("where is it?") and "bbox_2d" in question
+        assert "[POINT:" not in system and "coordinate space" not in system
+
+    def test_other_local_models_keep_the_point_tag(self):
+        system = self._answer("ollama/llava:7b", "")._payload["messages"][0]["content"]
+        assert "[POINT:" in system and "bbox_2d" not in system
+
+    def test_draw_mode_keeps_its_own_prompt(self):
+        from ai import _CLICKY_ANNOTATION_SYSTEM_PROMPT
+        stream = self._answer("ollama/qwen3-vl:4b-instruct", "",
+                              system_prompt=_CLICKY_ANNOTATION_SYSTEM_PROMPT)
+        assert stream._payload["messages"][0]["content"].startswith(_CLICKY_ANNOTATION_SYSTEM_PROMPT[:80])
+
+    def test_a_slow_local_answer_is_not_cut_off(self, mocker):
+        """On a laptop without a strong GPU a local model can take minutes before
+        its first word; Ollama not running at all still fails fast."""
+        import httpx
+        client_cls = mocker.patch("ai.httpx.Client")
+        self._answer("ollama/qwen3-vl:4b-instruct", "").__enter__()
+        timeout = client_cls.call_args.kwargs["timeout"]
+        assert isinstance(timeout, httpx.Timeout)
+        assert timeout.read >= 300 and timeout.connect <= 10
+
+
+class TestOllamaBoxHardening:
+    """Whatever shape the box comes in, none of it is spoken, and full model
+    names are recognised like short ones."""
+
+    @staticmethod
+    def _parse(text, style="pixels"):
+        from ai import parse_box_answer
+        return parse_box_answer(text, style, (1280, 800))
+
+    @pytest.mark.parametrize("text,point", [
+        ('click reset.\n{"bbox_2d": [10, 20, 30, 40], "label": "Format {code}"}', (20, 30)),
+        ('click reset.\n```JSON\n{"bbox_2d": [10, 20, 30, 40]}\n```', (20, 30)),
+        ('click reset.\n[10, 20, 30, 40]', (20, 30)),
+        ('click reset.\n{"target": {"bbox_2d": [10, 20, 30, 40], "label": "reset"}}', (20, 30)),
+        ('click reset.\n[{"bbox_2d": [10, 20, 30, 40]}, {"bbox_2d": [50, 60, 70, 80]}]', (20, 30)),
+        ('click reset.\n{"bbox_2d": [10, 20, 3', None),
+    ])
+    def test_nothing_structured_is_ever_spoken(self, text, point):
+        result = self._parse(text)
+        assert result.spoken_text == "click reset."
+        assert result.coordinate == point
+
+    def test_a_point_tag_still_works_as_a_fallback(self):
+        result = self._parse("open settings. [POINT:400,300:settings]")
+        assert result.coordinate == (400, 300) and result.spoken_text == "open settings."
+
+    def test_only_the_cursor_screenshot_is_sent_to_a_box_model(self):
+        from PIL import Image
+        from ai import OllamaClient
+        client = OllamaClient(host="http://localhost:11434", model_id="ollama/qwen3-vl:4b-instruct")
+        stream = client.ask_stream(images=[(Image.new("RGB", (1280, 800)), "a"), (Image.new("RGB", (1920, 1080)), "b")],
+                                   transcript="where?", history=[])
+        assert len(stream._payload["messages"][-1]["images"]) == 1
+
+    @pytest.mark.parametrize("model_id,style", [
+        ("registry.ollama.ai/library/qwen3-vl:4b-instruct", "grid"),
+        ("hf.co/Qwen/Qwen3-VL-4B-Instruct-GGUF:Q4_K_M", "grid"),
+        ("qwen2.5-vl:7b", "pixels"),
+        ("qwen3:8b", None),
+        ("llava:7b", None),
+    ])
+    def test_model_families_are_recognised_by_any_name(self, model_id, style):
+        from ai import OllamaClient
+        assert OllamaClient(host="http://localhost:11434", model_id=model_id).box_style == style
+
+
+class TestOllamaBoxSpeech:
+    """Only the box is cut from the speech: ordinary symbols stay, a box beats a
+    [POINT] tag, and draw mode keeps its shape tags."""
+
+    @staticmethod
+    def _parse(text, style="pixels"):
+        from ai import parse_box_answer
+        return parse_box_answer(text, style, (1280, 800))
+
+    @pytest.mark.parametrize("text", [
+        "press control [ to outdent. then save.",
+        "use `len(items)` to count them.",
+        "a { starts the object. close it with }.",
+        "the values are [1, 2, 3, 4]. add them.",
+    ])
+    def test_ordinary_symbols_are_spoken_in_full(self, text):
+        result = self._parse(text)
+        assert result.spoken_text == text and result.coordinate is None
+
+    @pytest.mark.parametrize("text,speech,point", [
+        (r'click reset. {"bbox_2d": [10, 20, 30, 40], "label": "Use \"}\" now"} then continue.',
+         "click reset. then continue.", (20, 30)),
+        (r'click reset. {"label": "Save \"as\"", "bbox_2d": [10, 20, 30, 40]} then continue.',
+         "click reset. then continue.", (20, 30)),
+        ('click reset. {"confidence": 0.9, "bbox_2d": [10, 20, 30, 40]} then continue.',
+         "click reset. then continue.", (20, 30)),
+        ('click reset. {"label": "reset", "bbox_2', "click reset.", None),
+        ("click reset. [10, 20, 3", "click reset.", None),
+        ("click reset. [[10, 20, 30, 40], [50, 60, 70, 80]]", "click reset.", (20, 30)),
+        ("the bbox_2d field contains the corners. leave it alone.",
+         "the bbox_2d field contains the corners. leave it alone.", None),
+        ('press control [\n{"bbox_2d": [10, 20, 30, 40]} then save.', "press control [ then save.", (20, 30)),
+        ('click reset. {"bbox_2d": [10, 20, 30, 40]} [POINT:900,700:wrong] then continue.',
+         "click reset. then continue.", (20, 30)),
+        ('click reset. {"bbox_2d":[10,20,30,40]} {"bbox_2d":[50,60,70,80]}', "click reset.", (20, 30)),
+        ('click reset. {"label": "row [1, 2, 3, 4]", "bbox_2d": [10, 20, 30, 40]}', "click reset.", (20, 30)),
+        ('click reset.\n```json\n{}\n```', "click reset.", None),
+        ('Press [E]. {"bbox_2d":[10,20,30,40]}', "Press [E].", (20, 30)),
+        ("Press [E].", "Press [E].", None),
+        ("Press [", "Press [", None),
+        ("The empty object is {}", "The empty object is {}", None),
+        ('The configuration is {"enabled":true}', 'The configuration is {"enabled":true}', None),
+        ('Click reset. {"bbox_2d":[NaN,20,30,40]}', "Click reset.", None),
+        ('Click reset. {"bbox_2d":[1e308,20,1e308,40]}', "Click reset.", None),
+        ('Click reset. {"bbox_2d":[10,20,30,40]', "Click reset.", (20, 30)),
+        ('Click reset. {"bbox_2d":[NaN,20,30,40],', "Click reset.", None),
+        ('Click reset. {"metadata":[1,2,3,4],"bbox_2d":[10,20,30,40],"label":"Reset"}', "Click reset.", (20, 30)),
+        ('Click reset. {"bbox_2d":[10,20,30,40],"bbox_2d":[50,60,70,80]}', "Click reset.", (20, 30)),
+        ("Click reset. [10,20,30,40] [POINT:900,700:wrong]", "Click reset.", (20, 30)),
+        ("Click reset. [10,20,30,40] [50,60,70,80]", "Click reset.", (20, 30)),
+        ('Click reset. {"bbox_2d":[10,20,30,40]} [POINT:20,30:Reset', "Click reset.", (20, 30)),
+        ("the box is [1, 2, 3, 4].", "the box is [1, 2, 3, 4].", None),
+        ('Click reset. {"bbox_2d":[10,20,30,40],"label":"Save "as""}', "Click reset.", (20, 30)),
+        ('Click reset. {"bbox_2d":[10,20,30,40],"label":"Save "as""} then save.', "Click reset. then save.", (20, 30)),
+        (r'Click reset. {"bbox_2d":[10,20,30,40],"label":"C:\Users"}', "Click reset.", (20, 30)),
+        ("Click reset. [[10,20,30,40],[50,60", "Click reset.", (20, 30)),
+        ('Click reset.\n```json\n{\n  "bbox_2d": [10, 20, 30, 40],\n  "label": "Save "as""\n}\n```', "Click reset.", (20, 30)),
+        ("type [point into the search field.", "type [point into the search field.", None),
+        ('Click reset. {"label":"row [1,2,3,4]","bbox_2d":[10,20', "Click reset.", None),
+    ])
+    def test_only_the_json_is_cut_and_the_first_box_wins(self, text, speech, point):
+        result = self._parse(text)
+        assert (result.spoken_text, result.coordinate) == (speech, point)
+
+    def test_the_label_beside_the_box_wins_over_other_keys(self):
+        result = self._parse('go. {"metadata":[1,2,3,4],"bbox_2d":[10,20,30,40],"label":"Reset"}')
+        assert result.element_label == "Reset"
+
+    def test_deeply_nested_json_neither_crashes_nor_is_spoken(self):
+        result = self._parse("Click reset. " + "[" * 1100 + '{"bbox_2d":[10,20,30,40]}' + "]" * 1100)
+        assert result.spoken_text == "Click reset."
+
+    def test_the_label_comes_from_the_chosen_box(self):
+        result = self._parse(r'go. {"bbox_2d": [10, 20, 30, 40], "label": "Use \"}\" now"}')
+        assert result.element_label == 'Use "}" now'
+
+    def test_a_box_beats_a_point_tag_and_neither_is_spoken(self):
+        result = self._parse('click reset. {"bbox_2d": [10, 20, 30, 40]} [POINT:900,700:wrong]')
+        assert result.spoken_text == "click reset."
+        assert result.coordinate == (20, 30)
+
+    def test_draw_mode_keeps_its_shape_tags(self):
+        from PIL import Image
+        from ai import OllamaClient, _CLICKY_ANNOTATION_SYSTEM_PROMPT
+        client = OllamaClient(host="http://localhost:11434", model_id="ollama/qwen3-vl:4b-instruct")
+        stream = client.ask_stream(images=[(Image.new("RGB", (1280, 800)), "a")], transcript="what's wrong?",
+                                   history=[], system_prompt=_CLICKY_ANNOTATION_SYSTEM_PROMPT)
+        stream._accumulated = "here is the error. [CIRCLE:100,200,30:error]"
+        stream._deltas_exhausted = True
+        assert "[CIRCLE:100,200,30:error]" in stream.final_result().spoken_text
+
+    def test_a_box_model_knows_it_sees_only_the_cursor_screen(self):
+        from ai import _CLICKY_BOX_SYSTEM_PROMPT
+        assert "move the cursor" in _CLICKY_BOX_SYSTEM_PROMPT
+        assert "multiple screen images" not in _CLICKY_BOX_SYSTEM_PROMPT
