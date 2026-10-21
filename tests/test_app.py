@@ -444,6 +444,45 @@ class TestClickyApp:
             "Batch tts.speak() should be replaced with sentence-level streaming"
         )
 
+    @pytest.mark.parametrize("deltas,said", [
+        (["Click reset.      ", "Then save.\n\n", "It is done."], ["Click reset.", "Then save.", "It is done."]),
+        (["Click\nreset. ", "Then\tsave. ", "Done."], ["Click\nreset.", "Then\tsave.", "Done."]),
+    ])
+    @pytest.mark.parametrize("draw_mode", ["off", "on"])
+    def test_extra_spaces_between_sentences_never_repeat_speech(self, mocker, draw_mode, deltas, said):
+        """Sentences are spoken as they stream; the rest is spoken at the end.
+        Extra whitespace between sentences must not shift where the rest starts."""
+        mocker.patch("app.ANNOTATION_MODE", draw_mode)
+        import queue as _queue
+        import threading
+        from PIL import Image
+        app = self._make_app(mocker)
+        fake_cap = mocker.MagicMock()
+        fake_cap.image = Image.new("RGB", (1280, 800))
+        fake_cap.label = "screen 1 of 1"
+        fake_cap.scale_x = 1.0; fake_cap.scale_y = 1.0
+        fake_cap.monitor = {"left": 0, "top": 0, "width": 1920, "height": 1080}
+        fake_cap.target_width = 1280; fake_cap.target_height = 800
+        fake_cap.is_cursor_screen = True
+        app._press_captures = [fake_cap]
+        app._press_memory = ""
+        app._press_cursor_pos = (100, 100)
+        app._stt.stop_recording.return_value = "what now"
+
+        fake_stream = mocker.MagicMock()
+        fake_stream.text_deltas.return_value = iter(deltas)
+        fake_stream.final_result.return_value = mocker.MagicMock(
+            spoken_text="".join(deltas).strip(), coordinate=None, element_label=None, screen_number=None,
+        )
+        app._ai.ask_stream.return_value.__enter__ = mocker.MagicMock(return_value=fake_stream)
+        app._ai.ask_stream.return_value.__exit__ = mocker.MagicMock(return_value=False)
+        capture_queue: _queue.Queue = _queue.Queue(maxsize=1)
+        capture_queue.put(([fake_cap], "", "test: reusing press-time captures"))
+        app._pipeline_worker("TEST.EXE", "TestWindow", threading.Event(), capture_queue)
+
+        spoken = [c.args[0] for c in app._tts.speak_sentence.call_args_list]
+        assert spoken == said
+
     def test_release_capture_worker_reuses_on_medium_cursor_move(self, mocker):
         """150px reuse threshold verified at the worker level.
         Cursor moves 106px, within 'target hover' intent rather than 'user

@@ -28,6 +28,16 @@ class TestParsePointTag:
         assert result.element_label == "save button"
         assert result.screen_number is None
 
+    @pytest.mark.parametrize("text", ["click reset. [POINT:20,30", "click reset. [POINT:", "click reset. [point:20"])
+    def test_a_cut_off_tag_is_never_spoken(self, text):
+        from ai import parse_point_tag
+        result = parse_point_tag(text)
+        assert (result.spoken_text, result.coordinate) == ("click reset.", None)
+
+    def test_the_word_point_in_brackets_is_still_spoken(self):
+        from ai import parse_point_tag
+        assert parse_point_tag("type [point into the search field.").spoken_text == "type [point into the search field."
+
     def test_point_none(self):
         from ai import parse_point_tag
         result = parse_point_tag(
